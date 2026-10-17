@@ -17,6 +17,10 @@ context: |
     path is the executable specification; the Rust path must match it on
     float64 within 1e-12 relative tolerance on every probe test.
   - GPU/array compute stays in PyTorch. Rust kernels are CPU-only in v0.1.
+    Custom GPU kernels are out of scope until profiling shows the PyTorch
+    path leaves material performance unclaimed; any future raw-GPU binding
+    must be actively maintained (checked against the registry at decision
+    time). Abandoned crates are never adopted.
   - A C/C++/Cython/CUDA-C++ dependency is BANNED anywhere in the build graph
     (runtime or test). If systems speed is needed, it is Rust via PyO3 or
     nothing. This rule extends to optional extras and test tooling.
