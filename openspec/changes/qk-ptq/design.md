@@ -108,3 +108,71 @@ Each entry: assumption → rationale → how a wrong choice would surface. Paper
 - **Consumes `qk-representation`:** the qpk1 container (serialize/reload of packed binaries + float scales) and the BPW-from-bytes accounting used by the end-to-end gate. Required semantics, in prose: serialization must be byte-exact across round trips; BPW accounting must count serialized bytes (header + payload), not parameter counts; effective BPW = total serialized bytes × 8 / total represented weight entries, and the gate requires this < 1.0.
 - **Consumes `qk-kernels`:** pack/unpack (−1→0, +1→1 bit mapping, bit identity across round trips), parity-gated dispatch (NumPy reference path is the executable specification; Rust path matches at 1e-12 rel on float64 probes per config.yaml). `sign_estimate` and `joint_itq` belong to the QAT lane ([LB], [LB2]) and are *not* consumed by this change; the LB-ADMM SVID proxy (A-5) is internal to this pipeline's initialization.
 - **No function signatures are invented here** for sibling capabilities; the qpk1 and dispatch contracts are owned by their lanes. Any change this pipeline needs from them is a cross-lane negotiation recorded as an Open Question (OQ-1).
+
+## 11. Implementation crystallization (2026-10-17, tasks 1.1–7.3)
+
+- **A-5 SVID text corrected by measurement.** The design bundled two
+  incompatible readings ("least-squares fit" vs "renormalize to preserve
+  the column norm"). Implemented and measured: the plain least-squares
+  projection s·(sᵀz/‖s‖²) is stable and sign-preserving as intended; the
+  norm-anchored variant destabilizes ADMM consensus (gate logit delta
+  diverged past 1e9); an earlier constant-magnitude ±c column
+  reconstruction measured 0.99 relative error on an exact rank-r target.
+  The projection reading is canonical; §2/A-5 prose to be reconciled at
+  archive time.
+- **Weight convention pinned repo-wide:** W_q = (s1⊙Ub) @ (s2⊙Vb)ᵀ of
+  shape (dout, din); nn.Linear applies x @ W_q.T. Five sites previously
+  disagreed (FactorizedLinear.forward, _quantized_forward_block,
+  scale_calib.scaled_forward, _set_linear, test_api._apply_to_host);
+  square test layers hid the split. All agree with serialize-time
+  arithmetic now.
+- **magnitude_balance alpha refit** fits the scalar against the CURRENT
+  balanced product (s1⊙Ub)(s2⊙Vb)ᵀ, not the raw sign matrix — fitting
+  against signs double-counted scale magnitude and collapsed the product.
+  The global alpha closes the absolute-scale degree of freedom [NQ]
+  Eq. 7 leaves open (informed implementation choice).
+- **Scale canonicalization for lossless round trips:** quantize_model
+  rounds s1/s2 through the config's scale_dtype (float16 default) at
+  finalization, BEFORE writing back to the host — the container's values
+  ARE the artifact scales (rounding only inside serialize() made
+  in-memory and reloaded forwards disagree).
+- **Bias semantics (qpk1 has no bias field):** biases are host state.
+  STE optimizes only (U, V, s1, s2); TuneFP bias movement is reverted
+  before _set_linear; deserialize leaves st.bias=None; attach_to copies
+  a bias only when the artifact carries one, else preserves the host's.
+- **A-9 scope filter is full-module-path based** (_quantizable_names,
+  canonical definition): leaf-name filtering excluded every nested layer;
+  heads under blocks excluded; quantize_model asserts exact scope
+  agreement. Layer artifact names are host module paths ("block0.fc1") —
+  flat local names collided across blocks. Phase-1 gradient statistics
+  (OQ-2 estimator: mean squared weight-gradient rows per input feature
+  from a uniform-cotangent backward) are collected, but per-block
+  preconditioners are built from per-block stats at reconstruction time;
+  threading Phase-1 stats through reconstruct_model(stats_book=...) is
+  plumbed and unused — open design point for the QAT lane.
+- **Per-block stats dtype fix:** the block-local statistics pass consumes
+  the captured float activations x_b; raw token-id batches never reach a
+  float Linear (adapted only through the block's own embedding for direct
+  reconstruct_block calls, typed error if none exists).
+- **Phase-3 teacher** is a structural deep copy taken before Phase 2
+  (the host is mutated in place; the mutated host as its own teacher made
+  KD vacuous). Phase-3 tuned scales are written back so host forward ==
+  artifact forward.
+- **A-8 gate construction (threshold held, unedited at 1.0):** the seeded
+  gate model draws weights FROM the ±1-latent class ((s1⊙Ub)(s2⊙Vb)ᵀ·scale)
+  — a Gaussian low-rank seed is not in the latent span (measured 0.73
+  rel-error floor even for a perfect solver) — and is a wide MLP
+  (32→128→32) because a square 32×32 layer cannot go sub-1-BPW at any
+  rank (24-byte header + 2 B/scale ≥ 1.19 bits). Measured: honest
+  artifact max |Δlogit| 0.795 ≤ 1.0; BPW 0.984375 < 1.0 from serialized
+  bytes; corrupted artifact (byte 25 flipped — sign bit of the first f16
+  scale, every layer) measures 1.47 and FAILS, proving the gate
+  non-vacuous. Byte-25 chosen by measurement: factor/mantissa flips move
+  logits ~1e-4 (4 orders below gate resolution); that corruption class
+  is covered by byte-exact round trip + pack/unpack parity assertions.
+  Gate stage overrides per A-10: TuneFP off, STE 3 epochs @ 2e-3, KD
+  4 epochs @ 1e-3 (2e-2 diverged); paper defaults remain PTQConfig
+  defaults. OQ-4's 8×64 gate calibration confirmed as specified.
+- **Known wart (next lb_admm pass):** pre-existing numpy overflow
+  RuntimeWarning in magnitude_balance on full-rank targets
+  (warning-only; test_scn_block_loop_order stays green).

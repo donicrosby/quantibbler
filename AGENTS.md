@@ -30,7 +30,8 @@ proposing or implementing anything.
 - `crates/quantibbler-kernels/` — Rust kernels; rlib for the server, PyO3
   face for Python (uv workspace member)
 - `crates/quantibbler-server/` — pure-Rust OpenAI-compatible server
-  (planned: see openspec/changes/qk-server)
+  (OpenAI-compatible endpoints over qpk1 model dirs; see
+  openspec/changes/qk-server)
 - `openspec/` — specs and active changes
 - `docs/papers/` — pinned reference papers
 - `tools/` — utilities
