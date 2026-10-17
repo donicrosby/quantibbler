@@ -56,6 +56,18 @@ context: |
     (0.8.1, updated 2026-04) as the GPU substrate ONLY with registry
     evidence and a profile showing CPU leaves material performance
     unclaimed. Abandoned crates are never adopted.
+  - For the kernels' own GPU face, the leading candidate is CubeCL
+    (tracel-ai/cubecl, MIT/Apache-2.0): kernel-authoring framework —
+    Rust source compiled to CUDA / HIP-ROCm / Metal / wgpu / CPU(LLVM).
+    Registry evidence 2026-10-17: v0.11.0 (2026-10-06), repo pushed
+    2026-10-16, 681k recent downloads. Rationale: one kernel source
+    covers NVIDIA rental GPUs AND AMD ROCm homelab hardware; the CPU
+    backend allows cargo-test parity probes without a GPU. Cautions:
+    0.x API churn (four pre-releases preceded 0.11) and JIT
+    first-run compilation cost in server contexts. Adopt only for a
+    profile-justified GPU lane, pinned per the freshness rule, with
+    backend-parity probes (packed bits identical across CUDA/HIP/CPU
+    runs; float64 rel 1e-12 vs the NumPy reference).
 
   ## Method invariants (from the pinned papers in docs/papers/)
 
