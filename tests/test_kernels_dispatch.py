@@ -7,9 +7,6 @@ plus the identical-signature surface check on both backends.
 
 from __future__ import annotations
 
-import builtins
-import importlib
-
 import numpy as np
 import pytest
 
@@ -130,5 +127,3 @@ def test_dispatch_env_restored_between_tests(monkeypatch):
     monkeypatch.delenv("QUANTIBBLER_BACKEND", raising=False)
     # backend() auto-detects; the two baseline tests must stay green
     assert k.backend() in {"rust", "numpy-reference"}
-    # import machinery sanity after all the monkeypatching in this module
-    importlib.reload(builtins)  # no-op but proves import system is intact

@@ -11,8 +11,6 @@ pub mod cli;
 pub mod engine;
 #[path = "../src/model/mod.rs"]
 pub mod model;
-#[path = "../src/model/qpk1.rs"]
-pub mod qpk1;
 #[path = "../src/sampler.rs"]
 pub mod sampler;
 

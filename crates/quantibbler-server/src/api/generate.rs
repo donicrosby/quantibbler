@@ -37,19 +37,47 @@ fn new_id(prefix: &str) -> String {
     format!("{prefix}-{x}{n}", x = now())
 }
 
-fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+pub(crate) fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     if let Some(expected) = &state.api_key {
         let got = headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "));
         match got {
-            Some(key) if key == expected => Ok(()),
+            // Length-extend to a common size so success does not correlate
+            // with the submitted key's length (review finding).
+            Some(key) if ct_eq(key.as_bytes(), expected.as_bytes()) => Ok(()),
             _ => Err(ApiError::unauthorized()),
         }
     } else {
         Ok(())
     }
+}
+
+/// Constant-time-ish equality over the length-extended inputs. In v0.1 the
+/// secret is a locally provisioned bearer token, not a password-derived
+/// value; the goal is not removing a side channel from a hostile shared
+/// host (out of threat model: loopback + TLS-terminating reverse proxy,
+/// design D7) but not leaking success-vs-failure through timing.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    let n = a.len().max(b.len());
+    let mut diff = (a.len() ^ b.len()) as u8;
+    for i in 0..n {
+        diff |= a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0);
+    }
+    diff == 0
+}
+
+/// Trim decoded text at the EARLIEST stop-sequence occurrence (the sync
+/// path returns pre-stop text exactly as the OpenAI API does).
+fn cut_at_earliest_stop<'a>(text: &'a str, stops: &[String]) -> &'a str {
+    let mut end = text.len();
+    for stop in stops {
+        if let Some(pos) = text.find(stop.as_str()) {
+            end = end.min(pos);
+        }
+    }
+    &text[..end]
 }
 
 fn validate_common(model: &str, state: &AppState, max_tokens: Option<u32>) -> Result<(), ApiError> {
@@ -116,7 +144,7 @@ pub async fn chat_completions(
     validate_common(&req.model, &state, req.max_tokens)?;
     let prompt_text = chat_prompt_text(&req.messages)?;
     let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
-    let stop = req.stop.as_ref().and_then(StopSequence::first);
+    let stop = req.stop.as_ref().and_then(StopSequence::as_list);
 
     if req.stream {
         stream_response(&state, StreamShape::Chat, &prompt_text, max_tokens, stop).await
@@ -127,6 +155,13 @@ pub async fn chat_completions(
             .tokenizer
             .decode(&out.completion_tokens, false)
             .map_err(|e| ApiError::internal(format!("detokenize: {e}")))?;
+        // OpenAI semantics: returned content is pre-stop text. The completing
+        // token is already excluded engine-side; this cuts any stop-string
+        // remainder spanning the last emitted token.
+        let text = match stop {
+            Some(stops) => cut_at_earliest_stop(&text, stops).to_string(),
+            None => text,
+        };
         Ok(Json(ChatCompletionResponse {
             id: new_id("chatcmpl"),
             object: "chat.completion".into(),
@@ -156,7 +191,7 @@ pub async fn completions(
     let Json(req) = body.map_err(crate::api::json_rejection_error)?;
     validate_common(&req.model, &state, req.max_tokens)?;
     let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
-    let stop = req.stop.as_ref().and_then(StopSequence::first);
+    let stop = req.stop.as_ref().and_then(StopSequence::as_list);
 
     if req.stream {
         stream_response(&state, StreamShape::Text, &req.prompt, max_tokens, stop).await
@@ -167,6 +202,13 @@ pub async fn completions(
             .tokenizer
             .decode(&out.completion_tokens, false)
             .map_err(|e| ApiError::internal(format!("detokenize: {e}")))?;
+        // OpenAI semantics: returned content is pre-stop text. The completing
+        // token is already excluded engine-side; this cuts any stop-string
+        // remainder spanning the last emitted token.
+        let text = match stop {
+            Some(stops) => cut_at_earliest_stop(&text, stops).to_string(),
+            None => text,
+        };
         Ok(Json(CompletionResponse {
             id: new_id("cmpl"),
             object: "text_completion".into(),
@@ -188,7 +230,7 @@ pub async fn generate_sync(
     engine: &Arc<crate::engine::Engine>,
     prompt_text: &str,
     max_tokens: u32,
-    stop: Option<&str>,
+    stop: Option<&[String]>,
 ) -> Result<GenerationOutput, ApiError> {
     let tokens = engine
         .encode(prompt_text)
@@ -212,7 +254,7 @@ async fn stream_response(
     shape: StreamShape,
     prompt_text: &str,
     max_tokens: u32,
-    stop: Option<&str>,
+    stop: Option<&[String]>,
 ) -> Result<Response, ApiError> {
     let engine = Arc::clone(&state.engine);
     let id = match shape {
@@ -222,7 +264,7 @@ async fn stream_response(
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(16);
     let model_id = state.model_id.clone();
     let is_chat = matches!(shape, StreamShape::Chat);
-    let stop_owned = stop.map(str::to_string);
+    let stop_owned = stop.map(<[String]>::to_vec);
     let prompt_owned = prompt_text.to_string();
     tokio::spawn(async move {
         stream_engine(
@@ -256,7 +298,7 @@ async fn stream_engine(
     is_chat: bool,
     prompt_text: &str,
     max_tokens: u32,
-    stop: Option<&str>,
+    stop: Option<&[String]>,
     tx: mpsc::Sender<Result<Event, Infallible>>,
 ) {
     let created = now();
@@ -287,6 +329,14 @@ async fn stream_engine(
             return;
         }
     };
+    // Incremental detokenization: whole-sequence decode with a
+    // character-safe released prefix (a codepoint split across two tokens
+    // can never emit invalid UTF-8) and stop-sequence withholding (a token
+    // that begins a stop string is never emitted before the sequence can
+    // be ruled out). skip_special_tokens=true keeps EOS-class tokens out
+    // of the visible stream.
+    let mut decoder = crate::api::delta::DeltaDecoder::new(stop.unwrap_or(&[]).to_vec(), true);
+    let mut all_tokens: Vec<u32> = Vec::new();
     // First content delta carries the assistant role for chat (SR-4.1).
     let mut first = true;
     loop {
@@ -299,8 +349,10 @@ async fn stream_engine(
                 break;
             }
         };
-        let piece = match engine.tokenizer.decode(&[token], false) {
-            Ok(p) => p,
+        all_tokens.push(token);
+        let piece = match decoder.push(&engine.tokenizer, token) {
+            Ok(Some(p)) => p,
+            Ok(None) => String::new(),
             Err(e) => {
                 let _ = tx
                     .send(Ok(Event::default().data(err_event(&format!("decode: {e}")))))
@@ -308,6 +360,10 @@ async fn stream_engine(
                 break;
             }
         };
+        if piece.is_empty() && !first {
+            // Withheld entirely (stop prefix or no new complete character).
+            continue;
+        }
         let event = if is_chat {
             serde_json::to_string(&ChatChunk {
                 id: id.clone(),
@@ -340,7 +396,6 @@ async fn stream_engine(
                 }],
             })
         };
-        first = false;
         match event {
             Ok(json) => {
                 if tx.send(Ok(Event::default().data(json))).await.is_err() {
@@ -348,6 +403,7 @@ async fn stream_engine(
                     // permit drops with this task (SR-4.3).
                     break;
                 }
+                first = false;
             }
             Err(e) => {
                 let _ = tx
@@ -355,6 +411,65 @@ async fn stream_engine(
                     .await;
                 break;
             }
+        }
+    }
+    // Flush: on a stop-sequence hit the withheld prefix is dropped (it is
+    // the stop string's beginning); on EOS/length the remainder is complete
+    // text. The hit detection mirrors the engine's own contains() check so
+    // both paths agree on what counts as a stop.
+    let decoded = engine
+        .tokenizer
+        .decode(&all_tokens, true)
+        .unwrap_or_default();
+    let hit = stop.and_then(|stops| {
+        stops
+            .iter()
+            .find(|s| decoded.contains(s.as_str()))
+            .map(String::as_str)
+    });
+    match decoder.finish(&engine.tokenizer, hit) {
+        Ok(tail) if !tail.is_empty() => {
+            let event = if is_chat {
+                serde_json::to_string(&ChatChunk {
+                    id: id.clone(),
+                    object: "chat.completion.chunk".into(),
+                    created,
+                    model: model_id.clone(),
+                    choices: vec![StreamChoice {
+                        index: 0,
+                        delta: Delta {
+                            role: if first {
+                                Some("assistant".into())
+                            } else {
+                                None
+                            },
+                            content: Some(tail),
+                        },
+                        finish_reason: None,
+                    }],
+                })
+            } else {
+                serde_json::to_string(&TextChunk {
+                    id: id.clone(),
+                    object: "text_completion.chunk".into(),
+                    created,
+                    model: model_id.clone(),
+                    choices: vec![StreamTextChoice {
+                        index: 0,
+                        text: tail,
+                        finish_reason: None,
+                    }],
+                })
+            };
+            if let Ok(json) = event {
+                let _ = tx.send(Ok(Event::default().data(json))).await;
+            }
+        }
+        Ok(_) => {}
+        Err(e) => {
+            let _ = tx
+                .send(Ok(Event::default().data(err_event(&format!("decode: {e}")))))
+                .await;
         }
     }
     let finish = session.finish().unwrap_or(FinishReason::Length).as_str();

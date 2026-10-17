@@ -1066,12 +1066,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "quantibbler-qpk1"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "quantibbler-server"
 version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
  "quantibbler-kernels",
+ "quantibbler-qpk1",
  "serde",
  "serde_json",
  "tokenizers",

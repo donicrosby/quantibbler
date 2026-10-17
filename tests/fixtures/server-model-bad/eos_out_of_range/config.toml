@@ -1,0 +1,6 @@
+# qk-server fixture config (design D3)
+vocab_size = 32
+d_model = 4
+eos_token_id = 99
+bos_token_id = 1
+weight_tying = "lm_head=e1@fp32"

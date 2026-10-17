@@ -24,7 +24,13 @@ pub struct Cli {
     #[arg(long = "max-concurrency", default_value_t = 4)]
     pub max_concurrency: usize,
 
-    /// When set, requests must carry `Authorization: Bearer <KEY>` (D7).
+    /// When set, requests must carry `Authorization: Bearer <key>` (D7).
+    /// Prefer `--serve-api-key-file` to keep the key out of argv/`ps`.
     #[arg(long = "serve-api-key")]
     pub serve_api_key: Option<String>,
+
+    /// Read the Bearer key from a file (first line); overrides
+    /// `--serve-api-key`. Recommended over the inline flag.
+    #[arg(long = "serve-api-key-file")]
+    pub serve_api_key_file: Option<String>,
 }

@@ -1,6 +1,7 @@
 //! API surface (design D1): axum routes, shared state, startup/shutdown.
 //! Every error response flows through [`error::ApiError`] (design D7).
 
+pub mod delta;
 pub mod error;
 pub mod generate;
 pub mod health;
@@ -9,14 +10,18 @@ pub mod types;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use axum::extract::State;
+use axum::http::HeaderMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
-use axum::{Json, Router};
 
+use crate::api::generate::check_auth;
 use crate::cli::Cli;
 use crate::engine::Engine;
 use crate::model::LoadedModel;
@@ -68,6 +73,38 @@ impl std::fmt::Display for StartupError {
 
 impl std::error::Error for StartupError {}
 
+/// Resolve the API key from the CLI config: `--serve-api-key-file` wins
+/// (first line, trailing newline stripped; the file is read once at
+/// startup), falling back to the inline `--serve-api-key` value. Keeping
+/// long-lived keys out of argv keeps them out of `ps` and shell history.
+fn api_key_for_serve(cfg: &crate::cli::Cli) -> Option<String> {
+    if let Some(path) = &cfg.serve_api_key_file {
+        let raw = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("--serve-api-key-file {path}: {e}"));
+        let key = raw.lines().next().unwrap_or("").trim().to_string();
+        if key.is_empty() {
+            panic!("--serve-api-key-file {path}: file is empty");
+        }
+        Some(key)
+    } else {
+        cfg.serve_api_key.clone()
+    }
+}
+
+/// Auth middleware for the unauthenticated-by-handler GET surfaces
+/// (`/health`, `/v1/models`): when a key is configured, these demand it
+/// too — readiness and model-id disclosure are not free (review finding:
+/// key presence otherwise leaks via 401 vs 200 on /v1/models).
+async fn auth_guard(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, ApiError> {
+    check_auth(&state, &headers)?;
+    Ok(next.run(request).await)
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -107,6 +144,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health::health))
         .route("/v1/models", get(models::list))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth_guard,
+        ))
         .route("/v1/chat/completions", post(generate::chat_completions))
         .route("/v1/completions", post(generate::completions))
         .method_not_allowed_fallback(method_not_allowed_405)
@@ -121,11 +162,17 @@ pub async fn serve(cfg: Cli) -> Result<(), StartupError> {
     let model_dir = PathBuf::from(&cfg.model_dir);
     let loaded = crate::model::load(&model_dir)
         .map_err(|e| StartupError(format!("model load failed: {e}")))?;
-    tracing::info!(model_id = %loaded.id, dir = %model_dir.display(), "model loaded");
+    tracing::info!(
+        model_id = %loaded.id,
+        vocab_size = loaded.vocab_size,
+        d_model = loaded.d_model,
+        dir = %model_dir.display(),
+        "model loaded"
+    );
     let state = Arc::new(AppState::new(
         loaded,
         cfg.max_concurrency,
-        cfg.serve_api_key,
+        api_key_for_serve(&cfg),
     ));
     let router = build_router(Arc::clone(&state));
     let addr = format!("{}:{}", cfg.host, cfg.port);
@@ -164,8 +211,3 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
 }
-
-/// Convenience alias for handlers taking `Result<Json<T>, JsonRejection>`
-/// with the rejection mapped through the envelope (SR-7.1/7.3).
-#[allow(dead_code)]
-pub type JsonResult<T> = Result<Json<T>, JsonRejection>;

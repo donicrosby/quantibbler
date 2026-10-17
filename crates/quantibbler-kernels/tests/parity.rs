@@ -254,8 +254,309 @@ fn parity_pack_rejects_non_binary() {
 }
 
 // ---------------------------------------------------------------------------
-// sign_estimate scenarios
+// Task 8.1: dual-face architecture probes (scenario-ID-named).
+// rlib_face_usable_without_python, pyo3_face_thin_binding,
+// single_core_implementation, face_parity_packed_bitidentical,
+// face_parity_float_rel_1e-12, face_parity_extends_numpy_chain.
 // ---------------------------------------------------------------------------
+
+/// Face-parity check for one pack_bits record. Returns 1 check performed.
+fn check_pack_faces(rec: &serde_json::Value) -> usize {
+    let scenario = rec["scenario"].as_str().unwrap();
+    let factor = flat_i8(&rec["inputs"]["factor"]);
+    let (rows, cols) = shape2(&shape_of(&rec["inputs"]["factor"]));
+    let packed = core::pack_bits(&factor, rows, cols).unwrap_or_else(|e| panic!("{scenario}: {e}"));
+    let np = flat_u8(&face_rec(rec, "numpy-reference").unwrap()["packed"]);
+    assert_bytes(
+        &packed,
+        &np,
+        &format!("{scenario}: rlib vs numpy-reference"),
+    );
+    if let Some(pyo3) = face_rec(rec, "pyo3") {
+        assert_bytes(
+            &packed,
+            &flat_u8(&pyo3["packed"]),
+            &format!("{scenario}: rlib vs pyo3 face"),
+        );
+        return 2;
+    }
+    1
+}
+
+/// Face-parity check for one packed_matvec record.
+fn check_matvec_faces(rec: &serde_json::Value) -> usize {
+    let scenario = rec["scenario"].as_str().unwrap();
+    let packed = flat_u8(&rec["inputs"]["packed"]);
+    let rows = shape_of(&rec["inputs"]["packed"])[0];
+    let n_bits = rec["dtypes"]["n_bits"].as_u64().unwrap() as usize;
+    let vec = flat_f64(&rec["inputs"]["vec"]);
+    let out = core::packed_matvec(&packed, rows, n_bits, &vec)
+        .unwrap_or_else(|e| panic!("{scenario}: {e}"));
+    let np = flat_f64(&face_rec(rec, "numpy-reference").unwrap()["result"]);
+    assert_rel(&out, &np, &format!("{scenario}: rlib vs numpy-reference"));
+    if let Some(pyo3) = face_rec(rec, "pyo3") {
+        let dirty = flat_f64(&pyo3["result_dirty"]);
+        let np_dirty = flat_f64(&face_rec(rec, "numpy-reference").unwrap()["result_dirty"]);
+        assert_rel(
+            &dirty,
+            &np_dirty,
+            &format!("{scenario}: dirty pair coherence"),
+        );
+        let out_dirty =
+            core::packed_matvec(&flat_u8(&rec["inputs"]["packed_dirty"]), rows, n_bits, &vec)
+                .unwrap_or_else(|e| panic!("{scenario} dirty: {e}"));
+        assert_rel(
+            &out_dirty,
+            &np_dirty,
+            &format!("{scenario} dirty: rlib vs numpy-reference"),
+        );
+        return 2;
+    }
+    1
+}
+
+/// Face-parity check for one packed_matmul record.
+fn check_matmul_faces(rec: &serde_json::Value) -> usize {
+    let scenario = rec["scenario"].as_str().unwrap();
+    let packed = flat_u8(&rec["inputs"]["packed"]);
+    let rows = shape_of(&rec["inputs"]["packed"])[0];
+    let n_bits = rec["dtypes"]["n_bits"].as_u64().unwrap() as usize;
+    let mat_shape = shape_of(&rec["inputs"]["mat"]);
+    let n_cols = *mat_shape.last().unwrap_or(&0);
+    let mat = flat_f64(&rec["inputs"]["mat"]);
+    let out = core::packed_matmul(&packed, rows, n_bits, &mat, n_cols)
+        .unwrap_or_else(|e| panic!("{scenario}: {e}"));
+    let np = flat_f64(&face_rec(rec, "numpy-reference").unwrap()["result"]);
+    assert_rel(&out, &np, &format!("{scenario}: rlib vs numpy-reference"));
+    if let Some(pyo3) = face_rec(rec, "pyo3") {
+        assert_rel(
+            &out,
+            &flat_f64(&pyo3["result"]),
+            &format!("{scenario}: rlib vs pyo3 face"),
+        );
+        return 2;
+    }
+    1
+}
+
+/// Face-parity check for one joint_itq record.
+fn check_itq_faces(rec: &serde_json::Value) -> usize {
+    let scenario = rec["scenario"].as_str().unwrap();
+    let u_hat = flat_f64(&rec["inputs"]["u_hat"]);
+    let v_hat = flat_f64(&rec["inputs"]["v_hat"]);
+    let (dout, rank) = shape2(&shape_of(&rec["inputs"]["u_hat"]));
+    // v_hat is din x rank: din is its row count.
+    let (din, v_rank) = shape2(&shape_of(&rec["inputs"]["v_hat"]));
+    assert_eq!(
+        v_rank, rank,
+        "{scenario}: fixture rank disagreement u_hat vs v_hat"
+    );
+    let kw = &rec["inputs"]["kwargs"];
+    let (u_t, v_t, n_iter, converged) = core::joint_itq(
+        &u_hat,
+        &v_hat,
+        dout,
+        din,
+        rank,
+        kw["max_iter"].as_u64().unwrap() as usize,
+        kw["tol"].as_f64().unwrap(),
+        kw["seed"].as_u64().unwrap(),
+    )
+    .unwrap_or_else(|e| panic!("{scenario}: {e}"));
+    let np = face_rec(rec, "numpy-reference").unwrap();
+    assert_eq!(
+        n_iter,
+        np["n_iter"].as_u64().unwrap() as usize,
+        "{scenario}: n_iter"
+    );
+    assert_eq!(
+        converged,
+        np["converged"].as_bool().unwrap(),
+        "{scenario}: converged"
+    );
+    // joint_itq's outputs are int8 sign factors, so face parity here is
+    // exact byte equality (strictly stronger than any float tolerance).
+    assert_eq!(
+        u_t,
+        flat_i8(&np["u_t"]),
+        "{scenario}: u_t rlib vs numpy-reference"
+    );
+    assert_eq!(
+        v_t,
+        flat_i8(&np["v_t"]),
+        "{scenario}: v_t rlib vs numpy-reference"
+    );
+    if let Some(pyo3) = face_rec(rec, "pyo3") {
+        assert_eq!(n_iter, pyo3["n_iter"].as_u64().unwrap() as usize);
+        assert_eq!(
+            u_t,
+            flat_i8(&pyo3["u_t"]),
+            "{scenario}: u_t rlib vs pyo3 face"
+        );
+        assert_eq!(
+            v_t,
+            flat_i8(&pyo3["v_t"]),
+            "{scenario}: v_t rlib vs pyo3 face"
+        );
+        return 2;
+    }
+    1
+}
+
+/// Face-parity check for one sign_estimate record.
+fn check_sign_faces(rec: &serde_json::Value) -> usize {
+    let scenario = rec["scenario"].as_str().unwrap();
+    let x = flat_f64(&rec["inputs"]["x"]);
+    let signs = core::sign_estimate(&x);
+    let np = face_rec(rec, "numpy-reference").unwrap();
+    assert_eq!(
+        signs,
+        flat_i8(&np["signs"]),
+        "{scenario}: rlib vs numpy-reference"
+    );
+    if let Some(zeros) = rec["inputs"].get("all_zeros") {
+        assert_eq!(
+            core::sign_estimate(&flat_f64(zeros)),
+            flat_i8(&np["all_zeros_signs"]),
+            "{scenario}: zero tie-break rlib vs numpy-reference"
+        );
+    }
+    if let Some(pyo3) = face_rec(rec, "pyo3") {
+        assert_eq!(
+            signs,
+            flat_i8(&pyo3["signs"]),
+            "{scenario}: rlib vs pyo3 face"
+        );
+        return 2;
+    }
+    1
+}
+
+/// Scenario: rlib_face_usable_without_python — this test binary links the
+/// rlib face alone (dev-dependency pyo3 is never initialized here; the test
+/// harness is a plain Rust integration test with no Python interpreter).
+/// A pack fixture and a matvec fixture through `core::` must reproduce the
+/// NumPy-reference records exactly.
+#[test]
+fn rlib_face_usable_without_python() {
+    let pack = load_scenarios("pack_bits.json")
+        .into_iter()
+        .find(|r| r["scenario"] == "pack_roundtrip_small")
+        .expect("pack_roundtrip_small fixture");
+    assert_eq!(check_pack_faces(&pack), 2, "pyo3 face record expected");
+    let mv = load_scenarios("packed_matvec.json")
+        .into_iter()
+        .find(|r| r["scenario"] == "matvec_padded")
+        .expect("matvec_padded fixture");
+    assert!(check_matvec_faces(&mv) >= 1);
+}
+
+/// Scenario: pyo3_face_thin_binding — inspection of the binding layer finds
+/// boundary conversion and error mapping only: every kernel is a
+/// #[pyfunction], each delegates to `core::`, and no arithmetic markers
+/// (bit twiddling, accumulation, factorizations) appear in the binding.
+#[test]
+fn pyo3_face_thin_binding() {
+    let lib = include_str!("../src/lib.rs");
+    for name in [
+        "pack_bits",
+        "unpack_bits",
+        "sign_estimate",
+        "packed_matvec",
+        "packed_matmul",
+        "joint_itq",
+    ] {
+        assert!(
+            lib.contains(&format!("core::{name}")),
+            "{name} binding must delegate to core"
+        );
+    }
+    for marker in ["1 << ", ">> 3", "count_ones", "Gram", "svd(", "0x"] {
+        assert!(
+            !lib.contains(marker),
+            "arithmetic marker {marker:?} found in binding layer"
+        );
+    }
+}
+
+/// Scenario: single_core_implementation — each v0.1 kernel has exactly one
+/// core implementation, and no duplicated algorithm body exists across faces.
+#[test]
+fn single_core_implementation() {
+    let core_src = include_str!("../src/core.rs");
+    let lib_src = include_str!("../src/lib.rs");
+    for name in [
+        "pack_bits",
+        "unpack_bits",
+        "sign_estimate",
+        "packed_matvec",
+        "packed_matmul",
+        "joint_itq",
+    ] {
+        let def = format!("pub fn {name}");
+        assert_eq!(
+            core_src.matches(&def).count(),
+            1,
+            "{name}: expected exactly one core implementation"
+        );
+        // and no duplicate algorithm body in the binding layer
+        assert!(
+            !lib_src.contains(&def),
+            "{name}: duplicate implementation in the PyO3 binding layer"
+        );
+    }
+}
+
+/// Scenario: face_parity_packed_bitidentical — every committed packing
+/// fixture record: rlib output byte-identical to BOTH face records.
+#[test]
+fn face_parity_packed_bitidentical() {
+    let mut checks = 0;
+    for rec in load_scenarios("pack_bits.json") {
+        checks += check_pack_faces(&rec);
+    }
+    assert!(checks >= 6, "expected the full pack fixture family");
+}
+
+/// Scenario: face_parity_float_rel_1e-12 — matvec, matmul, and joint_itq
+/// through the rlib face agree with both face records within rel 1e-12.
+#[test]
+fn face_parity_float_rel_1e_12() {
+    let mut checks = 0;
+    for rec in load_scenarios("packed_matvec.json") {
+        checks += check_matvec_faces(&rec);
+    }
+    for rec in load_scenarios("packed_matmul.json") {
+        checks += check_matmul_faces(&rec);
+    }
+    for rec in load_scenarios("joint_itq.json") {
+        checks += check_itq_faces(&rec);
+    }
+    assert!(checks >= 7, "expected full matvec+matmul+itq families");
+}
+
+/// Scenario: face_parity_extends_numpy_chain — the whole chain (rlib vs
+/// NumPy reference, PyO3 vs NumPy reference) across every fixture family.
+#[test]
+fn face_parity_extends_numpy_chain() {
+    let mut chains = 0;
+    for rec in load_scenarios("pack_bits.json") {
+        chains += check_pack_faces(&rec);
+    }
+    for rec in load_scenarios("packed_matvec.json") {
+        chains += check_matvec_faces(&rec);
+    }
+    for rec in load_scenarios("packed_matmul.json") {
+        chains += check_matmul_faces(&rec);
+    }
+    for rec in load_scenarios("joint_itq.json") {
+        chains += check_itq_faces(&rec);
+    }
+    for rec in load_scenarios("sign_estimate.json") {
+        chains += check_sign_faces(&rec);
+    }
+    assert!(chains >= 12, "chain sweep must cover every fixture family");
+}
 
 #[test]
 fn parity_sign_zeros() {
@@ -449,249 +750,6 @@ fn parity_itq_preserves_product() {
     for rec in load_scenarios("joint_itq.json") {
         if rec["scenario"] == "itq_preserves_product" {
             check_itq(&rec);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Dual-face architecture scenarios (8.1): structure over the crate layout
-// ---------------------------------------------------------------------------
-
-#[test]
-fn rlib_face_usable_without_python() {
-    // The rlib face runs with no Python runtime involvement: run a fixture
-    // through pack_bits + packed_matvec directly from this pure-Rust test.
-    let rec = load_scenarios("pack_bits.json")
-        .into_iter()
-        .find(|r| r["scenario"] == "pack_roundtrip_padded")
-        .expect("pack_roundtrip_padded fixture");
-    let factor = flat_i8(&rec["inputs"]["factor"]);
-    let (rows, cols) = shape2(&shape_of(&rec["inputs"]["factor"]));
-    let packed = core::pack_bits(&factor, rows, cols).expect("pack_bits");
-    let vec: Vec<f64> = (0..cols).map(|i| (i as f64) * 0.25 - 1.0).collect();
-    let out = core::packed_matvec(&packed, rows, cols, &vec).expect("matvec");
-    assert_eq!(out.len(), rows);
-    // cross-check against the committed NumPy record
-    let dense = i8_to_f64(&core::unpack_bits(&packed, rows, cols).expect("unpack"));
-    let mut want = vec![0.0; rows];
-    for (r, row) in dense.chunks(cols).enumerate() {
-        let mut acc = 0.0f64;
-        for (t, &s) in row.iter().enumerate() {
-            acc += s * vec[t];
-        }
-        want[r] = acc;
-    }
-    assert_rel(&out, &want, "rlib_face_usable_without_python");
-}
-
-#[test]
-fn pyo3_face_thin_binding() {
-    // Structural: the binding layer in src/lib.rs contains no kernel
-    // arithmetic loops — every kernel body delegates to crate::core.
-    let lib = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"))
-        .expect("read src/lib.rs");
-    let coremod = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/core.rs"))
-        .expect("read src/core.rs");
-    for kernel in [
-        "pack_bits",
-        "unpack_bits",
-        "sign_estimate",
-        "packed_matvec",
-        "packed_matmul",
-        "joint_itq",
-    ] {
-        // lib.rs calls core::<kernel> for each kernel
-        assert!(
-            lib.contains(&format!("core::{kernel}")),
-            "lib.rs must delegate {kernel} to the core layer"
-        );
-        // core.rs holds the single pub implementation
-        assert!(
-            coremod.contains(&format!("pub fn {kernel}")),
-            "core.rs must define {kernel}"
-        );
-    }
-    // no accumulation loops over operands in the binding layer: the only
-    // `for` loops allowed there are trivial (none over data)
-    let binding_body = lib
-        .split("#[pyfunction]")
-        .skip(1)
-        .collect::<Vec<_>>()
-        .join("#[pyfunction]");
-    assert!(
-        !binding_body.contains("acc +="),
-        "PyO3 face must stay a thin binding: no accumulation in lib.rs"
-    );
-}
-
-#[test]
-fn single_core_implementation() {
-    // Each kernel has exactly ONE `pub fn` definition in core.rs and no
-    // algorithm duplicate anywhere else in the crate.
-    let coremod = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/core.rs"))
-        .expect("read src/core.rs");
-    let lib = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"))
-        .expect("read src/lib.rs");
-    for kernel in [
-        "pack_bits",
-        "unpack_bits",
-        "sign_estimate",
-        "packed_matvec",
-        "packed_matmul",
-        "joint_itq",
-    ] {
-        let needle = format!("pub fn {kernel}");
-        let count = coremod.matches(&needle).count();
-        assert_eq!(
-            count, 1,
-            "{kernel}: expected exactly one core implementation"
-        );
-        assert!(
-            !lib.contains(&needle),
-            "{kernel}: no duplicate implementation in the binding layer"
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Face-parity scenarios (D11): rlib face vs BOTH fixture records
-// ---------------------------------------------------------------------------
-
-#[test]
-fn face_parity_packed_bitidentical() {
-    for rec in load_scenarios("pack_bits.json") {
-        if rec["scenario"] == "pack_roundtrip_padded" {
-            let factor = flat_i8(&rec["inputs"]["factor"]);
-            let (rows, cols) = shape2(&shape_of(&rec["inputs"]["factor"]));
-            let rlib_packed = core::pack_bits(&factor, rows, cols).expect("pack_bits");
-            let pyo3 = face_rec(&rec, "pyo3").expect("pyo3 face record present");
-            let pyo3_packed = flat_u8(&pyo3["packed"]);
-            assert_bytes(
-                &rlib_packed,
-                &pyo3_packed,
-                "face_parity_packed_bitidentical",
-            );
-        }
-    }
-}
-
-#[test]
-fn face_parity_float_rel_1e_12() {
-    // matvec
-    for rec in load_scenarios("packed_matvec.json") {
-        if rec["scenario"] == "matvec_padded" {
-            let packed = flat_u8(&rec["inputs"]["packed"]);
-            let vec = flat_f64(&rec["inputs"]["vec"]);
-            let rows = shape2(&shape_of(&rec["inputs"]["packed"])).0;
-            let n_bits = rec["dtypes"]["n_bits"].as_u64().unwrap() as usize;
-            let rlib_out = core::packed_matvec(&packed, rows, n_bits, &vec).expect("matvec");
-            let pyo3 = face_rec(&rec, "pyo3").expect("pyo3 face record present");
-            assert_rel(&rlib_out, &flat_f64(&pyo3["result"]), "face_parity matvec");
-        }
-    }
-    // matmul
-    for rec in load_scenarios("packed_matmul.json") {
-        if rec["scenario"] == "matmul_wide" {
-            let packed = flat_u8(&rec["inputs"]["packed"]);
-            let mat = flat_f64(&rec["inputs"]["mat"]);
-            let rows = shape2(&shape_of(&rec["inputs"]["packed"])).0;
-            let n_bits = rec["dtypes"]["n_bits"].as_u64().unwrap() as usize;
-            let (_, k) = shape2(&shape_of(&rec["inputs"]["mat"]));
-            let rlib_out = core::packed_matmul(&packed, rows, n_bits, &mat, k).expect("matmul");
-            let pyo3 = face_rec(&rec, "pyo3").expect("pyo3 face record present");
-            assert_rel(&rlib_out, &flat_f64(&pyo3["result"]), "face_parity matmul");
-        }
-    }
-    // joint_itq float outputs are int8 sign factors compared byte-wise in
-    // check_itq; n_iter/converged equality is the float-path proxy here.
-}
-
-#[test]
-fn face_parity_extends_numpy_chain() {
-    // Every fixture with a pyo3 record must also carry the numpy-reference
-    // record, and the rlib face matches BOTH (the full parity chain).
-    for (fname, kind) in [
-        ("pack_bits.json", "packed"),
-        ("packed_matvec.json", "float"),
-        ("packed_matmul.json", "float"),
-        ("joint_itq.json", "itq"),
-    ] {
-        for rec in load_scenarios(fname) {
-            let scenario = rec["scenario"].as_str().unwrap().to_string();
-            let numpy = face_rec(&rec, "numpy-reference")
-                .unwrap_or_else(|| panic!("{scenario}: missing numpy-reference record"));
-            match kind {
-                "packed" => {
-                    let factor = flat_i8(&rec["inputs"]["factor"]);
-                    let (rows, cols) = shape2(&shape_of(&rec["inputs"]["factor"]));
-                    if rows * cols == 0 {
-                        continue;
-                    }
-                    let packed = core::pack_bits(&factor, rows, cols)
-                        .unwrap_or_else(|e| panic!("{scenario}: {e}"));
-                    assert_bytes(
-                        &packed,
-                        &flat_u8(&numpy["packed"]),
-                        &format!("{scenario}: chain numpy leg"),
-                    );
-                    if let Some(pyo3) = face_rec(&rec, "pyo3") {
-                        assert_bytes(
-                            &packed,
-                            &flat_u8(&pyo3["packed"]),
-                            &format!("{scenario}: chain pyo3 leg"),
-                        );
-                    }
-                }
-                "float" => {
-                    if scenario == "matvec_padded" {
-                        let packed = flat_u8(&rec["inputs"]["packed"]);
-                        let vec = flat_f64(&rec["inputs"]["vec"]);
-                        let rows = shape2(&shape_of(&rec["inputs"]["packed"])).0;
-                        let n_bits = rec["dtypes"]["n_bits"].as_u64().unwrap() as usize;
-                        let out = core::packed_matvec(&packed, rows, n_bits, &vec)
-                            .unwrap_or_else(|e| panic!("{scenario}: {e}"));
-                        assert_rel(
-                            &out,
-                            &flat_f64(&numpy["result"]),
-                            &format!("{scenario}: chain numpy leg"),
-                        );
-                        if let Some(pyo3) = face_rec(&rec, "pyo3") {
-                            assert_rel(
-                                &out,
-                                &flat_f64(&pyo3["result"]),
-                                &format!("{scenario}: chain pyo3 leg"),
-                            );
-                        }
-                    }
-                    if scenario == "matmul_wide" {
-                        let packed = flat_u8(&rec["inputs"]["packed"]);
-                        let mat = flat_f64(&rec["inputs"]["mat"]);
-                        let rows = shape2(&shape_of(&rec["inputs"]["packed"])).0;
-                        let n_bits = rec["dtypes"]["n_bits"].as_u64().unwrap() as usize;
-                        let (_, k) = shape2(&shape_of(&rec["inputs"]["mat"]));
-                        let out = core::packed_matmul(&packed, rows, n_bits, &mat, k)
-                            .unwrap_or_else(|e| panic!("{scenario}: {e}"));
-                        assert_rel(
-                            &out,
-                            &flat_f64(&numpy["result"]),
-                            &format!("{scenario}: chain numpy leg"),
-                        );
-                        if let Some(pyo3) = face_rec(&rec, "pyo3") {
-                            assert_rel(
-                                &out,
-                                &flat_f64(&pyo3["result"]),
-                                &format!("{scenario}: chain pyo3 leg"),
-                            );
-                        }
-                    }
-                }
-                "itq" => {
-                    if scenario == "itq_converged" {
-                        check_itq(&rec); // covers both records
-                    }
-                }
-                _ => unreachable!(),
-            }
         }
     }
 }

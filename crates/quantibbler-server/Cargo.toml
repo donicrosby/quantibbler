@@ -16,6 +16,11 @@ path = "src/main.rs"
 # graph (SR-8.2; the purity is asserted executable in tests/binary_purity.rs).
 quantibbler-kernels = { path = "../quantibbler-kernels", default-features = false }
 
+# The qpk1 container contract (stream reader + hardened model-directory
+# loader) lives in its own crate so the Python face and the server share
+# one implementation (kept-together rule).
+quantibbler-qpk1 = { path = "../quantibbler-qpk1" }
+
 # Floors verified against the live crates.io sparse index 2026-10-17
 # (config freshness rule): tokio 1.53.3, axum 0.8.9, serde 1.0.229,
 # serde_json 1.0.154, tracing 0.1.44, tracing-subscriber 0.3.23,

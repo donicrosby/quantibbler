@@ -1,4 +1,11 @@
-//! qpk1 stream reader (server side of the `qk-representation` contract).
+//! qpk1 container: stream reader + model-directory loader.
+//!
+//! This crate owns the serialized qpk1 contract end to end: the per-layer
+//! stream format below, and the model-directory acquisition convention
+//! (manifest/config/sidecar, qk-server design D3) in [`loader`]. Both the
+//! Python face (src/quantibbler/qpk1.py) and the server consume this crate;
+//! there is exactly one reader implementation per language, and the server
+//! no longer carries a private copy.
 //!
 //! Byte layout (qk-representation design D1/D2, pinned by that capability's
 //! spec): 24-byte u32 LE header — magic `QPK1`, version 1, dtype tag
@@ -16,6 +23,10 @@
 //! model loader (matching `qk-representation`'s deserialize) — this module
 //! exposes the parsed header so the caller can name the file in that
 //! diagnostic.
+
+pub mod loader;
+
+pub use loader::ModelDirectory;
 
 /// Parsed scale dtype tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

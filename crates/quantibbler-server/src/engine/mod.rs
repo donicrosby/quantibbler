@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use tokio::sync::Semaphore;
 
-use crate::model::qpk1::Layer;
 use quantibbler_kernels::core;
+use quantibbler_qpk1::Layer;
 
 /// Error surface of the engine (maps to the 500 envelope at the API edge).
 #[derive(Debug)]
@@ -291,7 +291,9 @@ pub struct DecodeSession {
     h: Vec<f32>,
     out: Vec<u32>,
     max_tokens: usize,
-    stop: Option<String>,
+    /// All stop sequences; the session terminates when the decoded text
+    /// contains any of them.
+    stop: Option<Vec<String>>,
     finish: Option<FinishReason>,
 }
 
@@ -357,7 +359,7 @@ impl Engine {
         &self,
         prompt_tokens: &[u32],
         max_tokens: usize,
-        stop: Option<&str>,
+        stop: Option<&[String]>,
     ) -> Result<DecodeSession, EngineError> {
         if prompt_tokens.is_empty() {
             return Err(EngineError("prompt tokenized to zero tokens".into()));
@@ -369,7 +371,7 @@ impl Engine {
             h,
             out: Vec::new(),
             max_tokens,
-            stop: stop.map(str::to_string),
+            stop: stop.map(<[String]>::to_vec),
             finish: None,
         })
     }
@@ -384,17 +386,23 @@ impl Engine {
         }
         let logits = self.weights.forward(&session.h)?;
         let next = crate::sampler::greedy(&logits);
-        session.out.push(next);
         if next == self.eos_token_id {
+            // EOS is the terminal control token: it terminates the
+            // generation and is NOT part of the completion (OpenAI
+            // semantics; usage counts exclude it).
             session.finish = Some(FinishReason::Stop);
             return Ok(None);
         }
-        if let Some(stop) = &session.stop {
+        session.out.push(next);
+        if let Some(stops) = &session.stop {
             let text = self
                 .tokenizer
                 .decode(&session.out, false)
                 .map_err(|e| EngineError(format!("decode: {e}")))?;
-            if text.contains(stop.as_str()) {
+            if stops.iter().any(|s| text.contains(s.as_str())) {
+                // The completing token stays out of the returned completion;
+                // the text-side trim to pre-stop content happens once at the
+                // API boundary (earliest-stop cut), not per token here.
                 session.finish = Some(FinishReason::Stop);
                 return Ok(None);
             }
@@ -411,7 +419,7 @@ impl Engine {
         _permit: &tokio::sync::OwnedSemaphorePermit,
         prompt_tokens: &[u32],
         max_tokens: usize,
-        stop_sequence: Option<&str>,
+        stop_sequence: Option<&[String]>,
     ) -> Result<GenerationOutput, EngineError> {
         #[cfg(test)]
         if self.fail_generate.load(Ordering::SeqCst) {
@@ -430,7 +438,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::qpk1::{Layer, ScaleDtype};
+    use quantibbler_qpk1::{Layer, ScaleDtype};
 
     /// r=8 layer (container and row bitplane layouts coincide) with a
     /// hand-checkable product.
@@ -444,8 +452,6 @@ mod tests {
             -1, 1, -1, -1, 1, -1, 1, 1, //
             1, -1, -1, 1, 1, 1, -1, -1,
         ];
-        let vb_signs: Vec<i8> = vec![1; din * r];
-        let _ = vb_signs;
         let mut ub = vec![0u8; (dout * r) / 8];
         for (idx, &s) in ub_signs.iter().enumerate() {
             if s == 1 {
@@ -600,7 +606,9 @@ mod tests {
         let permit = engine.acquire().await;
         let out = engine.generate(&permit, &[10], 50, None).expect("gen ok");
         assert_eq!(out.finish, FinishReason::Stop);
-        assert_eq!(out.completion_tokens, vec![2]);
+        // EOS terminates the generation but is NOT part of the completion
+        // (OpenAI semantics; usage counts exclude it).
+        assert_eq!(out.completion_tokens, Vec::<u32>::new());
     }
 
     fn test_tokenizer() -> tokenizers::Tokenizer {

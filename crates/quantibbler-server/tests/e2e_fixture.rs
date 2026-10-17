@@ -18,8 +18,6 @@ pub mod cli;
 pub mod engine;
 #[path = "../src/model/mod.rs"]
 pub mod model;
-#[path = "../src/model/qpk1.rs"]
-pub mod qpk1;
 #[path = "../src/sampler.rs"]
 pub mod sampler;
 
@@ -54,7 +52,7 @@ fn hex_bytes(hex: &str) -> Vec<u8> {
 fn e2e_reader_matches_representation_known_layer() {
     let bytes = hex_bytes(SF_1_3_STREAM_HEX);
     assert_eq!(bytes.len(), 48);
-    let layer = qpk1::parse(&bytes).expect("SF-1.3 stream parses");
+    let layer = quantibbler_qpk1::parse(&bytes).expect("SF-1.3 stream parses");
     assert_eq!(layer.dout, 3);
     assert_eq!(layer.din, 5);
     assert_eq!(layer.r, 7);
@@ -74,7 +72,7 @@ fn e2e_fixture_model_serves_end_to_end() {
     // Size formula (qk-representation SF-1.1).
     let layer_path = fixture_dir().join("layers/block0.mlp.fc.qpk1");
     let raw = std::fs::read(&layer_path).expect("fixture layer bytes");
-    let parsed = qpk1::parse(&raw).expect("fixture stream parses");
+    let parsed = quantibbler_qpk1::parse(&raw).expect("fixture stream parses");
     let w = parsed.dtype.itemsize();
     let expected_size = 24
         + (parsed.dout + parsed.din) * w

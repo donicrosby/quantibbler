@@ -189,8 +189,8 @@ pub fn unpack_bits(packed: &[u8], n_rows: usize, n_bits: usize) -> Result<Vec<i8
     Ok(out)
 }
 
-/// int8 sign with the documented zero tie-break: `>0 -> +1`, `<=0 -> -1`,
-/// exact zeros (+0.0 and -0.0) -> +1.
+/// int8 sign with the documented zero tie-break: `v >= 0.0` maps to `+1`
+/// (including exact zeros, +0.0 and -0.0); `v < 0.0` maps to `-1`.
 pub fn sign_estimate(x: &[f64]) -> Vec<i8> {
     x.iter()
         .map(|&v| if v >= 0.0 { 1i8 } else { -1i8 })
@@ -382,9 +382,4 @@ pub fn joint_itq(
         v_t[i * rank..(i + 1) * rank].copy_from_slice(&signs[dout + i]);
     }
     Ok((u_t, v_t, n_iter, converged))
-}
-
-/// Total row count of Z for validation parity with the Python side.
-pub fn joint_z_rows(dout: usize, din: usize) -> usize {
-    dout + din
 }

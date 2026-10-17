@@ -338,7 +338,6 @@ def test_parity_itq_deterministic_seed():
     assert (n1, c1) == (n2, c2)
     _assert_bytes(u1, u2)
     _assert_bytes(v1, v2)
-    assert u1.tobytes() == u2.tobytes() and v1.tobytes() == v2.tobytes()
     # different seed: a different rotation fixed point is permitted
     u3, v3, n3, c3 = k.joint_itq(u_hat, v_hat, seed=7, backend="numpy-reference")
     assert u3.shape == u1.shape and v3.shape == v1.shape
@@ -353,6 +352,55 @@ def test_parity_itq_deterministic_seed():
         _assert_bytes(v1, vr1)
     else:
         _require_rust("joint_itq")
+
+
+# ---------------------------------------------------------------------------
+# scenario probes: pack_rejects_non_binary, unpack_dtype_selection, itq_converged
+# ---------------------------------------------------------------------------
+
+
+def test_parity_pack_rejects_non_binary():
+    """Scenario: pack_rejects_non_binary — BOTH faces must raise ValueError.
+
+    Regression guard: the PyO3 face once silently truncated 1.0001 -> 1 via
+    a blind `as i8` cast, diverging from the NumPy reference on exactly the
+    input class this scenario probes.
+    """
+    for bad_value in (0.0, 2.0, 0.5, 1.0001, -1.5):
+        arr = np.array([bad_value, 1.0], dtype=np.float64)
+        with pytest.raises(ValueError):
+            k.pack_bits(arr, backend="numpy-reference")
+    if _rust_ready("pack_bits"):
+        for bad_value in (0.0, 2.0, 0.5, 1.0001, -1.5):
+            arr = np.array([bad_value, 1.0], dtype=np.float64)
+            with pytest.raises(ValueError):
+                k.pack_bits(arr, backend="rust")
+    else:
+        _require_rust("pack_bits")
+
+
+def test_parity_unpack_dtype_selection():
+    """Scenario: unpack_dtype_selection — one packed input, both dtypes."""
+    signs = np.array([[1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0]])
+    packed_ref = k.pack_bits(signs, backend="numpy-reference")
+    i8 = k.unpack_bits(packed_ref, 8, "int8", backend="numpy-reference")
+    f64 = k.unpack_bits(packed_ref, 8, "float64", backend="numpy-reference")
+    assert i8.dtype == np.int8
+    assert f64.dtype == np.float64
+    assert set(np.unique(i8)) == {-1, 1}, "int8 output must be exactly ±1"
+    _assert_rel(f64, signs)
+    assert (i8.astype(np.float64) == f64).all(), "both dtypes decode the same ±1 pattern"
+    if _rust_ready("pack_bits", "unpack_bits"):
+        packed_r = k.pack_bits(signs, backend="rust")
+        _assert_bytes(packed_ref, packed_r)
+        i8_r = k.unpack_bits(packed_r, 8, "int8", backend="rust")
+        f64_r = k.unpack_bits(packed_r, 8, "float64", backend="rust")
+        assert i8_r.dtype == np.int8 and f64_r.dtype == np.float64
+        assert set(np.unique(i8_r)) == {-1, 1}
+        assert (i8_r == i8).all()
+        _assert_rel(f64_r, f64)
+    else:
+        _require_rust("pack_bits", "unpack_bits")
 
 
 # ---------------------------------------------------------------------------

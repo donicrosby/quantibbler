@@ -41,10 +41,13 @@ pub enum StopSequence {
 }
 
 impl StopSequence {
-    pub fn first(&self) -> Option<&str> {
+    /// All stop sequences for this request. `None` = no stops requested;
+    /// every listed sequence is honored (v0.1 previously applied only the
+    /// first and silently dropped the rest).
+    pub fn as_list(&self) -> Option<&[String]> {
         match self {
-            StopSequence::One(s) => Some(s),
-            StopSequence::Many(v) => v.first().map(String::as_str),
+            StopSequence::One(s) => Some(std::slice::from_ref(s)),
+            StopSequence::Many(v) => Some(v),
         }
     }
 }

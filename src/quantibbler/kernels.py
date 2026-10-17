@@ -120,7 +120,13 @@ def _numpy_pack_bits(factor: object) -> np.ndarray:
     x = np.asarray(factor)
     if x.ndim == 0:
         raise ValueError("pack_bits expects an array with at least one dimension")
-    xf = np.asarray(x, dtype=np.float64).reshape(x.shape[0], x.shape[-1])
+    # Flatten any dimensionality row-major to n x m (design D2): keep the
+    # last axis as columns, fold every leading axis into rows. The row count
+    # is computed explicitly so degenerate shapes (n, 0) and (0, m) survive:
+    # reshape(-1, 0) cannot infer rows for a zero-sized array.
+    arr = np.asarray(x, dtype=np.float64)
+    n_rows = int(np.prod(arr.shape[:-1], dtype=np.int64))
+    xf = arr.reshape(n_rows, arr.shape[-1])
     n_rows, n_cols = xf.shape
     n_words = (n_cols + 7) // 8
     out = np.zeros((n_rows, n_words), dtype=np.uint8)

@@ -35,7 +35,7 @@ serde 1.0.229, tracing 0.1.44, clap 4.6.7.
 
 ## 2. CLI, model loading, readiness (SR-1.*)
 
-- [ ] 2.1 Test-first: `crates/quantibbler-server/tests/load.rs` with
+- [x] 2.1 Test-first: `crates/quantibbler-server/tests/load.rs` with
       `load_ready_only_after_success` (SR-1.1) and
       `load_failure_never_ready` (SR-1.2, parameterized over the corrupted
       variants from 1.2), asserting via `GET /health` against a spawned

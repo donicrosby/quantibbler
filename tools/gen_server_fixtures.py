@@ -339,6 +339,74 @@ def build_bad_variants(base: Path) -> dict[str, str]:
         p.write_bytes(p.read_bytes() + b"\x00")
 
     derived("trailing_bytes", _trailing)
+
+    # 12. manifest layer path escapes the model dir (review finding:
+    #     Path::join absolute/..-replacement made this an arbitrary read)
+    def _path_escape(d: Path) -> None:
+        m = d / "manifest.toml"
+        m.write_text(
+            "# qk-server fixture manifest (design D3)\n"
+            'model_id = "server-model-fixture"\n'
+            'layers = [ "block0.mlp.fc" ]\n'
+            "\n"
+            "[layer_files]\n"
+            '"block0.mlp.fc" = "../evil.qpk1"\n'
+            "\n"
+            "[sidecar]\n"
+            'embedding = "e1.f32.bin"\n'
+            'lm_head = "e1.f32.bin"\n',
+            encoding="utf-8",
+        )
+
+    derived("path_escape", _path_escape)
+
+    # 13. layer file is a symlink (escape hatch; loader demands regular files)
+    def _symlink_layer(d: Path) -> None:
+        target = d / "layers" / "block0.mlp.fc.qpk1"
+        raw = target.read_bytes()
+        target.unlink()
+        outside = d / "outside.qpk1"
+        outside.write_bytes(raw)
+        target.symlink_to(outside)
+
+    derived("symlink_layer", _symlink_layer)
+
+    # 14. sidecar matrix with a wrong (too small) byte length: the
+    #     stat-before-read gate must reject on length, pre-read
+    def _sidecar_too_big(d: Path) -> None:
+        (d / "e1.f32.bin").write_bytes(b"\x00" * 8)
+
+    derived("sidecar_too_big", _sidecar_too_big)
+
+    # 15. undocumented weight_tying value: fail-closed config validation
+    def _bad_weight_tying(d: Path) -> None:
+        c = d / "config.toml"
+        c.write_text(
+            "# qk-server fixture config (design D3)\n"
+            "vocab_size = 32\n"
+            "d_model = 4\n"
+            "eos_token_id = 3\n"
+            "bos_token_id = 1\n"
+            'weight_tying = "banana"\n',
+            encoding="utf-8",
+        )
+
+    derived("bad_weight_tying", _bad_weight_tying)
+
+    # 16. token id at/past vocab_size: unrepresentable row reference
+    def _eos_out_of_range(d: Path) -> None:
+        c = d / "config.toml"
+        c.write_text(
+            "# qk-server fixture config (design D3)\n"
+            "vocab_size = 32\n"
+            "d_model = 4\n"
+            "eos_token_id = 99\n"
+            "bos_token_id = 1\n"
+            'weight_tying = "lm_head=e1@fp32"\n',
+            encoding="utf-8",
+        )
+
+    derived("eos_out_of_range", _eos_out_of_range)
     return variants
 
 

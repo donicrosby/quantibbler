@@ -128,7 +128,7 @@ IDs from `specs/qk-kernels/spec.md`. Commands run from repo root
 
 ## 8. Dual-face architecture (rlib + PyO3 faces from one core)
 
-- [ ] 8.1 Dual-face probe tests first (tests precede implementation), named
+- [x] 8.1 Dual-face probe tests first (tests precede implementation), named
       for their scenario IDs: `rlib_face_usable_without_python`,
       `pyo3_face_thin_binding`, `single_core_implementation` (structure tests
       over the crate layout) and `face_parity_packed_bitidentical`,

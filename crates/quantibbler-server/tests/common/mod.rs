@@ -15,7 +15,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::api::{AppState, build_router};
-use crate::engine::Engine;
 use crate::model;
 
 /// Repo-root anchored fixture paths.
@@ -252,12 +251,12 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 /// An in-process serving router over the fixture model (ready).
 pub fn serving_router() -> (Arc<AppState>, axum::Router) {
-    ready_router_with(|_engine| {})
+    ready_router()
 }
 
 /// A router whose engine fails every generation (SR-7.3 injection).
 pub fn failing_router() -> (Arc<AppState>, axum::Router) {
-    let (state, router) = ready_router_with(|_engine| {});
+    let (state, router) = ready_router();
     state.engine.fail_generate.store(true, Ordering::SeqCst);
     (state, router)
 }
@@ -270,7 +269,7 @@ pub fn not_ready_router() -> (Arc<AppState>, axum::Router) {
     (state, router)
 }
 
-fn ready_router_with(_tweak: impl FnOnce(&Engine)) -> (Arc<AppState>, axum::Router) {
+fn ready_router() -> (Arc<AppState>, axum::Router) {
     let loaded = model::load(&fixture_dir()).expect("fixture model loads");
     let state = Arc::new(AppState::new(loaded, 4, None));
     state.set_ready();
@@ -332,6 +331,12 @@ pub fn corrupted_variants() -> Vec<(&'static str, &'static str)> {
         ("rank_infeasible", "block0.mlp.fc.qpk1"),
         ("truncated", "block0.mlp.fc.qpk1"),
         ("trailing_bytes", "block0.mlp.fc.qpk1"),
+        // Hardening-class variants (loader rejection rules):
+        ("path_escape", "rejected"),
+        ("symlink_layer", "not a regular file"),
+        ("sidecar_too_big", "expected exactly"),
+        ("bad_weight_tying", "unknown weight_tying"),
+        ("eos_out_of_range", "eos_token_id"),
     ]
 }
 

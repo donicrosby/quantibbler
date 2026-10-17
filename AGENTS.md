@@ -29,6 +29,10 @@ proposing or implementing anything.
 - `src/quantibbler/` — Python package (compressor/trainer)
 - `crates/quantibbler-kernels/` — Rust kernels; rlib for the server, PyO3
   face for Python (uv workspace member)
+- `crates/quantibbler-qpk1/` — qpk1 container crate: stream reader +
+  hardened model-directory loader (path containment, stat-before-read,
+  checked arithmetic, fail-closed config). Consumed by the server; the
+  Python face is `src/quantibbler/qpk1.py` (same byte contract).
 - `crates/quantibbler-server/` — pure-Rust OpenAI-compatible server
   (OpenAI-compatible endpoints over qpk1 model dirs; see
   openspec/changes/qk-server)

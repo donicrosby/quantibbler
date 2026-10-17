@@ -10,14 +10,10 @@ pub mod cli;
 pub mod engine;
 #[path = "../src/model/mod.rs"]
 pub mod model;
-#[path = "../src/model/qpk1.rs"]
-pub mod qpk1;
 #[path = "../src/sampler.rs"]
 pub mod sampler;
 
 mod common;
-
-use std::io::Write;
 
 use common::*;
 
@@ -130,5 +126,4 @@ fn one_failing_request_does_not_corrupt_others() {
     // Server still healthy afterwards.
     let health = get(server.port, "/health").expect("health");
     assert_eq!(health.status, 200);
-    let _ = std::io::sink().write(b"");
 }

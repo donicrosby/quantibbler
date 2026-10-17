@@ -450,3 +450,49 @@ embodies them.
   index (index.crates.io) plus static.crates.io tarball inspection —
   including confirming `esaxx-rs`'s C++ path is gated behind a `cpp`
   feature that `tokenizers` leaves off. Same registry source cargo uses.
+
+## 2026-10-17 — Post-landing hostile review round (orchestrator)
+
+Findings from the independent review sweep (d59f7e8..252b655) and their
+resolutions, all verified against the code before fixing:
+
+1. **Loader hardening (security).** Manifest-controlled paths were joined
+   with `model_dir.join(rel)` unvalidated — an absolute path discards the
+   base entirely and `..` walks out (arbitrary file read, size-probing via
+   error messages). Sidecar/layer reads were `fs::read`-before-any-check.
+   `vocab_size * d_model` was unchecked `usize` math on config values, and
+   `weight_tying`'s doc comment claimed validation that never existed.
+   Resolution: the container contract moved to the new
+   `quantibbler-qpk1` crate (see below) whose loader enforces lexical path
+   containment (no empty/absolute/`..`/prefix paths), symlink-rejecting
+   stat-before-read with size caps (layers) and exact-length equality
+   (sidecar), `checked_mul` + dimension caps + token-id range checks, and
+   fail-closed `weight_tying` (documented forms only: unset or
+   `lm_head=e1@fp32`). Each rule has an end-to-end corruption variant
+   (`path_escape`, `symlink_layer`, `sidecar_too_big`, `bad_weight_tying`,
+   `eos_out_of_range`) exercised through the real binary.
+2. **OpenAI output semantics.** EOS was pushed into `completion_tokens`
+   before the termination check, and a token completing a stop sequence
+   stayed in the text; streaming decoded one token at a time (invalid
+   UTF-8 mid-stream for split codepoints; stop-string leakage), and only
+   the FIRST stop sequence was ever applied. Resolution: EOS terminates
+   and is excluded engine-side; `StopSequence::as_list()` honors every
+   stop; sync paths trim at the earliest stop; streaming decodes
+   whole-sequence via `api::delta::DeltaDecoder` (character-safe released
+   prefix, stop-prefix withholding, `skip_special_tokens=true`), with
+   unit probes over the fixture tokenizer.
+3. **Auth.** `/v1/models` and `/health` skipped the key check (key
+   presence leaked via 401-vs-200); the compare was `==`. Resolution:
+   router-level `auth_guard` covers the GET surfaces; compare is
+   length-extended constant-time-ish; `--serve-api-key-file` added so
+   long-lived keys stay out of argv/`ps`.
+4. **Kept-together restructuring.** The qpk1 stream reader and the model
+   directory contract now live in `crates/quantibbler-qpk1` (server
+   depends on it; the server-side private copy is deleted) — the review
+   hardening is the loader's, in the crate that owns the contract.
+
+Discarded reviewer claims (verified not defects): `sign_estimate`
+docstring (code and doc agreed; doc reworded for clarity);
+`itq_converged` "untested" (a probe existed; the reviewer's garbled JSON
+missed it); `joint_z_rows`-related fixture claims (function was dead and
+is deleted; fixtures verified against `core::` signatures directly).

@@ -83,7 +83,20 @@ fn pack_bits<'py>(
 ) -> PyResult<Bound<'py, PyArray2<u8>>> {
     let (flat, shape) = dyn_factor_f64(factor)?;
     let (n_rows, n_cols) = rows_cols(&shape);
-    let as_i8: Vec<i8> = flat.iter().map(|&v| v as i8).collect();
+    // Cross-face rejection contract: non-±1 values MUST raise here exactly
+    // as the NumPy reference does (pack_rejects_non_binary). A blind
+    // `as i8` cast would silently truncate 1.0001 -> 1, diverging the two
+    // faces on the exact input class the spec scenario probes.
+    let as_i8: Vec<i8> = flat
+        .iter()
+        .map(|&v| match v {
+            1.0 => Ok(1i8),
+            -1.0 => Ok(-1i8),
+            other => Err(PyValueError::new_err(format!(
+                "pack_bits expects values in {{-1, +1}}; got {other:?}"
+            ))),
+        })
+        .collect::<PyResult<Vec<i8>>>()?;
     let packed = core::pack_bits(&as_i8, n_rows, n_cols).map_err(to_value_error)?;
     let n_words = n_cols.div_ceil(8);
     build_arr2(py, &packed, n_rows, n_words)
