@@ -257,3 +257,52 @@ divergent fixtures across lanes).
   serialize time. If wrong, it surfaces as degraded smoke-gate logit deltas
   or perplexity regressions in qk-ptq evaluation, not as a format failure;
   the float32 tag (D3) is the standing escape hatch.
+
+## Implementation Crystallization
+
+### 2026-10-17 — Scope of the `r <= min(dout, din)` bound (D8)
+
+During implementation (qk-representation tasks 1.2/2.1) the following
+conflict surfaced: D8 and SF-1.4 require `deserialize` to reject
+`r > min(dout, din)`, while SF-1.3 mandates the known-layer fixture
+`dout = 3, din = 5, r = 7` and tasks 1.2/3.1 require its exact 48-byte
+serialization (SF-1.3's own size arithmetic), and SF-2.1 requires
+byte-identical round-trips. No monotone validity predicate on
+`(dout, din, r)` can accept `r = 7` at `(3, 5)` while rejecting `r = 6`,
+so the fixture cannot be reader-valid and round-tripping it would violate
+SF-1.4's mandated rejection.
+
+Resolution: the rank bound is enforced by the **reader only**, exactly as
+D8's text scopes it ("`deserialize` rejects ..."). `serialize` and
+`expected_size` validate structure (positive, u32-bounded dims; matching
+ranks; +/-1 entries) but not rank feasibility; `rank_for_target_bpw` keeps
+the bound as an infeasibility error since it is a planning aid for real
+layers. The D4 round-trip property holds over exactly the reader-accepted
+set (SF-2.1's own domain: "any valid qpk1 stream"), so byte-identity is
+unaffected. The SF-1.3 fixture remains writer-only; the byte-level
+round-trip anchor in the tests uses its rank-feasible twin `(3, 5, r = 3)`.
+Concretely: `r > min(dout, din)` raises `Qpk1Error` from `deserialize`
+(SF-1.4), never from `serialize`/`expected_size`. No spec.md change is
+required: each scenario reads as before under this scoping.
+
+### 2026-10-17 — Naming decisions the spec left silent
+
+- **Error type:** the spec's "the documented error type" is implemented as
+a single `Qpk1Error(ValueError)` raised by every writer/reader rejection
+(bad magic, version != 1, dtype tag not in {1, 2}, non-positive or
+u32-overflowing dims, rank bound, truncation, trailing bytes, non-±1
+factor entries, non-storable scale dtype). One type keeps the reject
+corpus (SF-1.4) assertable without leaking internal exception classes;
+subclassing per failure mode is deferred until a consumer needs it.
+- **Success type:** `deserialize` returns a `Qpk1Layer` dataclass with
+attributes `Ub` (int8, ±1), `Vb` (int8, ±1), `s1`, `s2` (float per dtype
+tag), `dtype`. The spec requires "no partial object" but never names the
+success shape; the dataclass is the pinned public shape going forward.
+- **Public surface:** `qpk1.__all__` pins constants, `Qpk1Error`,
+`Qpk1Layer`, and the five functions, making SF-6.1's "no multi-layer
+API" directly testable at the module boundary.
+- **Test byte literals:** every exact-byte assertion in the tests was
+derived from an independent bit-loop oracle written from D1/D2 prose
+before the pack implementation existed (not from the code under test),
+so the known-layer vectors are an independent check of the packing,
+not a tautology.
