@@ -1,0 +1,18 @@
+[package]
+name = "quantibbler-kernels"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Rust kernels for quantibbler sub-1-bit quantization"
+
+[lib]
+name = "quantibbler_kernels"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+extension-module = ["pyo3/extension-module"]
+default = []
+
+[dependencies]
+pyo3 = { version = "0.30", features = ["abi3-py311"] }

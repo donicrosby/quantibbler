@@ -1,0 +1,83 @@
+project: quantibbler
+schema: spec-driven
+
+context: |
+  # quantibbler
+
+  Sub-1-bit LLM weight quantization via latent binary factorization, exposed
+  as a Python library with optional Rust accelerators.
+
+  ## Architecture (do not violate)
+
+  - Python-first package `quantibbler` (Python >= 3.10). Public API is Python.
+  - Performance-critical CPU paths live in the companion Rust extension crate
+    `quantibbler-kernels` (PyO3), installed as the top-level extension module
+    `quantibbler_kernels` and wrapped by `quantibbler.kernels` which FALLS
+    BACK to a NumPy reference path when the extension is absent. The NumPy
+    path is the executable specification; the Rust path must match it on
+    float64 within 1e-12 relative tolerance on every probe test.
+  - GPU/array compute stays in PyTorch. Rust kernels are CPU-only in v0.1.
+  - A C/C++/Cython/CUDA-C++ dependency is BANNED anywhere in the build graph
+    (runtime or test). If systems speed is needed, it is Rust via PyO3 or
+    nothing. This rule extends to optional extras and test tooling.
+  - Supported Python: 3.11-3.13 (numpy 2.4+ dropped 3.10; 3.10 EOL Oct 2026).
+    Rust MSRV: 1.85 (edition 2024).
+  - Dependency freshness: every declared dependency requirement must be
+    within ONE major version of the latest stable release; for 0.x
+    packages, within ONE minor version. Verify against the live registry
+    (PyPI / crates.io) whenever adding or bumping a requirement — never
+    guess a floor from memory.
+
+  ## Method invariants (from the pinned papers in docs/papers/)
+
+  - The only authoritative references are the papers pinned in docs/papers/.
+    Cite them by paper key and section: [LB] = littlebit-2506.13771v5,
+    [NQ] = nanoquant-2602.06694v3, [LB2] = littlebit2-2603.00042v2.
+  - The shared weight representation is W ~= diag(s1) @ (Ub @ Vb^T) @ diag(s2)
+    with binary factors Ub in {-1,+1}^(dout x r), Vb in {-1,+1}^(din x r)
+    and full-precision scale vectors s1, s2 ([NQ] Sec 3.1; [LB] W_hat_pri
+    with the latent scale l folded into the factors). Storage must be
+    dominated by packed binary bits: effective BPW is counted from
+    serialized bytes, never from parameter counts.
+  - NQ path (PTQ): ADMM-based initialization of (Ub, Vb, s1, s2) with
+    Hessian-aware coupling, then block-wise reconstruction, then global
+    scale calibration ([NQ] Sec 3).
+  - LB path (QAT): SVD init (Dual-SVID) or Joint-ITQ init ([LB2]), sign
+    estimation with Straight-Through Estimator, multi-scale compensation,
+    knowledge distillation from the fp32 teacher ([LB] Sec 3).
+  - Numerics: solvers compute in float64 by default; float32 is a
+    documented, opt-in accelerator, never the silent default.
+  - No network access at runtime; model and calibration data are user
+    supplied. Downloading models is the caller's job (documented, not built).
+
+  ## Verification gates (every implementation change runs them)
+
+  - cargo test + cargo clippy --all-targets -D warnings + cargo fmt --check
+    for the kernels crate; pytest for the Python package; maturin build for
+    the wheel. All must pass before a change lands.
+  - Correctness probes: Rust kernel output vs NumPy reference (rel 1e-12,
+    float64) and a sign-agreement invariant (packed bits identical).
+  - End-to-end smoke: tiny random transformer block, quantize -> serialize
+    -> reload -> forward, max logit delta bounded, BPW measured from bytes.
+
+  ## Evidence hierarchy for design decisions
+
+  1. Papers pinned in docs/papers/ (cite section/equation).
+  2. Explicitly-marked "informed assumption" in design.md, with rationale.
+  Never consult any other implementation source. Papers carry hyperlinks
+  only to arXiv; if you find yourself looking for a repository, stop and
+  cite the paper instead.
+
+rules:
+  proposal:
+    - "Include a Non-goals section; name what this change deliberately does not do."
+    - "Every method-design claim cites a paper key and section, or is flagged 'informed assumption' with rationale."
+    - "Any change touching the kernels contract or the storage format is marked invariant-touching and states the compatibility impact."
+  design:
+    - "List discarded alternatives with the reason each was discarded."
+    - "Record every Open Question with status; unresolved questions name their owner."
+    - "Informed assumptions are listed in one section, each with rationale and how a wrong assumption would surface."
+  tasks:
+    - "Each task is independently verifiable with a command and expected outcome."
+    - "Tests precede implementation per capability (test names reference scenario IDs)."
+    - "Last task is always: run the full gate suite (pytest, cargo test, clippy -D warnings, fmt --check, maturin build) and record results."

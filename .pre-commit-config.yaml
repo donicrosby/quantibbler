@@ -1,0 +1,35 @@
+# pre-commit gate: run before every commit. Installed via `pre-commit install`.
+# Python lint/format runs inside the uv dev environment (uv-managed);
+# Rust hooks call cargo directly.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-toml
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: detect-private-key
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.1
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: cargo fmt --manifest-path crates/quantibbler-kernels/Cargo.toml --all -- --check
+        language: system
+        pass_filenames: false
+        files: ^crates/.*\.rs$
+      - id: cargo-clippy
+        name: cargo clippy -D warnings
+        entry: cargo clippy --manifest-path crates/quantibbler-kernels/Cargo.toml --all-targets -- -D warnings
+        language: system
+        pass_filenames: false
+        files: ^crates/.*\.(rs|toml)$
