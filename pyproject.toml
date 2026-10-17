@@ -5,7 +5,7 @@ build-backend = "uv_build"
 [project]
 name = "quantibbler"
 version = "0.1.0"
-description = "Sub-1-bit LLM weight quantization via latent binary factorization."
+description = "Sub-1-bit LLM quantization (compressor) with a pure-Rust OpenAI-compatible server for compressed models."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"

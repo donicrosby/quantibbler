@@ -4,26 +4,40 @@ schema: spec-driven
 context: |
   # quantibbler
 
-  Sub-1-bit LLM weight quantization via latent binary factorization, exposed
-  as a Python library with optional Rust accelerators.
+  Sub-1-bit LLM weight quantization via latent binary factorization:
+  a Python compressor that produces quantized models, and a pure-Rust
+  inference server that serves them.
 
-  ## Architecture (do not violate)
+  ## Component decomposition (do not violate)
 
-  - Python-first package `quantibbler` (Python >= 3.10). Public API is Python.
-  - Performance-critical CPU paths live in the companion Rust extension crate
-    `quantibbler-kernels` (PyO3), installed as the top-level extension module
-    `quantibbler_kernels` and wrapped by `quantibbler.kernels` which FALLS
-    BACK to a NumPy reference path when the extension is absent. The NumPy
-    path is the executable specification; the Rust path must match it on
-    float64 within 1e-12 relative tolerance on every probe test.
-  - GPU/array compute stays in PyTorch. Rust kernels are CPU-only in v0.1.
-    Custom GPU kernels are out of scope until profiling shows the PyTorch
-    path leaves material performance unclaimed; any future raw-GPU binding
-    must be actively maintained (checked against the registry at decision
-    time). Abandoned crates are never adopted.
+  - `quantibbler` (Python, `src/quantibbler/`) — the COMPRESSOR/TRAINER.
+    PTQ pipeline (later: QAT). Produces qpk1 artifacts. It must never
+    gain HTTP/server dependencies, inference-serving code, or network
+    access; model and calibration data are caller-supplied.
+  - `quantibbler-server` (pure Rust, `crates/quantibbler-server/`) — the
+    SERVING component, in the llama.cpp / vLLM shape: an OpenAI-compatible
+    HTTP API (`/v1/chat/completions`, `/v1/completions`, `/v1/models`,
+    `/health`) that loads qpk1 model directories from local paths or
+    network-volume mounts and serves token streaming. Pure Rust: tokio +
+    axum; tokenizers crate for BPE. No Python dependency, no embedded
+    interpreter, ever.
+  - `quantibbler-kernels` (Rust, `crates/quantibbler-kernels/`) — ONE
+    kernel implementation, TWO consumers: the server links the rlib
+    directly; Python binds the same code through a PyO3 face of the same
+    crate. Kernel behavior is identical on both sides by construction —
+    the Python side consumes the server's kernels for any quantized-side
+    inference (parity probes, pipeline gates); it does not reimplement
+    kernels in torch or NumPy.
+  - NumPy reference implementations in `src/quantibbler/kernels/` remain
+    the executable specification (they define correct behavior and run
+    where the extension is absent); the Rust kernels must match them on
+    float64 within 1e-12 relative tolerance on every probe test, and the
+    parity probes run the SAME fixture through both faces.
+  - Interchange between the two halves is the qpk1 container ONLY. The
+    server reads what the compressor writes, nothing else.
   - A C/C++/Cython/CUDA-C++ dependency is BANNED anywhere in the build graph
-    (runtime or test). If systems speed is needed, it is Rust via PyO3 or
-    nothing. This rule extends to optional extras and test tooling.
+    of either component (runtime or test). If systems speed is needed, it is
+    Rust. This rule extends to optional extras and test tooling.
   - Supported Python: 3.11-3.13 (numpy 2.4+ dropped 3.10; 3.10 EOL Oct 2026).
     Rust MSRV: 1.85 (edition 2024).
   - Dependency freshness: every declared dependency requirement must be
@@ -31,6 +45,17 @@ context: |
     packages, within ONE minor version. Verify against the live registry
     (PyPI / crates.io) whenever adding or bumping a requirement — never
     guess a floor from memory.
+
+  ## GPU policy
+
+  - Compressor/trainer: PyTorch (training and QAT autograd).
+  - Rust kernels: CPU-only in v0.1 on BOTH faces (server and PyO3).
+  - Server compute substrate for quantized inference is a design decision
+    for the serving change: start CPU-native packed kernels; evaluate
+    candle (0.11, updated 2026-06, actively maintained) or mistral.rs
+    (0.8.1, updated 2026-04) as the GPU substrate ONLY with registry
+    evidence and a profile showing CPU leaves material performance
+    unclaimed. Abandoned crates are never adopted.
 
   ## Method invariants (from the pinned papers in docs/papers/)
 

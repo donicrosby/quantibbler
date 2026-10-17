@@ -6,8 +6,11 @@ proposing or implementing anything.
 
 ## Layout
 
-- `src/quantibbler/` — Python package
-- `crates/quantibbler-kernels/` — Rust/PyO3 extension (uv workspace member)
+- `src/quantibbler/` — Python package (compressor/trainer)
+- `crates/quantibbler-kernels/` — Rust kernels; rlib for the server, PyO3
+  face for Python (uv workspace member)
+- `crates/quantibbler-server/` — pure-Rust OpenAI-compatible server
+  (planned: see openspec/changes/qk-server)
 - `openspec/` — specs and active changes
 - `docs/papers/` — pinned reference papers
 - `tools/` — utilities

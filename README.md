@@ -1,7 +1,8 @@
 # quantibbler
 
 Sub-1-bit weight quantization for large language models via latent binary
-factorization. Python-first, with optional Rust kernels.
+factorization — a Python compressor and a pure-Rust OpenAI-compatible
+inference server.
 
 A weight matrix `W` is represented as
 
@@ -13,12 +14,36 @@ where `Uᵇ, Vᵇ ∈ {−1,+1}` are packed at one bit per entry and `s₁, s₂
 full-precision scale vectors — driving effective storage below one bit per
 weight, counted from serialized bytes.
 
-Two paths:
+## Components
 
-- **PTQ** — ADMM initialization, block-wise reconstruction, scale
-  calibration. No training required.
-- **QAT** — SVD or ITQ initialization, straight-through sign estimation,
-  distillation-recovered training.
+- **`quantibbler`** (Python) — the compressor. Post-training quantization
+  (ADMM initialization, block-wise reconstruction, scale calibration) and
+  quantization-aware training (SVD/ITQ initialization, straight-through
+  sign estimation, distillation recovery). Emits `qpk1` model directories.
+- **`quantibbler-server`** (Rust) — serving in the llama.cpp / vLLM shape:
+  an OpenAI-compatible HTTP API (`/v1/chat/completions`, `/v1/completions`,
+  `/v1/models`) that loads compressed models from local paths or network
+  volumes and serves token streaming. Pure Rust — tokio + axum, no embedded
+  interpreter.
+- **`quantibbler-kernels`** (Rust) — one kernel implementation, two
+  consumers: the server links it directly; Python binds the same code via
+  PyO3. NumPy reference implementations are the executable specification;
+  Rust matches them at 1e-12 (float64) on every probe.
+
+## Workflow
+
+```bash
+# compress (Python, GPU-optional)
+uv run quantibbler compress --model ./my-model --calibration ./calib.json --out ./my-model-qpk1
+
+# serve (Rust)
+quantibbler-server ./my-model-qpk1 --port 8080
+
+# use
+curl http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "my-model-qpk1", "messages": [{"role": "user", "content": "Hello"}]}'
+```
 
 ## Status
 
