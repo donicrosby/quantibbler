@@ -306,3 +306,14 @@ derived from an independent bit-loop oracle written from D1/D2 prose
 before the pack implementation existed (not from the code under test),
 so the known-layer vectors are an independent check of the packing,
 not a tautology.
+
+### 2026-10-17 — Packing-domain note for consumers (continuous vs per-row)
+
+The qpk1 container's `_pack_bits` is CONTINUOUS over the flattened matrix
+(bit `i*r + j` for element (i, j) — `np.packbits(axis=None)`), which is
+what SF-3.1 mandates. The qk-kernels `pack_bits` is PER-ROW (each row
+zero-padded to a byte boundary), per [NQ] Fig. 2 and its own spec. The two
+layouts coincide only when `r % 8 == 0`. Consumers bridging the two
+domains (verified in the qk-server lane: container-to-row repack plus
+`Vb^T` materialization at load) must convert explicitly; byte-level
+fixture exchange is only valid within one domain.

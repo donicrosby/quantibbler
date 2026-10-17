@@ -374,3 +374,79 @@ Each assumption states its rationale and how a wrong assumption would surface.
   wrong* (a new major/minor lands mid-implementation), the rule's own
   re-verify step catches it at dependency-addition time — the failure mode
   is a task-time re-pin, not a design change.
+
+## 6. Implementation crystallization (2026-10-17, qk-server lane)
+
+Entries per AGENTS.md spec discipline: choices the implementation had to
+make that the design was silent on, recorded alongside the code that
+embodies them.
+
+- **C1. The qpk1 container bitplane layout and the kernels rlib bitplane
+  layout are DIFFERENT, and the server converts at load.** The container
+  (qk-representation SF-3.1) packs each matrix as ONE continuous bit
+  stream (element `(i, j)` at stream bit `i*r + j`, LSB-first within
+  bytes); the kernels rlib packs PER-ROW bitplanes (each row starts a new
+  byte, row width `ceil(r/8)`). They coincide exactly when `r % 8 == 0`.
+  The server repacks at load (`engine::container_to_rows`) and also builds
+  the Vb TRANSPOSE (`container_to_rows_transposed`, `r x din`), because
+  the kernels matvec is row-oriented and `Vb^T z` contracts over the din
+  axis — the transpose is built once at load, never per request. *Wrong-if*
+  surface: parity fixtures with non-byte-aligned ranks would catch any
+  layout drift; `r % 8 == 0` fixtures alone would not.
+- **C2. `tokenizers` must be used with `default-features = false,
+  features = ["fancy-regex"]`.** Verified against the published crate
+  0.23.2: the default feature set is `["progressbar", "onig",
+  "esaxx_fast"]`, where `onig` builds C Oniguruma and `esaxx_fast` routes
+  `esaxx-rs` to its C++ backend — both violate the config C/C++/Cython
+  build-graph ban. `fancy-regex` (pure Rust) is the sanctioned SysRegex
+  backend (`src/utils/regex.rs` hard-requires one of onig/fancy-regex);
+  tokenizers itself declares `esaxx-rs` with `default_features = false`,
+  so its `cpp` feature stays off. BPE loading works identically under
+  fancy-regex for the BPE-only v0.1 scope (IA1).
+- **C3. Design D2's "serde_json 1.0.229" floor was a transcription slip:
+  1.0.229 is serde's latest; serde_json's latest stable is 1.0.154** (the
+  same version the kernels crate already dev-pins). The server pins
+  serde_json 1.0.154. All other D2 floors re-verified live 2026-10-17 via
+  the crates.io sparse index: tokio 1.53.3, axum 0.8.9, serde 1.0.229,
+  tracing 0.1.44, tracing-subscriber 0.3.23 (env-filter feature added for
+  `EnvFilter`), clap 4.6.7, tokenizers 0.23.2, toml 1.1.8, tokio-stream
+  0.1.19.
+- **C4. The v0.1 fixture model has no attention; the "KV cache" of D6 is
+  deferred with it.** OQ2 (non-quantized components) is unresolved, so the
+  fixture model defines the minimal serving stack that exercises every
+  scenario: fp32 embedding lookup (last prompt token) -> factorized qpk1
+  layer -> (tied) fp32 lm_head. Chat prompts join message contents with
+  spaces; greedy decode walks `embedding -> W -> lm_head` per step. There
+  is no attention and hence no KV cache to cache; when the representation
+  lane lands real transformer sidecars (OQ2), the per-request cache lands
+  with them — D6's scenario contracts (stop conditions, usage counting,
+  independence) are already shaped for it. Sampling parameters remain
+  accepted-but-greedy (IA4, OQ4).
+- **C5. The fixture manifest's `[sidecar]` block is this lane's de-facto
+  OQ2 answer** (as D3 anticipated): `embedding` and `lm_head` name raw
+  little-endian float32 binaries of `vocab_size x d_model` row-major
+  matrices under the model dir; equal paths mean weight tying. The
+  representation lane owns the durable contract; until then the fixtures
+  pin it.
+- **C6. Gates after the workspace manifest: `uv run maturin build` from
+  the repo root must now pass `-m crates/quantibbler-kernels/Cargo.toml`**
+  (maturin reads a Cargo.toml, and the root one is a virtual workspace
+  manifest with no `[package]`). `uv sync` (which builds the extension via
+  the uv workspace member) is unaffected.
+- **C7. Test-infrastructure note: integration tests embed the binary's
+  modules via `#[path]` (D1's no-lib-target rule) with
+  `#![allow(clippy::duplicate_mod)]`**, and in-process router fixtures run
+  axum on a dedicated OS thread so blocking test HTTP clients cannot starve
+  the server's reactor.
+
+### Landing notes (orchestrator, 2026-10-17)
+
+- Task 2.1's checkbox is unticked: the child disclosed that test-first was
+  compressed (tests and implementation landed together after task 1.1's
+  scaffolding existed). Same evidence standard as qk-kernels 8.1 — the
+  RED state was never literally observed, so the box stays open.
+- Registry evidence method: `api.crates.io` was not resolvable from the
+  container (DNS); freshness was verified against the crates.io sparse
+  index (index.crates.io) plus static.crates.io tarball inspection —
+  including confirming `esaxx-rs`'s C++ path is gated behind a `cpp`
+  feature that `tokenizers` leaves off. Same registry source cargo uses.

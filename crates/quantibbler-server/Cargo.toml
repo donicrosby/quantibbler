@@ -1,0 +1,35 @@
+[package]
+name = "quantibbler-server"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Pure-Rust OpenAI-compatible inference server for qpk1 models"
+
+[[bin]]
+name = "quantibbler-server"
+path = "src/main.rs"
+
+[dependencies]
+# The kernels rlib face: default features (empty) keep the PyO3
+# extension-module feature OFF, so no libpython ever enters this build
+# graph (SR-8.2; the purity is asserted executable in tests/binary_purity.rs).
+quantibbler-kernels = { path = "../quantibbler-kernels", default-features = false }
+
+# Floors verified against the live crates.io sparse index 2026-10-17
+# (config freshness rule): tokio 1.53.3, axum 0.8.9, serde 1.0.229,
+# serde_json 1.0.154, tracing 0.1.44, tracing-subscriber 0.3.23,
+# clap 4.6.7, tokenizers 0.23.2, toml 1.1.8, tokio-stream 0.1.19.
+tokio = { version = "1.53", features = ["rt-multi-thread", "net", "signal", "macros", "sync", "time"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+clap = { version = "4.6.7", features = ["derive"] }
+# Pure-Rust BPE only: default features are OFF because they pull `onig`
+# (C Oniguruma) and `esaxx_fast` (routes esaxx-rs to its C++ backend);
+# `fancy-regex` is the pure-Rust regex engine behind tokenizers' SysRegex.
+tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"] }
+toml = "1.1.8"
+tokio-stream = "0.1.19"
