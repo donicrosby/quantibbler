@@ -16,3 +16,11 @@ default = []
 
 [dependencies]
 pyo3 = { version = "0.30", features = ["abi3-py311"] }
+numpy = "0.30"
+nalgebra = "0.34.2"
+
+[dev-dependencies]
+# float_roundtrip: correctly-rounded JSON float parsing, so fixture inputs
+# are bit-identical to what the NumPy reference computed with (packed
+# products are pinned bit-identical, not merely rel 1e-12).
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }

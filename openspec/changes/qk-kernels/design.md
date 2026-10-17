@@ -391,3 +391,52 @@ surface.
   bit-identical accumulation (D8). *If wrong*: profiles show kernels too
   slow for 70B-scale reconstruction; surfaces as wall-clock regression in the
   PTQ lane, handled by a future parallel-schedule delta (proposal non-goal).
+
+## 6. Implementation crystallization
+
+### 2026-10-17 — Decisions made during implementation (v0.1 surface)
+
+- Seeded R0 generation (D5 gap): splitmix64 counter stream (golden-gamma
+  increment, `u64 >> 11 / 2^53` to U01, mapped to [-1, 1)) feeding a
+  modified Gram-Schmidt orthonormalization, implemented bit-exactly in both
+  Rust (`core.rs`) and Python (`_splitmix_matrix`/`_gram_schmidt`) so the
+  seeded R0 — and the whole alternating iteration — matches across
+  backends. `seed=None` uses OS entropy and is non-contractual.
+- SVD sign freedom (D5/D8): `R = Psi * Phi^T` accumulated explicitly
+  left-to-right; nalgebra `SVD::new(BtZ, true, true)` over `DMatrix`;
+  outputs (not intermediates) pinned per D8. OQ2's rel-1e-12 cross-SVD
+  risk did not materialize: packed outputs are byte-identical and float
+  outputs bit-identical against the NumPy leg; the fallback path never
+  triggered.
+- `tol == 0` means fixed-T mode: float64 Procrustes reaches a rotation
+  increment of exactly 0.0, so the spec's "tol smaller than achievable"
+  reading would make `itq_maxiter`'s tol=0 case converge early and pass
+  vacuously. `tol == 0` therefore disables early exit (runs exactly
+  `max_iter`, `converged=false`) — this is what makes `itq_maxiter` a
+  real test of the iteration cap.
+- Dispatch resilience: auto-fallback is per-kernel when the extension is
+  importable but predates the v0.1 surface (e.g. only `backend_version()`
+  exists); without surface detection the importable scaffold made every
+  auto call raise. Explicit `backend="rust"` / `QUANTIBBLER_BACKEND=rust`
+  still raise `RuntimeError` naming `quantibbler_kernels` and the
+  `kernels` extra.
+- Fixture float fidelity: serde_json's default float parsing is 1-ULP
+  best-effort, which broke bit-identical matmul fixture comparison
+  (measured 4.4e-16 relative drift on 6/15 values); the `float_roundtrip`
+  dev-feature makes the rlib face read bit-identical inputs. Any future
+  fixture consumer must preserve this feature.
+- Face-parity float gate: enforced as bit-identical IEEE bytes (raw
+  equality) with rel 1e-12 additionally asserted; D8's pinned accumulation
+  order makes the stronger property hold, so it is the gate.
+- PyO3 boundary: `pack_bits` accepts int8 or float64 factor arrays (D2
+  allows both); the `joint_itq` binding maps `Option` defaults to core
+  constants `max_iter=50`, `tol=1e-12`, matching the Python signature.
+- Fixture coverage: ValueError-only rejection behavior
+  (`pack_rejects_non_binary`) is covered by a Rust-side unit probe; JSON
+  fixtures carry the 15 positive scenario records.
+- Process note: 8.1's RED-first mandate was not literally executed — the
+  structure tests were written against the already-green core layer during
+  the 8.2 refactor (all exist and pass); the checkbox is unticked pending
+  a fresh-tree RED/GREEN demonstration or an explicit rewording of 8.1.
+  The 1.4 RED state for the Rust parity harness was observed
+  pre-implementation and stands.
