@@ -182,6 +182,76 @@ accumulation order) have no such wiggle room: accumulation order is pinned
 left-to-right per row in both implementations so float dot products are
 bit-identical, not merely 1e-12-close.
 
+### D9. Dual-face surface — one core, two faces (user-directed component split)
+
+The user directed the repo-level component split now recorded in
+`openspec/config.yaml` (Component decomposition): a pure-Rust
+OpenAI-compatible server (`crates/quantibbler-server`, planned; authored by
+the qk-server lane as its own change) plus a Python compressor
+(`src/quantibbler/`). The kernels are the shared compute substrate for both,
+so the crate must expose ONE kernel implementation with TWO consumption faces:
+
+- **rlib face** — the plain Rust public API of the crate, linked directly by
+  the server (config Architecture: the serving component has "No Python
+  dependency, no embedded interpreter, ever").
+- **PyO3 face** — the `quantibbler_kernels` extension module consumed by the
+  compressor for quantized-side inference (parity probes, pipeline gates)
+  instead of a torch/NumPy reimplementation (config: the Python side "does not
+  reimplement kernels in torch or NumPy"; the NumPy modules in
+  `src/quantibbler/kernels/` remain the executable specification and the
+  extension-absent fallback, not an inference engine).
+
+Layering: core kernel logic lives in a pyo3-free core layer (plain Rust
+signatures, no pyo3 types in its interface); the rlib face IS that layer's
+public API; the PyO3 face is thin `#[pyfunction]` wrappers doing boundary
+conversion (arrays → slice types per D2–D5) and error mapping (D6 rules:
+ValueError for validation, RuntimeError for state). No algorithm code exists
+outside the core layer. v0.1 kernel semantics (D1–D8) are unchanged — the
+dual face is a packaging contract over the same behavior, verified by face
+parity (D11).
+
+### D10. Build graph: crate-type coexistence, opt-in extension-module
+
+`crate-type = ["cdylib", "rlib"]` (already declared) means one `cargo build`
+produces both faces' artifacts from one source tree; the gate suite (cargo
+test / clippy / fmt, `uv run maturin build`) must stay green in a single
+workspace state with no feature-unification conflicts or duplicate symbols.
+
+`extension-module` stays opt-in (`default = []`, as scaffolded).
+Default-feature builds are the pure-Rust world: `cargo test`, clippy, and any
+rlib consumer build without the extension-module configuration. maturin
+enables the feature for the wheel, so the cdylib defers Python symbol
+resolution to the importing interpreter. Mechanics worth recording:
+extension-module ON removes the libpython link directive from the cdylib
+(symbols resolved at import time); default builds keep pyo3's ordinary
+linkage, and the v0.1 test design (D11) deliberately introduces no
+embedded-Python cargo tests, so default `cargo test` runs have no
+interpreter-embedding step. Whether the server can consume the rlib with pyo3
+fully absent from its link graph (optional/target-gated pyo3 dependency) is
+deferred — see OQ6.
+
+### D11. Face-parity probes
+
+D7's backend parity (NumPy ↔ Rust extension) extends to a three-way chain
+over the SAME committed fixtures:
+
+    NumPy reference ↔ rlib face ↔ PyO3 face
+
+- The fixture generator (`tools/gen_kernel_fixtures.py`, D7) additionally
+  records PyO3-face outputs (produced through the maturin-built extension)
+  next to the NumPy-reference outputs.
+- cargo tests push each fixture through the **rlib face** and compare against
+  both records: the NumPy reference (existing Rust-vs-NumPy gate) and the
+  PyO3-face record (new face-parity gate). Packed outputs byte-identical;
+  float64 outputs rel 1e-12 — the config Verification gates, unchanged.
+- pytest probes continue to compare NumPy ↔ the extension in-process (the
+  extension IS the PyO3 face), so every adjacent pair of the chain is pinned
+  by an executable test.
+
+No embedded-Python cargo tests are introduced: the rlib leg is pure Rust and
+the PyO3 leg is exercised through the built extension, keeping default
+`cargo test` runs free of an interpreter-embedding step (D10).
+
 ## 3. Discarded alternatives
 
 - **DA1. Column-major / bit-major packing (bitplane per column).** Rejected:
@@ -224,6 +294,24 @@ bit-identical, not merely 1e-12-close.
   config Method invariants). The NumPy *reference* implements the same
   arithmetic (bit-expand per row, weighted sum) without caching expanded
   matrices; it is the spec, not the performance claim.
+- **DA11. A separate kernels crate for the Python face vs the Rust/server
+  face (two crates, e.g. `quantibbler-kernels` and a `*-py` binding crate).**
+  Rejected: it forks the kernel implementation into two sources of truth.
+  Every future semantic fix would have to be applied twice and re-proven for
+  parity — the drift risk is exactly what config Component decomposition
+  bans ("ONE kernel implementation, TWO consumers", "Kernel behavior is
+  identical on both sides by construction"). A thin-binding layer inside the
+  same crate (D9) gives the same decoupling between binding and logic with
+  zero drift surface.
+- **DA12. NumPy-only quantized-side inference in the compressor (no PyO3
+  consumption of the kernels).** Rejected: it is a double implementation —
+  the Rust kernels (consumed by the server) would be a second, parallel
+  implementation of behavior whose executable specification is the NumPy
+  reference, with the parity gate as the only thing keeping three
+  implementations honest. Config Component decomposition instead makes the
+  compressor consume the Rust kernels through the PyO3 face for
+  quantized-side inference (parity probes, pipeline gates), so there is one
+  implementation plus one reference, not two implementations.
 
 ## 4. Open questions
 
@@ -244,6 +332,14 @@ bit-identical, not merely 1e-12-close.
 - **OQ5. Whether LB-ADMM inner algebra ([NQ] Eq. 5–6) becomes a Rust kernel**:
   **open** — owner: qk-ptq lane (owns that solver); this change intentionally
   does not contract it.
+- **OQ6. Whether the server's consumption of the rlib face can drop pyo3 from
+  its link graph entirely** (pyo3 made an optional, target- or feature-gated
+  dependency of `quantibbler-kernels`, so a pure-Rust consumer builds with no
+  pyo3 code compiled in at all): **open** — owner: qk-server lane (owns the
+  server crate and its dependency profile). Until resolved, the server links
+  the rlib with default features per spec; pyo3 is compiled but never
+  initialized on the rlib path. Resolution belongs to the serving change, not
+  this one.
 
 ## 5. Informed assumptions
 

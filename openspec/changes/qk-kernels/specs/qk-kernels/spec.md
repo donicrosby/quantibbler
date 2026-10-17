@@ -214,3 +214,109 @@ dependency-freshness window.
 - **THEN** it computes in float64
 - **AND** no float32 path exists in v0.1 (float32 is a future, documented,
   opt-in accelerator)
+
+### Requirement: Dual-face kernel surface from one core implementation
+
+`quantibbler-kernels` SHALL expose ONE kernel implementation with TWO
+consumption faces from one crate (config Component decomposition): a plain
+Rust rlib API for pure-Rust consumers without a Python interpreter, and the
+`quantibbler_kernels` PyO3 module for the compressor's quantized-side
+inference instead of torch/NumPy reimplementation. Core logic SHALL live in
+one pyo3-free layer; the PyO3 face is a thin binding; no algorithm SHALL be
+duplicated.
+
+#### Scenario: rlib_face_usable_without_python
+- **WHEN** a pure-Rust binary built without a Python interpreter calls
+  `pack_bits` and `packed_matvec` through the rlib face on a committed fixture
+- **THEN** the calls compile and return the contracted packed layout and
+  float64 results with no Python runtime involvement
+
+#### Scenario: pyo3_face_thin_binding
+- **WHEN** a kernel is invoked with identical inputs through the PyO3 extension
+  module and through the rlib face
+- **THEN** both invocations reach the same core implementation
+- **AND** inspection of the PyO3 binding layer finds boundary conversion and
+  error mapping only, with no kernel arithmetic outside the core layer
+
+#### Scenario: single_core_implementation
+- **WHEN** the crate source tree is inspected
+- **THEN** each v0.1 kernel (`pack_bits`, `unpack_bits`, `sign_estimate`,
+  `packed_matvec`, `packed_matmul`, `joint_itq`) has exactly one core
+  implementation wrapped by both faces
+- **AND** no duplicated algorithm body exists across the faces
+
+### Requirement: Face parity between the rlib and PyO3 faces
+
+The same fixture SHALL yield identical results when pushed through the rlib
+face and the PyO3 face: packed outputs byte-identical, float64 outputs within
+float64 rel 1e-12 (`openspec/config.yaml`, Verification gates). Face-parity
+probes SHALL extend — never replace — the Rust-vs-NumPy parity probes, reusing
+the committed fixtures so that the NumPy reference, the rlib face, and the
+PyO3 face form one parity chain.
+
+#### Scenario: face_parity_packed_bitidentical
+- **WHEN** a committed packing fixture is pushed through `pack_bits` via the
+  rlib face and via the PyO3 face
+- **THEN** the packed uint8 buffers are byte-identical
+
+#### Scenario: face_parity_float_rel_1e-12
+- **WHEN** `packed_matvec`, `packed_matmul`, and `joint_itq` run on the same
+  fixture through both faces
+- **THEN** each pair of face outputs agrees within float64 rel 1e-12
+
+#### Scenario: face_parity_extends_numpy_chain
+- **WHEN** the face-parity probes run against the committed NumPy-reference
+  fixtures
+- **THEN** the rlib face and the PyO3 face each match the NumPy reference
+  within the existing gates (packed byte-identical, float64 rel 1e-12)
+
+### Requirement: cdylib and rlib crate-type coexistence
+
+The crate SHALL keep `crate-type = ["cdylib", "rlib"]`, and both faces SHALL
+build and test green from one workspace state: a single `cargo build` produces
+both artifacts, and the gate suite (`cargo test`, `cargo clippy --all-targets
+-- -D warnings`, `cargo fmt --check`, `uv run maturin build`) passes with no
+feature-unification conflict or duplicate-symbol error between the faces.
+
+#### Scenario: both_crate_types_build
+- **WHEN** `cargo build` runs in `crates/quantibbler-kernels/`
+- **THEN** both the rlib and the cdylib artifacts are produced (exit 0)
+
+#### Scenario: workspace_gates_green_single_tree
+- **WHEN** the gate suite runs from one checkout state (`cargo test`,
+  `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, and
+  `uv run maturin build`)
+- **THEN** all gates pass (exit 0 each) with no cross-face build conflict
+
+#### Scenario: rlib_consumer_independent_of_cdylib
+- **WHEN** a pure-Rust consumer links the rlib face
+- **THEN** it builds without requiring the cdylib artifact or a Python
+  installation
+
+### Requirement: Opt-in extension-module feature
+
+The `extension-module` feature SHALL remain opt-in (`default = []`) so
+default-feature builds serve the pure-Rust world: `cargo build`, `cargo
+test`, and `cargo clippy --all-targets` succeed without an extension-module
+build, and pure-Rust rlib consumers link the rlib face with default
+features. Only the maturin wheel build enables it (maturin enables it
+automatically), producing the cdylib imported by the Python side.
+
+#### Scenario: extension_module_absent_from_default_features
+- **WHEN** the `[features]` table of `crates/quantibbler-kernels/Cargo.toml`
+  is inspected
+- **THEN** `extension-module` is defined and forwarded to
+  `pyo3/extension-module`
+- **AND** `default` is empty (`default = []`)
+
+#### Scenario: cargo_test_green_with_default_features
+- **WHEN** `cargo test` runs in `crates/quantibbler-kernels/` with default
+  features, without any extension-module build step first
+- **THEN** the suite — core layer, rlib face, and face-parity tests — passes
+  (exit 0)
+
+#### Scenario: maturin_enables_extension_module
+- **WHEN** the extension is built and installed with maturin
+  (`uv run maturin develop`)
+- **THEN** the build enables `extension-module` and
+  `import quantibbler_kernels` succeeds

@@ -126,9 +126,45 @@ IDs from `specs/qk-kernels/spec.md`. Commands run from repo root
       scenario-ID-named parity tests pass at rel 1e-12 / byte-identical
       (exit 0).
 
-## 8. Full gate suite (final task)
+## 8. Dual-face architecture (rlib + PyO3 faces from one core)
 
-- [ ] 8.1 Run the full gate suite and record results:
+- [ ] 8.1 Dual-face probe tests first (tests precede implementation), named
+      for their scenario IDs: `rlib_face_usable_without_python`,
+      `pyo3_face_thin_binding`, `single_core_implementation` (structure tests
+      over the crate layout) and `face_parity_packed_bitidentical`,
+      `face_parity_float_rel_1e-12`, `face_parity_extends_numpy_chain`
+      (fixture-driven comparisons of the rlib face against the NumPy-reference
+      and PyO3-face fixture records). Verify (from
+      `crates/quantibbler-kernels/`): `cargo test` — the new scenario-named
+      tests compile and fail (RED: core layer and fixture fields do not exist
+      yet); exit 101 or failing tests is the expected outcome at this stage.
+- [ ] 8.2 Extract the pyo3-free core layer (`src/core/`): plain-Rust
+      implementations of all six v0.1 kernels; `#[pyfunction]` wrappers
+      reduced to boundary conversion + error mapping (design D9); the rlib
+      face is the core's public API. Verify (from
+      `crates/quantibbler-kernels/`): `cargo test` — all tests including 8.1's
+      go green (exit 0); and `bash -c '! grep -rn pyo3 src/core/'` — no pyo3
+      references in the core layer (exit 0).
+- [ ] 8.3 Record the PyO3 face in fixtures: extend
+      `tools/gen_kernel_fixtures.py` to run each scenario through the built
+      extension (the PyO3 face) and store its outputs alongside the
+      NumPy-reference outputs; regenerate. Verify:
+      `uv run maturin develop && uv run python tools/gen_kernel_fixtures.py && git status --porcelain crates/quantibbler-kernels/tests/fixtures/`
+      — fixtures updated with PyO3-face records as a reviewable diff (exit 0).
+- [ ] 8.4 Crate-type coexistence + opt-in extension-module checks. Verify:
+      from `crates/quantibbler-kernels/`, `cargo build` — both rlib and cdylib
+      artifacts produced (exit 0); `grep -q '^default = \[\]' Cargo.toml` —
+      exit 0; from repo root, `uv run maturin develop && uv run python -c "import quantibbler_kernels"`
+      — import succeeds (exit 0).
+- [ ] 8.5 Face-parity suite green end-to-end (both faces, all six kernels).
+      Verify (from `crates/quantibbler-kernels/`):
+      `cargo test face_parity` — `face_parity_packed_bitidentical`,
+      `face_parity_float_rel_1e-12`, `face_parity_extends_numpy_chain` pass at
+      byte-identical packed / float64 rel 1e-12 (exit 0).
+
+## 9. Full gate suite (final task)
+
+- [ ] 9.1 Run the full gate suite and record results:
       1. `uv run pytest` — PASS/FAIL: ____
       2. `cargo test` (in `crates/quantibbler-kernels/`) — PASS/FAIL: ____
       3. `cargo clippy --all-targets -- -D warnings` (same dir) — PASS/FAIL: ____
