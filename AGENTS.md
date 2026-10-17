@@ -4,6 +4,26 @@ Spec-first repo. `openspec/config.yaml` is the authoritative statement of
 architecture, method invariants, and verification gates — read it before
 proposing or implementing anything.
 
+## Spec discipline (no drift)
+
+- The spec is the oracle: `openspec/changes/<id>/specs/<capability>/spec.md`
+  defines the testable contract for its capability. Before changing
+  behavior anywhere, read the spec that owns it — requirements and
+  scenarios there are contracts, not suggestions.
+- Run `openspec list` before starting work. If an active change already
+  covers the surface you're about to touch, work within that change;
+  never start a parallel change over the same capability.
+- Behavior changes land WITH their spec delta in the SAME commit — never
+  ship code that contradicts or silently outpaces the spec. If
+  implementation reveals an ambiguity or forces a design-silent choice,
+  resolve it into the owning change's `design.md` (dated "Implementation
+  crystallization" entry) alongside the code fix, and re-run
+  `openspec validate <id> --strict`.
+- Checkbox state is evidence: a task is checked only after the command
+  that verifies it actually ran green. Never pre-check.
+- Specs fold into `openspec/specs/` only via `openspec archive <id>` when
+  the change genuinely completes — not by hand, not early.
+
 ## Layout
 
 - `src/quantibbler/` — Python package (compressor/trainer)
