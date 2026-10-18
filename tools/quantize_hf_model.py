@@ -81,7 +81,23 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from quantibbler.ptq.api import QuantizedModel, quantize_model
 from quantibbler.ptq.config import PTQConfig, StageHyper
 
-WIKITEXT_TEST = Path.home() / ".cache/huggingface/hub/datasets--Salesforce--wikitext/snapshots"
+
+def _wikitext_cache_root() -> Path:
+    """Resolve the cached wikitext snapshot dir, honoring the HF env contract.
+
+    HF_HUB_CACHE > HF_HOME/hub > ~/.cache/huggingface/hub — the driver must
+    work in containers where the cache is bind-mounted and HOME is not the
+    cache owner (the in-container failure that motivated this).
+    """
+    env = os.environ.get("HF_HUB_CACHE")
+    if env:
+        return Path(env) / "datasets--Salesforce--wikitext/snapshots"
+    home = os.environ.get("HF_HOME")
+    base = Path(home) if home else Path.home() / ".cache/huggingface"
+    return base / "hub/datasets--Salesforce--wikitext/snapshots"
+
+
+WIKITEXT_TEST = _wikitext_cache_root()
 BATCH = 8  # eval/calibration microbatch (bf16 0.6B fits easily on CPU)
 
 
