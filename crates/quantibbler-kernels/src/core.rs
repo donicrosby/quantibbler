@@ -31,7 +31,7 @@ impl std::fmt::Display for KernelError {
 
 impl std::error::Error for KernelError {}
 
-fn err<T>(msg: impl Into<String>) -> Result<T, KernelError> {
+pub fn err<T>(msg: impl Into<String>) -> Result<T, KernelError> {
     Err(KernelError(msg.into()))
 }
 
@@ -201,7 +201,7 @@ fn accumulate_row(packed: &[u8], row_words: usize, row: usize, n_bits: usize, ve
     acc
 }
 
-fn validate_packed(packed: &[u8], n_rows: usize, n_bits: usize) -> Result<usize, KernelError> {
+pub fn validate_packed(packed: &[u8], n_rows: usize, n_bits: usize) -> Result<usize, KernelError> {
     if n_bits == 0 && !packed.is_empty() {
         // allowed: zero logical bits (empty packed tolerated if n_rows == 0)
         if n_rows != 0 {

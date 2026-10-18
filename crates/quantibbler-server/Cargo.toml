@@ -10,6 +10,11 @@ description = "Pure-Rust OpenAI-compatible inference server for qpk1 models"
 name = "quantibbler-server"
 path = "src/main.rs"
 
+[features]
+# GPU dispatch (qk-attention 3.4): pulls the CubeCL HIP face into the
+# kernels dependency. Default builds stay pure-CPU (binary_purity gate).
+gpu = ["quantibbler-kernels/gpu"]
+
 [dependencies]
 # The kernels rlib face: default features (empty) keep the PyO3
 # extension-module feature OFF, so no libpython ever enters this build

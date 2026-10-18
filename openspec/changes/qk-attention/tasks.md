@@ -51,17 +51,49 @@
 
 ## 3. CubeCL GPU kernels (parity-gated, opt-in)
 
-- [ ] 3.1 `gpu` cargo feature on quantibbler-kernels; runtime probe module
+- [x] 3.1 `gpu` cargo feature on quantibbler-kernels; runtime probe module
       (device detection, staged SDK dir per the validated recipe); fallback
-      semantics tested on GPU-less builder.
-- [ ] 3.2 `packed_matvec` CubeCL kernel (per-row bitplane decode + f64-
+      semantics tested on GPU-less builder. Done 2026-10-18: `gpu =
+      ["dep:cubecl"]` (cubecl 0.11, hip); `GpuContext::init` fail-closed
+      with GPU_INIT_HINT carrying the staged-SDK recipe
+      (LD_LIBRARY_PATH=/opt/data/tmp/rocm-sdk/lib +
+      HSA_OVERRIDE_GFX_VERSION=11.5.1 — without it the probe reports
+      NoSuchDevice and the server falls back to CPU). Fallback semantics:
+      inert flag on non-gpu builds (`gpu_flag_is_inert_without_the_feature`),
+      CPU selection when unset, soft log-and-fall-back on init failure
+      (`select_from_env`).
+- [x] 3.2 `packed_matvec` CubeCL kernel (per-row bitplane decode + f64
       accumulation semantics emulated deterministically on device — pair
-      accumulation order documented in kernel doc comment).
-- [ ] 3.3 Parity harness: random ±1 bitplanes + scales, GPU vs CPU rlib,
+      accumulation order documented in kernel doc comment). Done: one
+      thread per row, LSB-first decode, STRICTLY SEQUENTIAL f64
+      accumulation in element order (same pair order as the CPU rlib);
+      host-side validate + u32 index ceiling before any launch.
+- [x] 3.3 Parity harness: random ±1 bitplanes + scales, GPU vs CPU rlib,
       rel 1e-12, repeated-run bit-identity; autotune-free fixed launch
-      geometry first (correctness before performance).
-- [ ] 3.4 Dispatch wiring behind the feature flag + feature-gated tests in
+      geometry first (correctness before performance). Done:
+      tests/gpu_parity.rs behind QUANTIBBLER_GPU_TESTS=1; hardware run on
+      gfx1151 — worst rel err 0.000e0 (bit-identical incl. pad-byte and
+      degenerate shapes; rejection messages mirror the CPU face); two
+      GPU runs byte-identical. Launch geometry fixed: 256-thread cubes,
+      ceil-div grid.
+- [x] 3.4 Dispatch wiring behind the feature flag + feature-gated tests in
       CI-with-GPU lane; server purity gate (default features) stays green.
+      Done: MatvecFace/FaceDecision frozen at ModelWeights construction
+      (E-2.1 lifetime determinism — never swapped mid-stream);
+      QUANTIBBLER_GPU=1 requests HIP with soft init-failure fallback;
+      /health reports `matvec_face`; tests/gpu_dispatch.rs hardware run —
+      face=gpu:hip:gfx, full fixture transformer generates on device
+      matvecs, token stream identical to the CPU face. Default-feature
+      server suite green incl. binary_purity (124 tests); clippy -D
+      warnings + fmt green on both crates in both feature states.
+- [ ] 3.5 CPU fast path (user-directed): SIMD inner product for
+      packed_matvec/packed_matmul (±1 decode via byte LUT/shuffle into
+      f32xN/f64xN ±1 vectors) + rayon row-parallelism behind an opt-in
+      feature. Determinism contract: parallelism across ROWS only, so
+      outputs stay bit-identical regardless of thread count; within-row
+      SIMD reassociation bounded by the rel 1e-12 budget vs the scalar
+      face + repeated-run bit-identity. Default (scalar) builds unchanged;
+      server opt-in via feature flag, same dispatch-seam pattern as 3.4.
 
 ## 4. Landing
 

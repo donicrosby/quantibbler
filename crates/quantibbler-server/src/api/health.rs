@@ -22,6 +22,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<ser
             "ready": ready,
             "model": state.model_id,
             "available_permits": state.engine.available_permits(),
+            "matvec_face": state.engine.weights.matvec_face(),
         })),
     )
 }

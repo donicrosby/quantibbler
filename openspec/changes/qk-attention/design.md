@@ -2,6 +2,51 @@
 
 ## Implementation crystallization
 
+### 2026-10-18 — CubeCL GPU face: kernel, hardware parity, dispatch (tasks 3.1–3.4)
+
+- One arithmetic definition, now THREE faces (NumPy reference, CPU rlib,
+  CubeCL device). The GPU kernel mirrors `core::accumulate_row`
+  structurally — one thread per row, LSB-first decode, STRICTLY
+  SEQUENTIAL f64 accumulation in element order — and the gfx1151
+  hardware parity run measured worst rel err 0.000e0 (bit-identical,
+  pad-byte and degenerate shapes included). The 1e-12 budget exists for
+  device fma contraction; none materialized at these shapes, so the
+  headroom is untested — do not "use" it by reordering the accumulation.
+- Face selection is a STARTUP-ONLY decision frozen into `ModelWeights`
+  (`MatvecFace`/`FaceDecision`): never swapped mid-stream, so a served
+  model's outputs stay deterministic for the process lifetime (E-2.1).
+  Soft failure at init (log + CPU fallback — both faces compute the same
+  numbers), HARD failure per call after startup (wrong-shaped GPU work
+  must never silently produce a value).
+- Device inputs are validated on the HOST before launch, reusing the
+  CPU face's own rules — `core::validate_packed` and `core::err` are now
+  `pub` for exactly this reason (one validation, three faces). The
+  device kernel indexes through u32: `GPU_INDEX_CEILING` (u32::MAX)
+  rejects oversized shapes with a typed error naming the CPU fallback.
+- CubeCL 0.11 API record (each cost a compile cycle): `create_from_slice`
+  returns a raw `Handle` — wrap in `TensorHandle::new(handle, shape,
+  strides, T::elem_type_native())`; `.into_arg()` lives on TensorHandle,
+  outputs take `.binding().into_tensor_arg()`; `copy_descriptor` wants
+  `Shape`/`Strides` structs (read them back off the handle, do not pass
+  `Vec`s); kernel-body Rust is strict — runtime `while` loops with i32
+  counters, `u32::cast_from` for widening, `as usize` for indexing,
+  `ABSOLUTE_POS as u32`.
+- Operational recipe (validated): staged ROCm userspace at
+  `/opt/data/tmp/rocm-sdk/lib` on LD_LIBRARY_PATH (+
+  HSA_OVERRIDE_GFX_VERSION=11.5.1); without it cubecl-hip reports
+  `NoSuchDevice { available: 0 }` even with /dev/kfd present. Tests are
+  double-gated: `QUANTIBBLER_GPU_TESTS=1` for hardware arms (verified in
+  both states — clean skips unset, typed passes on device) and compile
+  features (`gpu`) as the only door to the code.
+- Performance posture (explicit): batch-1 decode through this face is
+  LATENCY-BOUND (per-matvec D2H sync, one thread per row at small rank)
+  — it is the correctness lane plus future prefill/batch upside, not a
+  decode speedup. Named follow-ups: fused per-layer kernel (kill the
+  intermediate D2H), whole-forward device residency. User-directed CPU
+  fast path (task 3.5: SIMD inner product + rayon across rows) is the
+  expected production batch-1 winner; row-only parallelism keeps outputs
+  bit-identical regardless of thread count.
+
 ### 2026-10-18 — r8 re-export + real-artifact serving proof (tasks 1.3 / 2.4)
 
 - Full driver re-run (container, 32G ceiling, breadcrumbs clean; peak

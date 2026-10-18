@@ -11,6 +11,9 @@
 
 pub mod core;
 
+#[cfg(feature = "gpu")]
+pub mod gpu;
+
 use numpy::{Element, PyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArrayDyn};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;

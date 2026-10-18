@@ -9,7 +9,74 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use quantibbler_kernels::core;
+#[cfg(feature = "gpu")]
+use quantibbler_kernels::gpu::GpuContext;
 use quantibbler_qpk1::{Layer, NormSlot, inventory_block_floats};
+
+/// Which face computes the packed matvecs (qk-attention 3.4). Selected ONCE
+/// per process at engine construction — never mid-stream, so a served model's
+/// outputs stay deterministic for its whole lifetime (E-2.1). Both faces
+/// implement the same arithmetic (E-3.1 parity, hardware-gated), so face
+/// selection is a performance/availability policy, not a semantics choice.
+pub enum MatvecFace {
+    /// Pure-CPU kernels rlib (default; the only face in default builds).
+    Cpu,
+    /// CubeCL HIP device face. Constructible only with the `gpu` feature.
+    #[cfg(feature = "gpu")]
+    Gpu(GpuContext),
+}
+
+/// The engine's matvec-face decision, carried on `ModelWeights` so every
+/// consumer (forward, health reporting) reads ONE source of truth.
+pub struct FaceDecision {
+    pub face: MatvecFace,
+    /// Human-readable selection record (startup log + /health).
+    pub chosen: &'static str,
+}
+
+impl FaceDecision {
+    /// The default-build selection: CPU rlib, always.
+    pub fn cpu_selected() -> Self {
+        Self {
+            face: MatvecFace::Cpu,
+            chosen: "cpu",
+        }
+    }
+
+    /// GPU dispatch policy (task 3.4, soft-fail): env QUANTIBBLER_GPU=1
+    /// requests the HIP face; a failed device init is NOT fatal — the CPU
+    /// face computes the same numbers, so we log and fall back. After
+    /// startup the decision is frozen: per-call GPU errors are hard errors.
+    #[cfg(feature = "gpu")]
+    pub fn select_from_env() -> Self {
+        if std::env::var("QUANTIBBLER_GPU").is_ok_and(|v| v == "1") {
+            match GpuContext::init() {
+                Ok(ctx) => {
+                    return Self {
+                        face: MatvecFace::Gpu(ctx),
+                        chosen: "gpu:hip:gfx",
+                    };
+                }
+                Err(e) => {
+                    eprintln!(
+                        "QUANTIBBLER_GPU=1 but the HIP face is unavailable; staying on the CPU rlib face. ({e})"
+                    );
+                }
+            }
+        }
+        Self::cpu_selected()
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    pub fn select_from_env() -> Self {
+        Self::cpu_selected()
+    }
+
+    /// Face label for /health.
+    pub fn describe(&self) -> &'static str {
+        self.chosen
+    }
+}
 
 /// Error surface of the engine (maps to the 500 envelope at the API edge).
 #[derive(Debug)]
@@ -134,9 +201,11 @@ impl PackedLayer {
     /// linear transform `x -> W x` with
     /// `W = diag(s1) (Ub Vb^T) diag(s2)` (qk-representation Eq. 1).
     ///
-    /// Bitplane products go through the kernels rlib (`packed_matvec`,
-    /// float64 accumulation in row-element order); scales and I/O are f32.
-    fn apply(&self, x: &[f32]) -> Result<Vec<f32>, EngineError> {
+    /// Bitplane products go through the selected matvec face (task 3.4):
+    /// the kernels rlib by default, or the CubeCL HIP face under
+    /// `gpu` + QUANTIBBLER_GPU=1 — both float64 accumulation in
+    /// row-element order (E-3.1 hardware parity); scales and I/O are f32.
+    fn apply(&self, face: &MatvecFace, x: &[f32]) -> Result<Vec<f32>, EngineError> {
         if x.len() != self.din {
             return Err(EngineError(format!(
                 "layer {} expects input dim {}, got {}",
@@ -151,10 +220,22 @@ impl PackedLayer {
         }
         // t = Vb^T z  (length r; contraction over the din axis), then
         // u = Ub t  (length dout; contraction over the rank axis).
-        let t = core::packed_matvec(&self.vb_t_rows, self.r, self.din, &z)
-            .map_err(|e| EngineError(format!("layer {}: Vb^T matvec: {e}", self.name)))?;
-        let u = core::packed_matvec(&self.ub_rows, self.dout, self.r, &t)
-            .map_err(|e| EngineError(format!("layer {}: Ub matvec: {e}", self.name)))?;
+        let t = match face {
+            MatvecFace::Cpu => core::packed_matvec(&self.vb_t_rows, self.r, self.din, &z)
+                .map_err(|e| EngineError(format!("layer {}: Vb^T matvec: {e}", self.name)))?,
+            #[cfg(feature = "gpu")]
+            MatvecFace::Gpu(ctx) => ctx
+                .packed_matvec(&self.vb_t_rows, self.r, self.din, &z)
+                .map_err(|e| EngineError(format!("layer {}: Vb^T GPU matvec: {e}", self.name)))?,
+        };
+        let u = match face {
+            MatvecFace::Cpu => core::packed_matvec(&self.ub_rows, self.dout, self.r, &t)
+                .map_err(|e| EngineError(format!("layer {}: Ub matvec: {e}", self.name)))?,
+            #[cfg(feature = "gpu")]
+            MatvecFace::Gpu(ctx) => ctx
+                .packed_matvec(&self.ub_rows, self.dout, self.r, &t)
+                .map_err(|e| EngineError(format!("layer {}: Ub GPU matvec: {e}", self.name)))?,
+        };
         Ok(u.iter()
             .zip(&self.s1_f32)
             .map(|(&u_i, &s1_i)| (u_i as f32) * s1_i)
@@ -294,6 +375,10 @@ pub struct ModelWeights {
     /// Per-block projection indices + norm offsets, resolved once at
     /// load from the manifest names + inventory (E-2.3).
     blocks: Vec<BlockRefs>,
+    /// Frozen matvec-face decision (qk-attention 3.4): CPU rlib by
+    /// default; HIP device face under `gpu` + QUANTIBBLER_GPU=1 with
+    /// successful init. Selected once, never swapped mid-stream.
+    matvec: FaceDecision,
 }
 
 fn f32ify(v: Vec<f64>) -> Vec<f32> {
@@ -386,7 +471,16 @@ impl ModelWeights {
             norm_weights: norm_weights_f32,
             final_norm_at,
             blocks,
+            // Face selection happens once, here (task 3.4): default builds
+            // are unconditionally CPU; `gpu` builds consult
+            // QUANTIBBLER_GPU=1 and soft-fall-back on init failure.
+            matvec: FaceDecision::select_from_env(),
         })
+    }
+
+    /// The frozen matvec-face label (startup log + /health reporting).
+    pub fn matvec_face(&self) -> &'static str {
+        self.matvec.describe()
     }
 
     /// Hidden vector for one token: `embedding[token]`.
@@ -479,7 +573,7 @@ impl ModelWeights {
             );
             let normed = scratch.clone();
             let apply_proj = |layer_idx: usize, input: &[f32]| -> Result<Vec<f32>, EngineError> {
-                self.layers[layer_idx].apply(input)
+                self.layers[layer_idx].apply(&self.matvec.face, input)
             };
             let q = apply_proj(block.q, &normed)?;
             let k = apply_proj(block.k, &normed)?;
@@ -497,7 +591,7 @@ impl ModelWeights {
             // position (cache held pos+1 rows incl. this step after push).
             let n_groups = self.n_heads / self.n_kv_heads;
             let attn_out = self.gqa_attention(&qh, b, cache, n_groups, pos)?;
-            let mut attn = self.layers[block.o].apply(&attn_out)?;
+            let mut attn = self.layers[block.o].apply(&self.matvec.face, &attn_out)?;
             for (hh, &r) in attn.iter_mut().zip(&h) {
                 *hh += r;
             }
@@ -511,14 +605,14 @@ impl ModelWeights {
                 &mut scratch,
             );
             let normed = scratch.clone();
-            let gate = self.layers[block.gate].apply(&normed)?;
-            let up = self.layers[block.up].apply(&normed)?;
+            let gate = self.layers[block.gate].apply(&self.matvec.face, &normed)?;
+            let up = self.layers[block.up].apply(&self.matvec.face, &normed)?;
             let hidden = gate
                 .iter()
                 .zip(&up)
                 .map(|(&g, &u)| g * u / (1.0 + (-g).exp()))
                 .collect::<Vec<f32>>();
-            let mut mlp = self.layers[block.down].apply(&hidden)?;
+            let mut mlp = self.layers[block.down].apply(&self.matvec.face, &hidden)?;
             for (hh, &r) in mlp.iter_mut().zip(&h) {
                 *hh += r;
             }
@@ -594,7 +688,7 @@ impl ModelWeights {
     pub fn forward_packed_legacy(&self, x: &[f32]) -> Result<Vec<f32>, EngineError> {
         let mut h = x.to_vec();
         for layer in &self.layers {
-            h = layer.apply(&h)?;
+            h = layer.apply(&self.matvec.face, &h)?;
         }
         let head = self.lm_head.as_ref().unwrap_or(&self.embedding);
         if h.len() != self.d_model {
@@ -1016,7 +1110,7 @@ mod tests {
                 .sum();
             *y_i = u_i * s1_i;
         }
-        let got = packed.apply(&x).expect("apply ok");
+        let got = packed.apply(&MatvecFace::Cpu, &x).expect("apply ok");
         for (g, expected) in got.iter().zip(&y) {
             assert!(
                 (f64::from(*g) - expected).abs() < 1e-4,
