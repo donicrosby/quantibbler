@@ -23,11 +23,15 @@
       cross-check pass, forward fails at the engine's `unimplemented!`
       prefill — the budget assertion itself stays unreachably RED by
       construction until 2.2/2.3 wire it (see design.md crystallization).
-- [ ] 2.2 RMSNorm (f32, eps from config), RoPE (theta from config, f32
+- [x] 2.2 RMSNorm (f32, eps from config), RoPE (theta from config, f32
       cos/sin tables computed once at load), GQA causal attention with KV
-      cache over packed Q/K/V projections.
-- [ ] 2.3 SwiGLU MLP over gate/up/down packed projections; residual wiring;
-      final norm + LM head; greedy decode parity test GREEN.
+      cache over packed Q/K/V projections. Landed with the inventory-driven
+      norm application (E-2.3); RoPE computes per-position angles from
+      theta (rotate_half convention) rather than precomputed tables —
+      same math, see design.md.
+- [x] 2.3 SwiGLU MLP over gate/up/down packed projections; residual wiring;
+      final norm + LM head; greedy decode parity test GREEN (max |Δlogit|
+      = 4.1e-5 vs fp32-of-artifact goldens; budget 1e-2 — E-2.2).
 - [ ] 2.4 End-to-end: serve the r8 artifact, `/v1/chat/completions` greedy
       stream; sample outputs reviewed for sanity (expectation: r8 quality is
       garbage — correctness, not quality, is the gate).

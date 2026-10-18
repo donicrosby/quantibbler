@@ -261,25 +261,50 @@ def expected_size(dout: int, din: int, r: int, w: int) -> int:
     return 24 + (dout + din) * w + (dout * r + 7) // 8 + (din * r + 7) // 8
 
 
+# One real transformer block's projections (qk-attention E-2.x): the
+# engine resolves blocks by these manifest names, so the fixture exercises
+# the same resolution + forward path as a driver-exported model. Geometry
+# (d_model 4, intermediate 4) makes every projection a 4x4 r4 stream.
+BLOCK_PROJECTIONS = [
+    "layers.0.inner.self_attn.q_proj",
+    "layers.0.inner.self_attn.k_proj",
+    "layers.0.inner.self_attn.v_proj",
+    "layers.0.inner.self_attn.o_proj",
+    "layers.0.inner.mlp.gate_proj",
+    "layers.0.inner.mlp.up_proj",
+    "layers.0.inner.mlp.down_proj",
+]
+# The corruption variants target one projection's stream file.
+PROBE_LAYER = "layers.0.inner.self_attn.q_proj"
+PROBE_FILE = "layers/q_proj.qpk1"
+
+
 def build_valid_model(root: Path) -> None:
-    """Write the valid fixture model directory (single factorized layer)."""
+    """Write the valid fixture model directory (one transformer block)."""
     (root / "layers").mkdir(parents=True, exist_ok=True)
     dout, din, r = 4, 4, 4
-    stream, _ = qpk1_stream(dout, din, r, seed=20261017)
-    layer_path = root / "layers" / "block0.mlp.fc.qpk1"
-    layer_path.write_bytes(stream)
     expected = expected_size(dout, din, r, 2)
-    actual = layer_path.stat().st_size
-    if actual != expected:
-        raise AssertionError(f"{layer_path}: {actual} bytes, formula says {expected}")
+    entries = []
+    for i, name in enumerate(BLOCK_PROJECTIONS):
+        stem = name.rsplit(".", 1)[-1]
+        rel = f"layers/{stem}.qpk1"
+        stream, _ = qpk1_stream(dout, din, r, seed=20261017 + i)
+        layer_path = root / rel
+        layer_path.write_bytes(stream)
+        actual = layer_path.stat().st_size
+        if actual != expected:
+            raise AssertionError(f"{layer_path}: {actual} bytes, formula says {expected}")
+        entries.append((name, rel))
+    manifest_layers = ",\n".join(f'  "{n}"' for n, _ in entries)
+    manifest_files = "\n".join(f'"{n}" = "{rel}"' for n, rel in entries)
     (root / "manifest.toml").write_text(
         "# qk-server fixture manifest (design D3)\n"
         'model_id = "server-model-fixture"\n'
-        'layers = [ "block0.mlp.fc" ]\n'
+        f"layers = [\n{manifest_layers},\n]\n"
         "\n"
         "[layer_files]\n"
         "# quoted keys: TOML bare keys with dots would nest tables\n"
-        '"block0.mlp.fc" = "layers/block0.mlp.fc.qpk1"\n'
+        f"{manifest_files}\n"
         "\n"
         "[sidecar]\n"
         "# fp32 embedding / lm_head / norms raw LE float32\n"
@@ -336,18 +361,18 @@ def build_bad_variants(base: Path) -> dict[str, str]:
     # 3. malformed tokenizer.json
     derived("malformed_tokenizer", lambda d: (d / "tokenizer.json").write_text("{not json"))
     # 4. manifest names a layer whose file is missing
-    derived("missing_layer_file", lambda d: (d / "layers" / "block0.mlp.fc.qpk1").unlink())
+    derived("missing_layer_file", lambda d: (d / PROBE_FILE).unlink())
 
     # 5. bad magic
     def _bad_magic(d: Path) -> None:
-        p = d / "layers" / "block0.mlp.fc.qpk1"
+        p = d / PROBE_FILE
         p.write_bytes(b"XPK1" + p.read_bytes()[4:])
 
     derived("bad_magic", _bad_magic)
 
     # 6. wrong version
     def _bad_version(d: Path) -> None:
-        p = d / "layers" / "block0.mlp.fc.qpk1"
+        p = d / PROBE_FILE
         b = bytearray(p.read_bytes())
         struct.pack_into("<I", b, 4, 7)
         p.write_bytes(bytes(b))
@@ -356,7 +381,7 @@ def build_bad_variants(base: Path) -> dict[str, str]:
 
     # 7. unknown dtype tag
     def _bad_tag(d: Path) -> None:
-        p = d / "layers" / "block0.mlp.fc.qpk1"
+        p = d / PROBE_FILE
         b = bytearray(p.read_bytes())
         struct.pack_into("<I", b, 8, 9)
         p.write_bytes(bytes(b))
@@ -365,7 +390,7 @@ def build_bad_variants(base: Path) -> dict[str, str]:
 
     # 8. rank 0
     def _rank0(d: Path) -> None:
-        p = d / "layers" / "block0.mlp.fc.qpk1"
+        p = d / PROBE_FILE
         b = bytearray(p.read_bytes())
         struct.pack_into("<I", b, 20, 0)
         p.write_bytes(bytes(b))
@@ -374,7 +399,7 @@ def build_bad_variants(base: Path) -> dict[str, str]:
 
     # 9. r > min(dout, din)
     def _rank_too_big(d: Path) -> None:
-        p = d / "layers" / "block0.mlp.fc.qpk1"
+        p = d / PROBE_FILE
         b = bytearray(p.read_bytes())
         struct.pack_into("<I", b, 20, 9)
         p.write_bytes(bytes(b))
@@ -383,7 +408,7 @@ def build_bad_variants(base: Path) -> dict[str, str]:
 
     # 10. truncated stream (chop the last byte)
     def _truncated(d: Path) -> None:
-        p = d / "layers" / "block0.mlp.fc.qpk1"
+        p = d / PROBE_FILE
         raw = p.read_bytes()
         p.write_bytes(raw[:-1])
 
@@ -391,7 +416,7 @@ def build_bad_variants(base: Path) -> dict[str, str]:
 
     # 11. trailing garbage
     def _trailing(d: Path) -> None:
-        p = d / "layers" / "block0.mlp.fc.qpk1"
+        p = d / PROBE_FILE
         p.write_bytes(p.read_bytes() + b"\x00")
 
     derived("trailing_bytes", _trailing)
@@ -403,10 +428,10 @@ def build_bad_variants(base: Path) -> dict[str, str]:
         m.write_text(
             "# qk-server fixture manifest (design D3)\n"
             'model_id = "server-model-fixture"\n'
-            'layers = [ "block0.mlp.fc" ]\n'
+            'layers = [ "' + PROBE_LAYER + '" ]\n'
             "\n"
             "[layer_files]\n"
-            '"block0.mlp.fc" = "../evil.qpk1"\n'
+            f'"{PROBE_LAYER}" = "../evil.qpk1"\n'
             "\n"
             "[sidecar]\n"
             'embedding = "e1.f32.bin"\n'
@@ -419,7 +444,7 @@ def build_bad_variants(base: Path) -> dict[str, str]:
 
     # 13. layer file is a symlink (escape hatch; loader demands regular files)
     def _symlink_layer(d: Path) -> None:
-        target = d / "layers" / "block0.mlp.fc.qpk1"
+        target = d / PROBE_FILE
         raw = target.read_bytes()
         target.unlink()
         outside = d / "outside.qpk1"

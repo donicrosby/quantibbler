@@ -162,6 +162,102 @@ impl PackedLayer {
     }
 }
 
+/// Resolved per-block view: layer INDICES into `ModelWeights::layers` and
+/// ABSOLUTE norm offsets into `ModelWeights::norm_weights`, derived from
+/// the declared inventory at load (E-2.3: presence in the inventory, not
+/// any model family, decides which norm points run). Plain data, so
+/// `ModelWeights` stays self-contained behind `Arc`.
+struct BlockRefs {
+    q: usize,
+    k: usize,
+    v: usize,
+    o: usize,
+    gate: usize,
+    up: usize,
+    down: usize,
+    /// Absolute sidecar float offset of the block-input norm (required).
+    input_norm_at: usize,
+    /// Absolute sidecar float offset of the post-attention (pre-MLP)
+    /// norm (required).
+    post_attention_norm_at: usize,
+    /// Absolute offsets of the optional slots; `None` = not declared,
+    /// not applied (E-2.3). `post_feedforward` resolves today so an
+    /// inventory declaring it loads; its APPLICATION is the Gemma-class
+    /// sandwich semantics (E-2.0), consumed when a Gemma-class export
+    /// exists to gate it.
+    q_norm_at: Option<usize>,
+    k_norm_at: Option<usize>,
+    #[allow(dead_code)]
+    post_feedforward_norm_at: Option<usize>,
+}
+
+impl BlockRefs {
+    /// Resolve one block's projections by manifest name (HF module paths,
+    /// e.g. `layers.3.inner.self_attn.q_proj`) and its norm offsets by
+    /// walking the declared inventory. Fail-closed: a missing projection
+    /// or a required slot absent from the inventory is a LOAD error.
+    fn resolve(
+        index: &std::collections::HashMap<String, usize>,
+        norm_slots: &[NormSlot],
+        block: usize,
+        d_model: usize,
+        head_dim: usize,
+    ) -> Result<Self, EngineError> {
+        let find = |suffix: &str| -> Result<usize, EngineError> {
+            let name = format!("layers.{block}.inner.{suffix}");
+            index
+                .get(&name)
+                .copied()
+                .ok_or_else(|| EngineError(format!("block {block}: missing packed layer {name:?}")))
+        };
+        let q = find("self_attn.q_proj")?;
+        let k = find("self_attn.k_proj")?;
+        let v = find("self_attn.v_proj")?;
+        let o = find("self_attn.o_proj")?;
+        let gate = find("mlp.gate_proj")?;
+        let up = find("mlp.up_proj")?;
+        let down = find("mlp.down_proj")?;
+
+        let mut input_norm_at = None;
+        let mut post_attention_norm_at = None;
+        let mut q_norm_at = None;
+        let mut k_norm_at = None;
+        let mut post_feedforward_norm_at = None;
+        let mut at = block * inventory_block_floats(norm_slots, d_model, head_dim);
+        for slot in norm_slots {
+            match slot {
+                NormSlot::Input => input_norm_at = Some(at),
+                NormSlot::PostAttention => post_attention_norm_at = Some(at),
+                NormSlot::QNorm => q_norm_at = Some(at),
+                NormSlot::KNorm => k_norm_at = Some(at),
+                NormSlot::PostFeedforward => post_feedforward_norm_at = Some(at),
+            }
+            at += slot.width(d_model, head_dim);
+        }
+        let missing = |name: &str| {
+            EngineError(format!(
+                "block {block}: required norm slot {name:?} not in the \
+                 declared inventory {norm_slots:?}"
+            ))
+        };
+        Ok(Self {
+            q,
+            k,
+            v,
+            o,
+            gate,
+            up,
+            down,
+            input_norm_at: input_norm_at.ok_or_else(|| missing("input"))?,
+            post_attention_norm_at: post_attention_norm_at
+                .ok_or_else(|| missing("post_attention"))?,
+            q_norm_at,
+            k_norm_at,
+            post_feedforward_norm_at,
+        })
+    }
+}
+
 /// Immutable after load (design D5/IA2); shared as `Arc`.
 pub struct ModelWeights {
     pub layers: Vec<PackedLayer>,
@@ -185,12 +281,19 @@ pub struct ModelWeights {
     pub head_dim: usize,
     pub rms_norm_eps: f64,
     pub rope_theta: f64,
-    /// Declared per-block norm inventory, in sidecar order. Drives the
-    /// transformer forward's norm application (E-2.0/E-2.3); unwired until
-    /// qk-attention 2.2/2.3 land the forward (same pattern as vb_rows).
+    /// Declared per-block norm inventory, in sidecar order. Read by the
+    /// parity test's declared-inventory cross-check (E-2.3); the forward
+    /// itself consumes the RESOLVED per-block offsets (`blocks`), not
+    /// this list.
     #[allow(dead_code)]
     pub norm_slots: Vec<NormSlot>,
     pub norm_weights: Vec<f32>,
+    /// Absolute sidecar offset of the model-final norm (last `d_model`
+    /// floats).
+    final_norm_at: usize,
+    /// Per-block projection indices + norm offsets, resolved once at
+    /// load from the manifest names + inventory (E-2.3).
+    blocks: Vec<BlockRefs>,
 }
 
 fn f32ify(v: Vec<f64>) -> Vec<f32> {
@@ -254,6 +357,19 @@ impl ModelWeights {
                 norm_slots.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             )));
         }
+        let norm_weights_f32 = f32ify(norm_weights);
+        let final_norm_at = norm_weights_f32
+            .len()
+            .checked_sub(d_model)
+            .ok_or_else(|| EngineError("norm sidecar shorter than d_model".into()))?;
+        let index: std::collections::HashMap<String, usize> = packed
+            .iter()
+            .enumerate()
+            .map(|(i, layer)| (layer.name.clone(), i))
+            .collect();
+        let blocks = (0..n_layers)
+            .map(|b| BlockRefs::resolve(&index, &norm_slots, b, d_model, head_dim))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             layers: packed,
             embedding: f32ify(embedding),
@@ -267,7 +383,9 @@ impl ModelWeights {
             rms_norm_eps,
             rope_theta,
             norm_slots,
-            norm_weights: f32ify(norm_weights),
+            norm_weights: norm_weights_f32,
+            final_norm_at,
+            blocks,
         })
     }
 
@@ -284,36 +402,190 @@ impl ModelWeights {
     }
 
     /// Logits for one position: transformer forward (qk-attention E-2.2).
-    ///
-    /// TODO(qk-attention 2.2/2.3): RMSNorm -> per-block QKVO/MLP over the
-    /// packed factorized projections with RoPE, GQA causal attention over
-    /// the KV cache, SwiGLU, residuals, final norm -> LM head. Unwired:
-    /// until 2.2/2.3 land this fails closed instead of silently serving the
-    /// wrong forward semantics.
-    pub fn forward(&self, _x: &[f32]) -> Result<Vec<f32>, EngineError> {
-        let _ = (
-            &self.layers,
-            &self.norm_weights,
-            self.n_layers,
-            self.n_heads,
-            self.n_kv_heads,
-            self.head_dim,
-            self.rms_norm_eps,
-            self.rope_theta,
-        );
-        unimplemented!("transformer forward lands with qk-attention tasks 2.2/2.3 (spec E-2.2)")
+    /// One decode step over the session's KV cache.
+    pub fn forward(&self, x: &[f32], cache: &mut KvCache) -> Result<Vec<f32>, EngineError> {
+        let logits_row = self.transformer(x, cache)?;
+        let head = self.lm_head.as_ref().unwrap_or(&self.embedding);
+        let mut logits = vec![0.0f32; self.vocab_size];
+        for (v, logit) in logits.iter_mut().enumerate() {
+            let row = &head[v * self.d_model..(v + 1) * self.d_model];
+            let mut acc = 0.0f32;
+            for t in 0..self.d_model {
+                acc += logits_row[t] * row[t];
+            }
+            *logit = acc;
+        }
+        Ok(logits)
     }
 
     /// Prefill over a token prefix: transformer forward for ALL positions,
-    /// logits flattened `[seq x vocab]` (qk-attention E-2.2 vehicle; the
-    /// 2.3 KV-cache decode steps must preserve per-prefix invariance).
-    ///
-    /// TODO(qk-attention 2.2/2.3): wire the real transformer semantics.
-    /// Dead in the bin until then; the parity test is the only caller.
+    /// logits flattened `[seq x vocab]` (E-2.2). Fills the KV cache as it
+    /// goes; a subsequent single-token forward over the same cache must
+    /// reproduce the last row bit-identically (teacher-forced invariance,
+    /// E-2.1's determinism gate).
     #[allow(dead_code)]
-    pub fn forward_prefill(&self, _tokens: &[u32]) -> Result<Vec<f32>, EngineError> {
-        let _ = (&self.layers, &self.norm_weights);
-        unimplemented!("transformer prefill lands with qk-attention tasks 2.2/2.3 (spec E-2.2)")
+    pub fn forward_prefill(
+        &self,
+        tokens: &[u32],
+        cache: &mut KvCache,
+    ) -> Result<Vec<f32>, EngineError> {
+        let mut all = Vec::with_capacity(tokens.len() * self.vocab_size);
+        let head = self.lm_head.as_ref().unwrap_or(&self.embedding);
+        for &tok in tokens {
+            let h = self.embed(tok)?;
+            let row = self.transformer(&h, cache)?;
+            for v in 0..self.vocab_size {
+                let mut acc = 0.0f32;
+                let row_v = &head[v * self.d_model..(v + 1) * self.d_model];
+                for t in 0..self.d_model {
+                    acc += row[t] * row_v[t];
+                }
+                all.push(acc);
+            }
+        }
+        Ok(all)
+    }
+
+    /// The transformer trunk for ONE position: all blocks over the KV
+    /// cache, final norm, hidden out. Norm application points follow the
+    /// DECLARED inventory (E-2.0/E-2.3); packed matvecs keep the kernels
+    /// rlib's f64 accumulation semantics.
+    fn transformer(&self, x: &[f32], cache: &mut KvCache) -> Result<Vec<f32>, EngineError> {
+        if x.len() != self.d_model {
+            return Err(EngineError(format!(
+                "transformer input is {} floats; d_model is {}",
+                x.len(),
+                self.d_model
+            )));
+        }
+        let pos = cache.len(0);
+        let eps = self.rms_norm_eps;
+        let norm_w = |at: usize, len: usize| &self.norm_weights[at..at + len];
+        let mut h = x.to_vec();
+        let mut scratch = Vec::with_capacity(self.d_model);
+
+        for (b, block) in self.blocks.iter().enumerate() {
+            debug_assert_eq!(
+                cache.len(b),
+                pos,
+                "KV cache blocks must advance in lockstep"
+            );
+            // --- attention sublayer ---
+            rms_norm_into(
+                &h,
+                norm_w(block.input_norm_at, self.d_model),
+                eps,
+                &mut scratch,
+            );
+            let normed = scratch.clone();
+            let apply_proj = |layer_idx: usize, input: &[f32]| -> Result<Vec<f32>, EngineError> {
+                self.layers[layer_idx].apply(input)
+            };
+            let q = apply_proj(block.q, &normed)?;
+            let k = apply_proj(block.k, &normed)?;
+            let v = apply_proj(block.v, &normed)?;
+            let (mut qh, mut kh) = (q, k);
+            if let (Some(at), Some(kw_at)) = (block.q_norm_at, block.k_norm_at) {
+                per_head_rms_norm(&mut qh, self.head_dim, norm_w(at, self.head_dim), eps);
+                per_head_rms_norm(&mut kh, self.head_dim, norm_w(kw_at, self.head_dim), eps);
+            }
+            rope_rotate(&mut qh, self.head_dim, pos, self.rope_theta);
+            rope_rotate(&mut kh, self.head_dim, pos, self.rope_theta);
+            cache.push(b, &kh, &v);
+
+            // GQA causal attention over the cache. `pos` is the query
+            // position (cache held pos+1 rows incl. this step after push).
+            let n_groups = self.n_heads / self.n_kv_heads;
+            let attn_out = self.gqa_attention(&qh, b, cache, n_groups, pos)?;
+            let mut attn = self.layers[block.o].apply(&attn_out)?;
+            for (hh, &r) in attn.iter_mut().zip(&h) {
+                *hh += r;
+            }
+            h = attn;
+
+            // --- MLP sublayer ---
+            rms_norm_into(
+                &h,
+                norm_w(block.post_attention_norm_at, self.d_model),
+                eps,
+                &mut scratch,
+            );
+            let normed = scratch.clone();
+            let gate = self.layers[block.gate].apply(&normed)?;
+            let up = self.layers[block.up].apply(&normed)?;
+            let hidden = gate
+                .iter()
+                .zip(&up)
+                .map(|(&g, &u)| g * u / (1.0 + (-g).exp()))
+                .collect::<Vec<f32>>();
+            let mut mlp = self.layers[block.down].apply(&hidden)?;
+            for (hh, &r) in mlp.iter_mut().zip(&h) {
+                *hh += r;
+            }
+            h = mlp;
+        }
+
+        rms_norm_into(
+            &h,
+            norm_w(self.final_norm_at, self.d_model),
+            eps,
+            &mut scratch,
+        );
+        Ok(scratch)
+    }
+
+    /// GQA causal attention for one query position: per KV group, the
+    /// query head attends over positions `0..=pos`; scores are
+    /// dot(query, key)/sqrt(head_dim) in f32, softmax over the causal
+    /// window, output the value mixture.
+    #[allow(clippy::too_many_arguments)]
+    fn gqa_attention(
+        &self,
+        qh: &[f32],
+        block: usize,
+        cache: &KvCache,
+        n_groups: usize,
+        pos: usize,
+    ) -> Result<Vec<f32>, EngineError> {
+        debug_assert_eq!(cache.len(block), pos + 1, "current step must be cached");
+        let mut out = vec![0.0f32; self.n_heads * self.head_dim];
+        let scale = 1.0 / (self.head_dim as f32).sqrt();
+        for head in 0..self.n_heads {
+            let kv_head = head / n_groups;
+            let q = &qh[head * self.head_dim..(head + 1) * self.head_dim];
+            // scores for positions 0..=pos (causal: the last is this step)
+            let mut scores: Vec<f32> = (0..=pos)
+                .map(|p| {
+                    // GQA: this head attends to its group's kv_head slice.
+                    let k = &cache.key(block, p)
+                        [kv_head * self.head_dim..(kv_head + 1) * self.head_dim];
+                    let mut dot = 0.0f32;
+                    for t in 0..self.head_dim {
+                        dot += q[t] * k[t];
+                    }
+                    dot * scale
+                })
+                .collect();
+            let maxs = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut denom = 0.0f32;
+            for s in scores.iter_mut() {
+                *s = (*s - maxs).exp();
+                denom += *s;
+            }
+            let oh = &mut out[head * self.head_dim..(head + 1) * self.head_dim];
+            for (p, score) in scores.iter().enumerate() {
+                let w = score / denom;
+                if w == 0.0 {
+                    continue;
+                }
+                let val =
+                    &cache.val(block, p)[kv_head * self.head_dim..(kv_head + 1) * self.head_dim];
+                for t in 0..self.head_dim {
+                    oh[t] += w * val[t];
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Superseded packed stack forward (kept until 2.2/2.3 replace the
@@ -342,6 +614,90 @@ impl ModelWeights {
             *logit = acc;
         }
         Ok(logits)
+    }
+}
+
+/// RMSNorm into `out`: `x / sqrt(mean(x^2) + eps) * weight`, f32 end to
+/// end (spec E-2.0: norm + residual accumulation is f32).
+fn rms_norm_into(x: &[f32], weight: &[f32], eps: f64, out: &mut Vec<f32>) {
+    debug_assert_eq!(x.len(), weight.len(), "norm width must match weight");
+    let ss = x.iter().map(|&v| v * v).sum::<f32>() / x.len() as f32;
+    let inv = 1.0 / (ss + eps as f32).sqrt();
+    out.clear();
+    out.extend(x.iter().zip(weight).map(|(&v, &w)| v * inv * w));
+}
+
+/// Per-head RMSNorm over `head_dim` slices (Qwen3 q/k-norm: ONE weight
+/// vector broadcast across every head; each head normalizes over its own
+/// head_dim slice), in place.
+fn per_head_rms_norm(v: &mut [f32], head_dim: usize, weight: &[f32], eps: f64) {
+    let mut buf = Vec::with_capacity(head_dim);
+    for head in v.chunks_mut(head_dim) {
+        rms_norm_into(head, weight, eps, &mut buf);
+        head.copy_from_slice(&buf);
+    }
+}
+
+/// RoPE rotation, HF rotate_half convention (Llama/Qwen line): the head
+/// dim splits into halves and pairs are `(i, i + half)` —
+/// `x'_i = x_i cos_i - x_{i+half} sin_i`,
+/// `x'_{i+half} = x_{i+half} cos_i + x_i sin_i`, with
+/// `inv_freq_i = theta^(-2i/head_dim)`. Rotates every `head_dim` slice of
+/// `v` (Q: n_heads slices, K: n_kv_heads) by the position's angle, in
+/// place, f32.
+fn rope_rotate(v: &mut [f32], head_dim: usize, pos: usize, theta: f64) {
+    let half = head_dim / 2;
+    let n_heads = v.len() / head_dim;
+    for head in 0..n_heads {
+        let base = head * head_dim;
+        for i in 0..half {
+            let inv_freq = theta.powf(-(2.0 * i as f64) / head_dim as f64);
+            let (s, c) = (pos as f64 * inv_freq).sin_cos();
+            let (s, c) = (s as f32, c as f32);
+            let a = v[base + i];
+            let b = v[base + half + i];
+            v[base + i] = a * c - b * s;
+            v[base + half + i] = b * c + a * s;
+        }
+    }
+}
+
+/// Per-block, append-only KV cache: `k[block]` holds `pos_used[block]`
+/// (public: the parity test drives prefill/step directly).
+/// rows of `kv_dim` (= n_kv_heads * head_dim) f32, one row per position.
+pub struct KvCache {
+    k: Vec<Vec<f32>>,
+    v: Vec<Vec<f32>>,
+    kv_dim: usize,
+}
+
+impl KvCache {
+    pub fn new(n_blocks: usize, kv_dim: usize) -> Self {
+        Self {
+            k: vec![Vec::new(); n_blocks],
+            v: vec![Vec::new(); n_blocks],
+            kv_dim,
+        }
+    }
+
+    fn push(&mut self, block: usize, k: &[f32], v: &[f32]) {
+        debug_assert_eq!(k.len(), self.kv_dim);
+        debug_assert_eq!(v.len(), self.kv_dim);
+        self.k[block].extend_from_slice(k);
+        self.v[block].extend_from_slice(v);
+    }
+
+    /// Valid positions stored for `block`.
+    fn len(&self, block: usize) -> usize {
+        self.k[block].len() / self.kv_dim
+    }
+
+    fn key(&self, block: usize, pos: usize) -> &[f32] {
+        &self.k[block][pos * self.kv_dim..(pos + 1) * self.kv_dim]
+    }
+
+    fn val(&self, block: usize, pos: usize) -> &[f32] {
+        &self.v[block][pos * self.kv_dim..(pos + 1) * self.kv_dim]
     }
 }
 
@@ -374,7 +730,8 @@ pub struct GenerationOutput {
 /// Per-request decode state (design D6's plain per-request state; held for
 /// the request's duration, dropped with it).
 pub struct DecodeSession {
-    h: Vec<f32>,
+    /// Per-block KV cache, prefilled with the prompt in `decode_start`.
+    cache: KvCache,
     out: Vec<u32>,
     max_tokens: usize,
     /// All stop sequences; the session terminates when the decoded text
@@ -450,34 +807,41 @@ impl Engine {
         if prompt_tokens.is_empty() {
             return Err(EngineError("prompt tokenized to zero tokens".into()));
         }
-        let h = self
+        // Prefill the whole prompt through the real transformer (E-2.2):
+        // trunk over every prompt position, head projection only for the
+        // last (the position whose argmax produces the first token).
+        let mut cache = KvCache::new(
+            self.weights.n_layers,
+            self.weights.n_kv_heads * self.weights.head_dim,
+        );
+        for &tok in &prompt_tokens[..prompt_tokens.len() - 1] {
+            let h = self.weights.embed(tok)?;
+            self.weights.transformer(&h, &mut cache)?;
+        }
+        let h_last = self
             .weights
             .embed(*prompt_tokens.last().expect("non-empty"))?;
-        Ok(DecodeSession {
-            h,
+        let logits = self.weights.forward(&h_last, &mut cache)?;
+        let mut session = DecodeSession {
+            cache,
             out: Vec::new(),
             max_tokens,
             stop: stop.map(<[String]>::to_vec),
             finish: None,
-        })
+        };
+        self.push_token(&mut session, crate::sampler::greedy(&logits))?;
+        Ok(session)
     }
 
-    /// One greedy decode step (argmax over logits, design D6). Returns the
-    /// newly produced token, or `None` when the session has finished (EOS,
-    /// stop sequence, or `max_tokens`).
-    pub fn decode_step(&self, session: &mut DecodeSession) -> Result<Option<u32>, EngineError> {
-        if session.finish.is_some() || session.out.len() >= session.max_tokens {
-            session.finish.get_or_insert(FinishReason::Length);
-            return Ok(None);
-        }
-        let logits = self.weights.forward(&session.h)?;
-        let next = crate::sampler::greedy(&logits);
+    /// Apply EOS/stop/max-token semantics to one produced token; returns
+    /// whether the session consumed it (false = finished).
+    fn push_token(&self, session: &mut DecodeSession, next: u32) -> Result<bool, EngineError> {
         if next == self.eos_token_id {
             // EOS is the terminal control token: it terminates the
             // generation and is NOT part of the completion (OpenAI
             // semantics; usage counts exclude it).
             session.finish = Some(FinishReason::Stop);
-            return Ok(None);
+            return Ok(false);
         }
         session.out.push(next);
         if let Some(stops) = &session.stop {
@@ -490,11 +854,34 @@ impl Engine {
                 // the text-side trim to pre-stop content happens once at the
                 // API boundary (earliest-stop cut), not per token here.
                 session.finish = Some(FinishReason::Stop);
-                return Ok(None);
+                return Ok(false);
             }
         }
-        session.h = self.weights.embed(next)?;
-        Ok(Some(next))
+        if session.out.len() >= session.max_tokens {
+            session.finish = Some(FinishReason::Length);
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// One greedy decode step (argmax over logits, design D6). Returns the
+    /// newly produced token, or `None` when the session has finished (EOS,
+    /// stop sequence, or `max_tokens`).
+    pub fn decode_step(&self, session: &mut DecodeSession) -> Result<Option<u32>, EngineError> {
+        if session.finish.is_some() {
+            return Ok(None);
+        }
+        // One transformer step: embed the last produced token, run the
+        // trunk over the KV cache, argmax the logits.
+        let last = *session.out.last().expect("non-empty session");
+        let h = self.weights.embed(last)?;
+        let logits = self.weights.forward(&h, &mut session.cache)?;
+        let next = crate::sampler::greedy(&logits);
+        if self.push_token(session, next)? {
+            Ok(Some(next))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Full greedy generation (design D6): runs a session to completion.
@@ -528,6 +915,29 @@ mod tests {
 
     /// r=8 layer (container and row bitplane layouts coincide) with a
     /// hand-checkable product.
+    /// Seed-variant of `layer_fixture` (deterministic per-projection
+    /// signs/scales) so the seven projections of the transformer fixture
+    /// are not identical copies of one matrix.
+    fn layer_fixture_with_seed(seed: u64) -> Layer {
+        let mut layer = layer_fixture();
+        let rot = |v: &[f64], by: u64| {
+            v.iter()
+                .enumerate()
+                .map(|(i, x)| {
+                    let k = (i as u64 + by) % v.len() as u64;
+                    let s = if (k % 3) == 2 { -1.0 } else { 1.0 };
+                    x * s * (1.0 + 0.125 * k as f64)
+                })
+                .collect()
+        };
+        layer.s1 = rot(&layer.s1, seed * 2 + 1);
+        layer.s2 = rot(&layer.s2, seed * 3 + 2);
+        if seed % 2 == 1 {
+            layer.ub_packed.iter_mut().for_each(|b| *b = !*b);
+        }
+        layer
+    }
+
     fn layer_fixture() -> Layer {
         let dout = 4usize;
         let din = 4usize;
@@ -621,17 +1031,35 @@ mod tests {
         assert_eq!(crate::sampler::greedy(&[-5.0, -6.0]), 0);
     }
 
-    #[tokio::test]
-    #[ignore = "generation rewires onto the transformer forward with qk-attention 2.2/2.3"]
-    async fn engine_permit_bounds_and_generates() {
-        let d_model = 4usize;
-        let vocab = 32usize;
-        let mut embedding = vec![0f64; vocab * d_model];
-        for (i, cell) in embedding.iter_mut().enumerate() {
-            *cell = ((i % 5) as f64 - 2.0) * 0.5;
-        }
-        let weights = ModelWeights::from_layers(
-            vec![("l0".into(), layer_fixture())],
+    /// A full one-block transformer fixture: the layer fixture's (4,4,8)
+    /// matrices under the engine's projection names, so `from_layers`
+    /// resolves a real block (E-2.3 path).
+    fn transformer_fixture_weights(
+        embedding: Vec<f64>,
+        vocab: usize,
+        d_model: usize,
+    ) -> ModelWeights {
+        let suffixes = [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+            "self_attn.o_proj",
+            "mlp.gate_proj",
+            "mlp.up_proj",
+            "mlp.down_proj",
+        ];
+        let layers: Vec<(String, Layer)> = suffixes
+            .iter()
+            .enumerate()
+            .map(|(i, suffix)| {
+                (
+                    format!("layers.0.inner.{suffix}"),
+                    layer_fixture_with_seed(i as u64),
+                )
+            })
+            .collect();
+        ModelWeights::from_layers(
+            layers,
             embedding,
             None,
             d_model,
@@ -648,12 +1076,31 @@ mod tests {
             ],
             vec![0.0; 3 * d_model],
         )
-        .unwrap();
+        .expect("transformer fixture resolves")
+    }
+
+    fn fixture_embedding(vocab: usize, d_model: usize) -> Vec<f64> {
+        let mut embedding = vec![0f64; vocab * d_model];
+        for (i, cell) in embedding.iter_mut().enumerate() {
+            *cell = ((i % 5) as f64 - 2.0) * 0.5;
+        }
+        embedding
+    }
+
+    #[tokio::test]
+    async fn engine_permit_bounds_and_generates() {
+        let d_model = 4usize;
+        let vocab = 32usize;
+        let weights = Arc::new(transformer_fixture_weights(
+            fixture_embedding(vocab, d_model),
+            vocab,
+            d_model,
+        ));
         let model = crate::model::LoadedModel {
             id: "t".into(),
-            weights: Arc::new(weights),
+            weights: Arc::clone(&weights),
             tokenizer: test_tokenizer(),
-            eos_token_id: 2,
+            eos_token_id: u32::MAX, // unreachable: bound the run by max_tokens
             bos_token_id: 1,
             vocab_size: vocab,
             d_model,
@@ -665,49 +1112,41 @@ mod tests {
             .generate(&permit, &[3, 4, 5], 3, None)
             .expect("generation ok");
         assert_eq!(out.prompt_tokens, 3);
-        // Greedy chain from embedding[5] with this fixture: 2 then EOS(2)…
-        // eos=2 fires when the argmax picks 2; assert the invariant bounds
-        // instead of the exact chain (layout-specific).
         assert!(out.completion_tokens.len() <= 3);
+        // Determinism (E-2.1): the same prompt twice must produce the
+        // identical token stream.
+        let permit2 = engine.acquire().await;
+        let out2 = engine
+            .generate(&permit2, &[3, 4, 5], 3, None)
+            .expect("generation ok");
+        assert_eq!(out.completion_tokens, out2.completion_tokens);
         drop(permit);
+        drop(permit2);
         assert_eq!(engine.available_permits(), 2);
     }
 
     #[tokio::test]
-    #[ignore = "generation rewires onto the transformer forward with qk-attention 2.2/2.3"]
     async fn generate_stops_at_eos() {
-        // Probe shows the fixture's greedy chain reaches token 2 at step 1;
-        // configure eos = 2 so the SAME run must terminate with Stop.
         let d_model = 4usize;
         let vocab = 32usize;
-        let mut embedding = vec![0f64; vocab * d_model];
-        for (i, cell) in embedding.iter_mut().enumerate() {
-            *cell = ((i % 5) as f64 - 2.0) * 0.5;
-        }
-        let weights = ModelWeights::from_layers(
-            vec![("l0".into(), layer_fixture())],
-            embedding,
-            None,
-            d_model,
+        let weights = Arc::new(transformer_fixture_weights(
+            fixture_embedding(vocab, d_model),
             vocab,
-            1,
-            2,
-            2,
-            2,
-            1e-6,
-            10_000.0,
-            vec![
-                quantibbler_qpk1::NormSlot::Input,
-                quantibbler_qpk1::NormSlot::PostAttention,
-            ],
-            vec![0.0; 3 * d_model],
-        )
-        .unwrap();
+            d_model,
+        ));
+        // Self-consistent probe: the first greedy token from the fixture
+        // (via the real prefill) becomes EOS, so the SAME run must
+        // terminate with Stop and an empty completion (OpenAI semantics).
+        let mut cache = KvCache::new(weights.n_layers, weights.n_kv_heads * weights.head_dim);
+        let logits = weights
+            .forward_prefill(&[10], &mut cache)
+            .expect("prefill ok");
+        let eos = crate::sampler::greedy(&logits[..vocab]);
         let model = crate::model::LoadedModel {
             id: "t".into(),
-            weights: Arc::new(weights),
+            weights,
             tokenizer: test_tokenizer(),
-            eos_token_id: 2,
+            eos_token_id: eos,
             bos_token_id: 1,
             vocab_size: vocab,
             d_model,

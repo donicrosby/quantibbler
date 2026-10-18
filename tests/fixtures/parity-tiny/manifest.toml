@@ -35,5 +35,5 @@ layers = [
 
 [sidecar]
 embedding = "e1.f32.bin"
-lm_head = "e1.f32.bin"
+lm_head = "head.f32.bin"
 norms = "norms.bin"

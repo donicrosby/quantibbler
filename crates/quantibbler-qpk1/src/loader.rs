@@ -23,8 +23,10 @@
 //!    crafted config can neither wrap the expected-length equality nor
 //!    drive multi-GB allocations at request time.
 //! 4. **Fail-closed `weight_tying`.** The field is validated against the
-//!    documented forms (`unset` or `"lm_head=e1@fp32"`); unknown values
-//!    abort startup instead of being silently ignored.
+//!    documented forms (`unset` or `"lm_head=<path>@fp32"`; the tied
+//!    sentinel `"lm_head=e1@fp32"` reuses the embedding sidecar, an untied
+//!    head names its own fp32 matrix); unknown values abort startup
+//!    instead of being silently ignored.
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -540,12 +542,24 @@ impl ModelConfig {
             }
         }
         match self.weight_tying.as_deref() {
-            None | Some("lm_head=e1@fp32") => {}
-            Some(other) => {
-                return Err(format!(
-                    "{}: unknown weight_tying {other:?}; documented forms: unset or \"lm_head=e1@fp32\"",
-                    config_path.display()
-                ));
+            None => {}
+            Some(wt) => {
+                // Documented forms: "lm_head=<relative-path>@fp32". The
+                // tied sentinel "lm_head=e1@fp32" reuses the embedding
+                // sidecar; any other path names its own fp32 head matrix
+                // (resolved from the manifest's [sidecar] lm_head, which
+                // must agree at load). Only fp32 is a declared dtype.
+                let valid = wt
+                    .strip_prefix("lm_head=")
+                    .and_then(|rest| rest.strip_suffix("@fp32"))
+                    .is_some_and(|path| !path.is_empty());
+                if !valid {
+                    return Err(format!(
+                        "{}: unknown weight_tying {wt:?}; documented forms: \
+                         unset or \"lm_head=<path>@fp32\" (tied: \"lm_head=e1@fp32\")",
+                        config_path.display()
+                    ));
+                }
             }
         }
         Ok(())
@@ -564,7 +578,8 @@ mod tests {
     fn loads_the_valid_fixture() {
         let m = load(&dir()).expect("fixture model loads");
         assert_eq!(m.model_id, "server-model-fixture");
-        assert_eq!(m.layers.len(), 1);
+        // One real transformer block = seven packed projections.
+        assert_eq!(m.layers.len(), 7);
         assert_eq!(m.vocab_size, 32);
         assert_eq!(m.d_model, 4);
         assert_eq!(m.embedding.len(), 32 * 4);

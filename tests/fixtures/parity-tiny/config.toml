@@ -3,7 +3,7 @@ vocab_size = 128
 d_model = 64
 eos_token_id = 0
 bos_token_id = 1
-weight_tying = "lm_head=e1@fp32"
+weight_tying = "lm_head=head.f32.bin@fp32"
 n_layers = 2
 n_heads = 4
 n_kv_heads = 2

@@ -113,6 +113,7 @@ def main() -> None:
 
     inventory = qhf._export_norm_inventory(causal)
     FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
+    tied = bool(getattr(causal.config, "tie_word_embeddings", False))
     qhf.export_model_directory(
         FIXTURE_DIR,
         qm,
@@ -125,13 +126,23 @@ def main() -> None:
         geometry=qhf._export_geometry(causal),
         inventory=inventory,
         norm_weights=qhf._export_norm_weights(causal, inventory),
+        lm_head_f64=(
+            None if tied else causal.lm_head.weight.detach().to(torch.float64).cpu().numpy()
+        ),
+        tied=tied,
     )
 
-    # Golden reference: post-quantization HF forward at fp32 (the artifact
-    # was written back into `causal` by quantize_model), teacher-forced.
+    # Golden reference: fp32 forward of the EXACT artifact weights. The
+    # quantized model was written back into `causal` (bf16) by
+    # quantize_model; bf16 re-rounds the f16 scales, so a bf16 golden would
+    # not be the artifact's math. Casting to fp32 widens the f16 scales
+    # losslessly — the same numbers the qpk1 stream carries — so the
+    # engine-vs-HF budget (E-2.2) measures forward SEMANTICS, not dtype
+    # noise. Teacher-forced, all positions.
+    causal_f32 = causal.to(torch.float32)
     ids = torch.tensor([INPUT_IDS], dtype=torch.long)
     with torch.no_grad():
-        logits = causal(ids).logits.to(torch.float32)[0]
+        logits = causal_f32(ids).logits.to(torch.float32)[0]
     goldens = {
         "input_ids": INPUT_IDS,
         "geometry": qhf._export_geometry(causal),

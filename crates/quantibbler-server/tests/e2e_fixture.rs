@@ -71,7 +71,7 @@ fn e2e_reader_matches_representation_known_layer() {
 #[ignore = "generation rewires onto the transformer forward with qk-attention 2.2/2.3"]
 fn e2e_fixture_model_serves_end_to_end() {
     // Size formula (qk-representation SF-1.1).
-    let layer_path = fixture_dir().join("layers/block0.mlp.fc.qpk1");
+    let layer_path = fixture_dir().join("layers/q_proj.qpk1");
     let raw = std::fs::read(&layer_path).expect("fixture layer bytes");
     let parsed = quantibbler_qpk1::parse(&raw).expect("fixture stream parses");
     let w = parsed.dtype.itemsize();

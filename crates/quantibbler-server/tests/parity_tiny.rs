@@ -73,9 +73,14 @@ fn block_forward_matches_hf_reference_within_budget() {
     let mut max_abs_diff: f32 = 0.0;
     for (pos, row) in golden_rows.iter().enumerate() {
         let seq = pos + 1;
+        // FRESH cache per prefix: position `seq-1`'s logits must not depend
+        // on how the cache was filled (teacher-forced invariance, the
+        // property the KV-cache decode path has to preserve, E-2.1).
+        let mut cache =
+            engine::KvCache::new(weights.n_layers, weights.n_kv_heads * weights.head_dim);
         let logits = weights
-            .forward_prefill(&input_ids[..seq])
-            .expect("transformer forward (wired by qk-attention 2.2/2.3)");
+            .forward_prefill(&input_ids[..seq], &mut cache)
+            .expect("transformer forward (qk-attention 2.2/2.3)");
         assert_eq!(logits.len(), seq * weights.vocab_size, "seq x vocab logits");
         let start = (seq - 1) * weights.vocab_size;
         let golden: Vec<f32> = row

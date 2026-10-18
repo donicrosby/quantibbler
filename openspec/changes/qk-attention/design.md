@@ -2,6 +2,47 @@
 
 ## Implementation crystallization
 
+### 2026-10-18 — Engine transformer forward + head-tying contract fix (chunk B)
+
+- **2.2/2.3 landed:** RMSNorm (f32, config eps), RoPE (HF rotate_half
+  convention — pairs `(i, i+half)`, NOT interleaved), per-head q/k RMSNorm
+  (declared inventory drives application, E-2.3), GQA causal attention with
+  an append-only per-block KV cache, SwiGLU MLP, residuals, final norm +
+  head. `forward_prefill` returns ALL positions' `[seq x vocab]` logits
+  (the parity vehicle); serving `decode_start` trunk-prefills all but the
+  last prompt position and head-projects only the last. E-2.2 parity GREEN:
+  max |Δlogit| = 4.1e-5 against the fp32-of-artifact goldens (budget 1e-2).
+- **Golden-reference regime corrected:** the parities measure engine-vs-HF
+  on the EXACT artifact math — f16 scales widen losslessly to fp32 — by
+  casting the artifact-written-back model to fp32 for the golden forward.
+  (A bf16 golden re-rounds the scales and would bake dtype noise into the
+  budget; the committed fixture had exactly that defect.)
+- **Found by the parity gate, root-caused by a Python mirror of the Rust
+  algorithm (tools/diag_parity_mirror.py, mirror-vs-HF ≈ 4e-6):** the
+  exporter hard-coded `weight_tying = "lm_head=e1@fp32"` — but Qwen3
+  ships `tie_word_embeddings = false`, so every logit was computed through
+  the embedding instead of the real head (Δ ≈ 1.43, position 0 included,
+  which exonerated attention/RoPE early). Fixes: the exporter now exports
+  the model's ACTUAL tying (real `head.f32.bin` when untied), and the
+  loader's weight_tying grammar is the general form
+  `lm_head=<path>@fp32` (tied sentinel still accepted; unknown forms fail
+  closed as before). No archived spec pinned the old sentinel.
+- **server-model fixture is now a real transformer block:** seven
+  `layers.0.inner.*` projections (q/k/v/o/gate/up/down) at the same
+  4x4x4 geometry, so load-res (manifest-name → block resolution) is
+  exercised by the acquisition suite; corruption variants target
+  `layers/q_proj.qpk1`. The old single `block0.mlp.fc` fixture would have
+  been rejected by the resolving engine.
+- **Engine tests un-ignored:** `engine_permit_bounds_and_generates` (adds
+  an E-2.1 determinism double-run; EOS made unreachable via `u32::MAX`) and
+  `generate_stops_at_eos` (EOS = the fixture's own first greedy token —
+  self-consistent, no layout assumptions) run against the transformer
+  fixture path.
+- RoPE convention lesson: HF's Llama/Qwen line is rotate_half; the
+  interleaved-pairs reading moved Δ by <1e-5 and was NOT the bug — the
+  position-0 probe (attention output = v₀ exactly at pos 0) is what
+  isolated the head.
+
 ### 2026-10-18 — Norm inventory is the layout contract (chunk A1)
 
 - **`norm_slots` is the single source of truth for norm-sidecar layout**

@@ -1,9 +1,9 @@
 # qk-server fixture manifest (design D3)
 model_id = "server-model-fixture"
-layers = [ "block0.mlp.fc" ]
+layers = [ "layers.0.inner.self_attn.q_proj" ]
 
 [layer_files]
-"block0.mlp.fc" = "../evil.qpk1"
+"layers.0.inner.self_attn.q_proj" = "../evil.qpk1"
 
 [sidecar]
 embedding = "e1.f32.bin"
