@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use quantibbler_kernels::core;
-use quantibbler_qpk1::Layer;
+use quantibbler_qpk1::{Layer, NormSlot, inventory_block_floats};
 
 /// Error surface of the engine (maps to the 500 envelope at the API edge).
 #[derive(Debug)]
@@ -172,15 +172,24 @@ pub struct ModelWeights {
     pub lm_head: Option<Vec<f32>>,
     pub d_model: usize,
     pub vocab_size: usize,
-    /// Validated attention geometry (qk-attention N-2) + norm sidecar,
-    /// laid out per block (input_layernorm, post_attention_layernorm) then
-    /// the model-final norm — `(2 * n_layers + 1) * d_model` floats.
+    /// Validated attention geometry (qk-attention N-2). The norm sidecar
+    /// below is laid out by the DECLARED inventory (`norm_slots`, qk-attention
+    /// N-1.0): per block, each slot's vector in inventory order
+    /// (`input`/`post_attention`/`post_feedforward` at `d_model` floats,
+    /// `q_norm`/`k_norm` at `head_dim`), then the model-final norm
+    /// (`d_model`). Every count is derived from the inventory — no model
+    /// family's formula lives in the engine.
     pub n_layers: usize,
     pub n_heads: usize,
     pub n_kv_heads: usize,
     pub head_dim: usize,
     pub rms_norm_eps: f64,
     pub rope_theta: f64,
+    /// Declared per-block norm inventory, in sidecar order. Drives the
+    /// transformer forward's norm application (E-2.0/E-2.3); unwired until
+    /// qk-attention 2.2/2.3 land the forward (same pattern as vb_rows).
+    #[allow(dead_code)]
+    pub norm_slots: Vec<NormSlot>,
     pub norm_weights: Vec<f32>,
 }
 
@@ -204,6 +213,7 @@ impl ModelWeights {
         head_dim: usize,
         rms_norm_eps: f64,
         rope_theta: f64,
+        norm_slots: Vec<NormSlot>,
         norm_weights: Vec<f64>,
     ) -> Result<Self, EngineError> {
         if embedding.len() != d_model * vocab_size {
@@ -229,11 +239,19 @@ impl ModelWeights {
             .into_iter()
             .map(|(name, layer)| PackedLayer::from_layer(name, &layer))
             .collect::<Result<Vec<_>, _>>()?;
-        if norm_weights.len() != (2 * n_layers + 1) * d_model {
+        // Sidecar length is INVENTORY-derived (qk-attention N-1.0): the
+        // engine, like the loader, knows no model family's formula.
+        let per_block = inventory_block_floats(&norm_slots, d_model, head_dim);
+        let expected_norm_floats = per_block
+            .checked_mul(n_layers)
+            .and_then(|p| p.checked_add(d_model))
+            .ok_or_else(|| EngineError("norm sidecar count overflows".into()))?;
+        if norm_weights.len() != expected_norm_floats {
             return Err(EngineError(format!(
-                "norm sidecar is {} floats; expected (2 * {n_layers} + 1) * {d_model} = {}",
+                "norm sidecar is {} floats; inventory {:?} at d_model {d_model}, \
+                 head_dim {head_dim} over {n_layers} layers requires {expected_norm_floats}",
                 norm_weights.len(),
-                (2 * n_layers + 1) * d_model
+                norm_slots.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             )));
         }
         Ok(Self {
@@ -248,6 +266,7 @@ impl ModelWeights {
             head_dim,
             rms_norm_eps,
             rope_theta,
+            norm_slots,
             norm_weights: f32ify(norm_weights),
         })
     }
@@ -623,6 +642,10 @@ mod tests {
             2,
             1e-6,
             10_000.0,
+            vec![
+                quantibbler_qpk1::NormSlot::Input,
+                quantibbler_qpk1::NormSlot::PostAttention,
+            ],
             vec![0.0; 3 * d_model],
         )
         .unwrap();
@@ -673,6 +696,10 @@ mod tests {
             2,
             1e-6,
             10_000.0,
+            vec![
+                quantibbler_qpk1::NormSlot::Input,
+                quantibbler_qpk1::NormSlot::PostAttention,
+            ],
             vec![0.0; 3 * d_model],
         )
         .unwrap();

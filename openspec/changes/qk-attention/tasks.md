@@ -16,9 +16,13 @@
 
 ## 2. Engine transformer forward (CPU-correct first)
 
-- [ ] 2.1 Write failing parity test: tiny Qwen3 fixture exported through the
+- [x] 2.1 Write failing parity test: tiny Qwen3 fixture exported through the
       driver, engine block forward vs HF reference forward, max |Δlogit| ≤
-      1e-2 (RED before implementation).
+      1e-2 (RED before implementation). RED observed 2026-10-18 after the
+      inventory contract (A1) landed: acquisition + declared-inventory
+      cross-check pass, forward fails at the engine's `unimplemented!`
+      prefill — the budget assertion itself stays unreachably RED by
+      construction until 2.2/2.3 wire it (see design.md crystallization).
 - [ ] 2.2 RMSNorm (f32, eps from config), RoPE (theta from config, f32
       cos/sin tables computed once at load), GQA causal attention with KV
       cache over packed Q/K/V projections.

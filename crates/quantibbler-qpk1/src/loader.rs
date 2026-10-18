@@ -46,11 +46,12 @@ const MAX_SIDECAR_BYTES: u64 = 4 << 30;
 /// sizes; real models sit at ~1e5 vocab, ~1e4 d_model.
 const MAX_DIM: usize = 1 << 26;
 /// Cap on declared block count (config.toml). Bounds the norm-sidecar
-/// product (`(2 * n_layers + 1) * d_model`) through `checked_mul`; real
-/// frontier models top out around two hundred blocks.
+/// product (per-block inventory floats * n_layers + d_model) through
+/// `checked_mul`; real frontier models top out around two hundred blocks.
 const MAX_LAYERS: usize = 1 << 12;
 
 /// A fully loaded and validated model directory.
+#[derive(Debug)]
 pub struct ModelDirectory {
     /// The served model id (`manifest.toml`'s `model_id`).
     pub model_id: String,
@@ -67,14 +68,78 @@ pub struct ModelDirectory {
     pub head_dim: usize,
     pub rms_norm_eps: f64,
     pub rope_theta: f64,
+    /// Declared norm inventory (config.toml `norm_slots`), in file order.
+    pub norm_slots: Vec<NormSlot>,
     /// fp32 embedding, `vocab_size x d_model`, widened to f64.
     pub embedding: Vec<f64>,
     /// fp32 lm_head when not weight-tied, same layout.
     pub lm_head: Option<Vec<f64>>,
-    /// Norm sidecar, `(2 * n_layers + 1) * d_model` floats widened to f64:
-    /// per block `input_layernorm`, `post_attention_layernorm`, then the
-    /// model-final norm — the engine's block iteration order (N-1).
+    /// Norm sidecar, `norm_slots.total_floats() * n_layers + d_model`
+    /// floats widened to f64: per block, every declared slot's vector in
+    /// inventory order; then the model-final norm. Layout is fully
+    /// derived from the declared inventory — no architecture is
+    /// hard-coded (qk-attention N-1, amended).
     pub norm_weights: Vec<f64>,
+}
+
+/// One declared norm slot and the width of its vector per block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NormSlot {
+    /// Transformer-block input RMSNorm: `d_model` floats.
+    Input,
+    /// Post-attention RMSNorm: `d_model` floats.
+    PostAttention,
+    /// Attention q-norm over `head_dim` floats (one shared vector,
+    /// broadcast across heads).
+    QNorm,
+    /// Attention k-norm over `head_dim` floats.
+    KNorm,
+    /// Post-feedforward RMSNorm (Gemma-style sandwich): `d_model` floats.
+    PostFeedforward,
+}
+
+impl NormSlot {
+    /// Config.toml spelling; also the inventory's canonical order index.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::PostAttention => "post_attention",
+            Self::QNorm => "q_norm",
+            Self::KNorm => "k_norm",
+            Self::PostFeedforward => "post_feedforward",
+        }
+    }
+
+    /// Vector width for one block, given the model geometry.
+    pub fn width(self, d_model: usize, head_dim: usize) -> usize {
+        match self {
+            Self::QNorm | Self::KNorm => head_dim,
+            _ => d_model,
+        }
+    }
+}
+
+impl std::str::FromStr for NormSlot {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "input" => Ok(Self::Input),
+            "post_attention" => Ok(Self::PostAttention),
+            "q_norm" => Ok(Self::QNorm),
+            "k_norm" => Ok(Self::KNorm),
+            "post_feedforward" => Ok(Self::PostFeedforward),
+            other => Err(format!(
+                "unknown norm slot {other:?}; known: input, post_attention, \
+                 q_norm, k_norm, post_feedforward"
+            )),
+        }
+    }
+}
+
+/// Per-block float count of a declared inventory.
+pub fn inventory_block_floats(slots: &[NormSlot], d_model: usize, head_dim: usize) -> usize {
+    slots.iter().map(|s| s.width(d_model, head_dim)).sum()
 }
 
 /// Load a qpk1 model directory, or fail with a diagnostic naming the file.
@@ -174,9 +239,10 @@ pub fn load(model_dir: &Path) -> Result<ModelDirectory, String> {
         Some(read_f32_bin_exact(&head_path, expected_bytes)?)
     };
 
-    // Norm sidecar (qk-attention N-1): one entry per transformer block
-    // (input layernorm + post-attention layernorm) plus the model-final
-    // norm, at d_model floats each.
+    // Norm sidecar (qk-attention N-1, amended): per block the input
+    // layernorm + post-attention layernorm (d_model each) and the
+    // attention q/k norms (head_dim each, one shared vector per
+    // projection), plus the model-final norm.
     let norms_path = contained_join(model_dir, &sidecar.norms).map_err(|why| {
         format!(
             "{}: sidecar norms path {:?} rejected: {why}",
@@ -184,14 +250,20 @@ pub fn load(model_dir: &Path) -> Result<ModelDirectory, String> {
             sidecar.norms
         )
     })?;
-    let norm_floats = (2usize)
+    let slots: Vec<NormSlot> = config
+        .norm_slots
+        .iter()
+        .map(|s| s.parse::<NormSlot>().expect("validated inventory"))
+        .collect();
+    let per_block = inventory_block_floats(&slots, config.d_model, config.head_dim);
+    let norm_floats = per_block
         .checked_mul(config.n_layers)
-        .and_then(|p| p.checked_add(1))
-        .and_then(|p| p.checked_mul(config.d_model))
+        .and_then(|p| p.checked_add(config.d_model))
         .ok_or_else(|| {
             format!(
-                "{}: (2 * n_layers + 1) * d_model overflows",
-                config_path.display()
+                "{}: norm sidecar count overflows (inventory {:?})",
+                config_path.display(),
+                config.norm_slots
             )
         })?;
     let norm_bytes = checked_bytes(norm_floats, &config_path)?;
@@ -210,6 +282,7 @@ pub fn load(model_dir: &Path) -> Result<ModelDirectory, String> {
         head_dim: config.head_dim,
         rms_norm_eps: config.rms_norm_eps,
         rope_theta: config.rope_theta,
+        norm_slots: slots,
         embedding,
         lm_head,
         norm_weights,
@@ -317,7 +390,7 @@ struct Sidecar {
     /// is weight-tied.
     lm_head: String,
     /// Path of the fp32 norm-weights sidecar (qk-attention N-1):
-    /// `(2 * n_layers + 1) * d_model` floats, row-major, LE float32.
+    /// inventory-derived floats, row-major, LE float32.
     norms: String,
 }
 
@@ -334,6 +407,11 @@ struct ModelConfig {
     head_dim: usize,
     rms_norm_eps: f64,
     rope_theta: f64,
+    /// Declared per-block norm inventory (qk-attention N-1, amended): the
+    /// architecture states which norm vectors exist, in file order. The
+    /// sidecar byte length is derived from this — no architecture is
+    /// hard-coded here.
+    norm_slots: Vec<String>,
     /// Documented forms (qk-server C5): unset, or `"lm_head=e1@fp32"`
     /// (weight-tied fp32 head). Anything else is a config error.
     #[serde(default)]
@@ -438,6 +516,29 @@ impl ModelConfig {
                 self.rope_theta
             ));
         }
+        // Norm inventory (N-1): non-empty, every name known, no repeats.
+        // The ENGINE decides which slots its forward consumes; the loader
+        // only guarantees the file matches the declaration.
+        if self.norm_slots.is_empty() {
+            return Err(format!(
+                "{}: norm_slots must declare at least one slot",
+                config_path.display()
+            ));
+        }
+        for s in &self.norm_slots {
+            if let Err(why) = s.parse::<NormSlot>() {
+                return Err(format!("{}: {why}", config_path.display()));
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for s in &self.norm_slots {
+            if !seen.insert(s.as_str()) {
+                return Err(format!(
+                    "{}: duplicate norm slot {s:?}",
+                    config_path.display()
+                ));
+            }
+        }
         match self.weight_tying.as_deref() {
             None | Some("lm_head=e1@fp32") => {}
             Some(other) => {
@@ -468,6 +569,52 @@ mod tests {
         assert_eq!(m.d_model, 4);
         assert_eq!(m.embedding.len(), 32 * 4);
         assert!(m.lm_head.is_none(), "fixture is weight-tied");
+    }
+
+    #[test]
+    fn cross_inventory_sidecar_count_is_rejected() {
+        // N-1.3: identical geometry, different declared inventory -> the
+        // sidecar is validated against ITS OWN inventory's count. The valid
+        // fixture (Qwen3-class inventory, 16-float sidecar) must FAIL with a
+        // Llama-class inventory (expects 12 floats), proving the count is
+        // inventory-derived, not baked into the loader.
+        let src = dir();
+        let tmp = std::env::temp_dir().join(format!(
+            "qpk1-n13-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fn copy_rec(src: &Path, dst: &Path) {
+            std::fs::create_dir_all(dst).expect("mkdir");
+            for entry in std::fs::read_dir(src).expect("read_dir") {
+                let entry = entry.expect("dir entry");
+                let to = dst.join(entry.file_name());
+                if entry.path().is_dir() {
+                    copy_rec(&entry.path(), &to);
+                } else {
+                    std::fs::copy(entry.path(), &to).expect("copy file");
+                }
+            }
+        }
+        copy_rec(&src, &tmp);
+        let cfg_path = tmp.join("config.toml");
+        let cfg = std::fs::read_to_string(&cfg_path).expect("config");
+        let llama_cfg = cfg.replace(
+            "norm_slots = [\"input\", \"post_attention\", \"q_norm\", \"k_norm\"]",
+            "norm_slots = [\"input\", \"post_attention\"]",
+        );
+        assert_ne!(cfg, llama_cfg, "inventory line must exist to be swapped");
+        std::fs::write(&cfg_path, llama_cfg).expect("rewrite config");
+        let err = load(&tmp).expect_err("sidecar must reject against the other inventory");
+        // 12 Llama-class floats x 4 bytes = 48: the swap target's count.
+        assert!(
+            err.contains("48 bytes"),
+            "error must name the other inventory's byte count: {err}"
+        );
+        std::fs::remove_dir_all(&tmp).expect("cleanup");
     }
 
     #[test]
@@ -518,6 +665,12 @@ mod tests {
             head_dim: 2,
             rms_norm_eps: 1e-6,
             rope_theta: 10_000.0,
+            norm_slots: vec![
+                "input".into(),
+                "post_attention".into(),
+                "q_norm".into(),
+                "k_norm".into(),
+            ],
             weight_tying: Some("lm_head=e1@fp32".into()),
         }
     }
@@ -551,6 +704,47 @@ mod tests {
             .validate(Path::new("config.toml"))
             .expect_err("non-multiple heads must fail");
         assert!(err.contains("GQA group mismatch"), "{err}");
+    }
+
+    #[test]
+    fn inventory_rejects_unknown_empty_and_duplicate() {
+        let empty = ModelConfig {
+            norm_slots: vec![],
+            ..valid_config()
+        };
+        assert!(empty.validate(Path::new("config.toml")).is_err());
+        let unknown = ModelConfig {
+            norm_slots: vec!["input".into(), "banana".into()],
+            ..valid_config()
+        };
+        let err = unknown
+            .validate(Path::new("config.toml"))
+            .expect_err("unknown slot must fail");
+        assert!(err.contains("unknown norm slot"), "{err}");
+        let dupe = ModelConfig {
+            norm_slots: vec!["input".into(), "input".into()],
+            ..valid_config()
+        };
+        let err = dupe
+            .validate(Path::new("config.toml"))
+            .expect_err("duplicate slot must fail");
+        assert!(err.contains("duplicate norm slot"), "{err}");
+        // Known alternative inventories load-validate: Llama-class (no
+        // q/k norms) and Gemma-style post_feedforward.
+        let llama_like = ModelConfig {
+            norm_slots: vec!["input".into(), "post_attention".into()],
+            ..valid_config()
+        };
+        assert!(llama_like.validate(Path::new("config.toml")).is_ok());
+        let gemma_like = ModelConfig {
+            norm_slots: vec![
+                "input".into(),
+                "post_attention".into(),
+                "post_feedforward".into(),
+            ],
+            ..valid_config()
+        };
+        assert!(gemma_like.validate(Path::new("config.toml")).is_ok());
     }
 
     #[test]
@@ -639,8 +833,21 @@ mod tests {
     #[test]
     fn loads_the_valid_fixture_with_sidecar_and_geometry() {
         let m = load(&dir()).expect("fixture model loads");
-        // Sidecar: (2 * n_layers + 1) * d_model = 3 * 4 floats.
-        assert_eq!(m.norm_weights.len(), (2 * m.n_layers + 1) * m.d_model);
+        // Inventory [input, post_attention, q_norm, k_norm] at d_model 4,
+        // head_dim 2: 4+4+2+2 = 12 floats/block; +4 final = 28.
+        assert_eq!(
+            m.norm_weights.len(),
+            inventory_block_floats(&m.norm_slots, m.d_model, m.head_dim) * m.n_layers + m.d_model
+        );
+        assert_eq!(
+            m.norm_slots,
+            vec![
+                NormSlot::Input,
+                NormSlot::PostAttention,
+                NormSlot::QNorm,
+                NormSlot::KNorm
+            ]
+        );
         assert_eq!(m.n_heads, 2);
         assert_eq!(m.n_kv_heads, 2);
         assert_eq!(m.head_dim, 2);

@@ -39,6 +39,21 @@ fn block_forward_matches_hf_reference_within_budget() {
     let loaded = model::load(&fixture_dir()).expect("parity fixture loads");
     let weights = &loaded.weights;
 
+    // E-2.3 hook: the engine must have loaded exactly the inventory the
+    // fixture declared — the forward is driven by THIS list, not by any
+    // baked-in family assumption.
+    let golden_slots: Vec<&str> = goldens["norm_slots"]
+        .as_array()
+        .expect("norm_slots array")
+        .iter()
+        .map(|v| v.as_str().expect("slot name"))
+        .collect();
+    let loaded_slots: Vec<&str> = weights.norm_slots.iter().map(|s| s.as_str()).collect();
+    assert_eq!(
+        loaded_slots, golden_slots,
+        "engine loaded a different norm inventory than the fixture declares (E-2.3)"
+    );
+
     let input_ids: Vec<u32> = goldens["input_ids"]
         .as_array()
         .expect("input_ids array")

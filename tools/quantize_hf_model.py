@@ -285,13 +285,15 @@ def export_model_directory(
     tokenizer,
     config_f64: dict,
     geometry: dict,
+    inventory: list[str],
     norm_weights: np.ndarray,
 ) -> None:
     """Write the qk-server acquisition directory (loader-validated layout).
 
     Layer streams land at layers/<dotted/name/path>.qpk1; the fp32 sidecar
     is the embedding row-major [vocab, d_model] LE float32; the tied head
-    reuses the same file via weight_tying = "lm_head=e1@fp32".
+    reuses the same file via weight_tying = "lm_head=e1@fp32". config.toml
+    declares the norm inventory (norm_slots) the sidecar is laid out by.
     """
     layer_files: dict[str, str] = {}
     for name, blob in sorted(qm.serialize().items()):
@@ -317,12 +319,13 @@ def export_model_directory(
         f"head_dim = {geometry['head_dim']}\n"
         f"rms_norm_eps = {geometry['rms_norm_eps']}\n"
         f"rope_theta = {geometry['rope_theta']}\n"
+        "norm_slots = [" + ", ".join(f'"{s}"' for s in inventory) + "]\n"
     )
 
-    # Norm sidecar: fp32 LE — per block (input_layernorm,
-    # post_attention_layernorm), then the model-final norm. The loader
-    # requires exactly (2 * n_layers + 1) * d_model floats (qk-attention
-    # N-1); asserted below so a miscount fails here, not at server load.
+    # Norm sidecar: fp32 LE — per block, each declared inventory slot's
+    # vector in order, then the model-final norm. The loader requires the
+    # inventory-derived count (qk-attention N-1); asserted below so a
+    # miscount fails here, not at server load.
     norms = np.ascontiguousarray(norm_weights, dtype=np.float32)
     (out_dir / "norms.bin").write_bytes(norms.tobytes(order="C"))
 
@@ -347,7 +350,7 @@ def export_model_directory(
     # Self-check the loader-facing contract (cheap, byte-level — this is the
     # tripwire that catches a half-updated export before 30 GPU-minutes are
     # spent): layer stream header parses, and the norm sidecar carries
-    # exactly (2 * n_layers + 1) * d_model fp32 LE floats (N-1).
+    # exactly the inventory-derived float count (qk-attention N-1.0).
     first = sorted(layer_files.values())[0]
     header = struct.unpack("<4sIIIII", (out_dir / first).read_bytes()[:24])
     assert header[0] == b"QPK1" and header[1] == 1, header
@@ -355,10 +358,13 @@ def export_model_directory(
     # GQA rule n_kv*head_dim == d_model is enforced server-side; heads/width
     # need not equal it per-axis, so derive the count from the same place).
     d_model = embedding_f64.shape[1]
-    expected_norm_floats = (2 * geometry["n_layers"] + 1) * d_model
+    width = {"d_model": d_model, "head_dim": geometry["head_dim"]}
+    per_block = sum(width[_NORM_SLOT_WIDTH[s]] for s in inventory)
+    expected_norm_floats = per_block * geometry["n_layers"] + d_model
     assert norms.size == expected_norm_floats, (
-        f"norms.bin has {norms.size} floats; contract requires "
-        f"(2 * {geometry['n_layers']} + 1) * d_model = {expected_norm_floats}"
+        f"norms.bin has {norms.size} floats; inventory {inventory} at "
+        f"d_model {d_model}, head_dim {geometry['head_dim']} requires "
+        f"{per_block} x {geometry['n_layers']} + {d_model} = {expected_norm_floats}"
     )
     assert (out_dir / "norms.bin").stat().st_size == expected_norm_floats * 4
 
@@ -383,13 +389,54 @@ def _export_geometry(causal) -> dict:
     }
 
 
-def _export_norm_weights(causal) -> np.ndarray:
-    """Per-block (input, post-attention) norm weights, then the trunk-final
-    norm — the server's block iteration order (qk-attention N-1)."""
+def _export_norm_inventory(causal) -> list[str]:
+    """Declared per-block norm inventory (qk-attention N-1.0), read off the
+    live model's modules — a family lookup table would silently mislabel a
+    lookalike config; presence of the module is the truth. Order is the
+    sidecar's per-block layout order and must match the engine's slot
+    semantics (qk-attention E-2.0)."""
+    layer = causal.model.layers[0]
+    inventory = ["input", "post_attention"]
+    attn = layer.self_attn
+    if hasattr(attn, "q_norm") and hasattr(attn, "k_norm"):
+        inventory += ["q_norm", "k_norm"]
+    if hasattr(layer, "post_feedforward_layernorm"):
+        inventory += ["post_feedforward"]
+    if hasattr(layer, "mlp") and hasattr(layer.mlp, "final_norm"):
+        raise NotImplementedError(
+            "post-feedforward norm module shape not in the inventory "
+            "vocabulary; extend NormSlot + this resolver together"
+        )
+    return inventory
+
+
+_NORM_SLOT_MODULES = {
+    "input": lambda layer: layer.input_layernorm.weight,
+    "post_attention": lambda layer: layer.post_attention_layernorm.weight,
+    "q_norm": lambda layer: layer.self_attn.q_norm.weight,
+    "k_norm": lambda layer: layer.self_attn.k_norm.weight,
+    "post_feedforward": lambda layer: layer.post_feedforward_layernorm.weight,
+}
+
+_NORM_SLOT_WIDTH = {
+    "input": "d_model",
+    "post_attention": "d_model",
+    "post_feedforward": "d_model",
+    "q_norm": "head_dim",
+    "k_norm": "head_dim",
+}
+
+
+def _export_norm_weights(causal, inventory) -> np.ndarray:
+    """Per-block norm vectors in declared inventory order, then the
+    trunk-final norm — the sidecar layout (qk-attention N-1.0). q_norm /
+    k_norm ride head_dim-wide vectors (one per projection, broadcast
+    across heads)."""
     parts = []
     for layer in causal.model.layers:
-        parts.append(layer.input_layernorm.weight.detach().to(torch.float32))
-        parts.append(layer.post_attention_layernorm.weight.detach().to(torch.float32))
+        for slot in inventory:
+            w = _NORM_SLOT_MODULES[slot](layer)
+            parts.append(w.detach().to(torch.float32).reshape(-1))
     parts.append(causal.model.norm.weight.detach().to(torch.float32))
     return torch.cat(parts).cpu().numpy()
 
@@ -512,13 +559,14 @@ def main() -> int:
 
     print("[6/6] exporting qk-server model directory ->", out_dir, flush=True)
     embedding_f64 = causal.get_input_embeddings().weight.detach().to(torch.float64).cpu().numpy()
-    # Attention geometry + norm weights straight from the live model (never
-    # hardcoded): the exported artifact must be self-describing for the
-    # server's transformer forward (qk-attention N-1/N-2). Norm vector
-    # order: per block (input_layernorm, post_attention_layernorm), then
-    # the trunk-final norm — the server's block iteration order.
+    # Attention geometry + norm inventory + norm weights straight from the
+    # live model (never hardcoded): the exported artifact must be
+    # self-describing for the server's transformer forward (qk-attention
+    # N-1/N-2/E-2.0). The inventory IS the layout contract — sidecar order
+    # here must match the engine's slot semantics exactly.
     geometry = _export_geometry(causal)
-    norm_weights = _export_norm_weights(causal)
+    inventory = _export_norm_inventory(causal)
+    norm_weights = _export_norm_weights(causal, inventory)
 
     export_model_directory(
         out_dir,
@@ -530,6 +578,7 @@ def main() -> int:
         tokenizer=tokenizer,
         config_f64={"dtype_note": "solver float64 / scales fp16 / artifact qpk1"},
         geometry=geometry,
+        inventory=inventory,
         norm_weights=norm_weights,
     )
     report = {

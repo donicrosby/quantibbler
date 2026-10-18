@@ -26,7 +26,7 @@
 
 pub mod loader;
 
-pub use loader::ModelDirectory;
+pub use loader::{ModelDirectory, NormSlot, inventory_block_floats};
 
 /// Parsed scale dtype tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

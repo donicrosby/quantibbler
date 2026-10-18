@@ -49,6 +49,7 @@ pub fn load(model_dir: &Path) -> Result<LoadedModel, String> {
             dir.head_dim,
             dir.rms_norm_eps,
             dir.rope_theta,
+            dir.norm_slots.clone(),
             dir.norm_weights,
         )
         .map_err(|e| format!("{}: {e}", model_dir.join("manifest.toml").display()))?,

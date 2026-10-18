@@ -84,8 +84,34 @@ def main() -> None:
     )
     qm = quantize_model(model, batches, hyper)
 
-    # Export the quantized artifact (tokenizer is irrelevant to the parity
-    # forward; a stub keeps the export path honest without hub lookups).
+    # Non-unit q/k norm weights: unit-init q_norm/k_norm would make the
+    # sidecar contract unfalsifiable by the parity test (E-2.2 must cover
+    # them; a real Qwen3 ships trained, non-unit vectors). Deterministic.
+    with torch.no_grad():
+        for layer in causal.model.layers:
+            qn = layer.self_attn.q_norm.weight
+            kn = layer.self_attn.k_norm.weight
+            qn.copy_(1.0 + 0.05 * torch.arange(float(qn.numel())))
+            kn.copy_(1.0 - 0.04 * torch.arange(float(kn.numel())))
+
+    # Export the quantized artifact. The tokenizer must be REAL
+    # (model::load fail-closes on tokenizer.json) but irrelevant to the
+    # forward: a deterministic WordLevel id<->str map over the toy vocab.
+    from tokenizers import Tokenizer as _HFTokenizer
+    from tokenizers import models as _models
+    from tokenizers import pre_tokenizers as _pre
+
+    _tok = _HFTokenizer(
+        _models.WordLevel(vocab={str(i): i for i in range(VOCAB)}, unk_token="[UNK]")
+    )
+    _tok.pre_tokenizer = _pre.Whitespace()
+
+    class _TokStub:
+        @staticmethod
+        def save_pretrained(d):
+            _tok.save(str(Path(d) / "tokenizer.json"))
+
+    inventory = qhf._export_norm_inventory(causal)
     FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
     qhf.export_model_directory(
         FIXTURE_DIR,
@@ -94,10 +120,11 @@ def main() -> None:
         model_id="parity-tiny",
         eos_token_id=0,
         bos_token_id=1,
-        tokenizer=type("T", (), {"save_pretrained": staticmethod(lambda d: None)})(),
+        tokenizer=_TokStub(),
         config_f64={},
         geometry=qhf._export_geometry(causal),
-        norm_weights=qhf._export_norm_weights(causal),
+        inventory=inventory,
+        norm_weights=qhf._export_norm_weights(causal, inventory),
     )
 
     # Golden reference: post-quantization HF forward at fp32 (the artifact
@@ -108,6 +135,9 @@ def main() -> None:
     goldens = {
         "input_ids": INPUT_IDS,
         "geometry": qhf._export_geometry(causal),
+        # The engine must drive its forward from THIS inventory (E-2.3);
+        # recorded so the Rust parity test can assert what it loaded.
+        "norm_slots": inventory,
         # [seq, vocab] fp32, rounded to 1e-6 for a stable reviewable diff.
         "logits": [[round(float(v), 6) for v in row] for row in logits.tolist()],
     }

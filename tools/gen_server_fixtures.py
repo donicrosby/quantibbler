@@ -49,6 +49,22 @@ CONFIG = {
     "rope_theta": 10_000.0,
 }
 
+# Per-block norm inventory (qk-attention N-1.0): the fixture exercises the
+# Qwen3-class inventory (q/k norms present). Layout arithmetic below derives
+# from THIS list, mirroring the loader's inventory-derived count.
+NORM_SLOTS = ["input", "post_attention", "q_norm", "k_norm"]
+
+_NORM_SLOT_WIDTH = {
+    "input": "d_model",
+    "post_attention": "d_model",
+    "post_feedforward": "d_model",
+    "q_norm": "head_dim",
+    "k_norm": "head_dim",
+}
+
+# Geometry + inventory: every config.toml built from this string carries a
+# VALID norm inventory, so bad-variants reusing it fail on the field they
+# corrupt — not on a missing norm_slots.
 GEOMETRY_TOML = (
     f"n_layers = {CONFIG['n_layers']}\n"
     f"n_heads = {CONFIG['n_heads']}\n"
@@ -56,14 +72,25 @@ GEOMETRY_TOML = (
     f"head_dim = {CONFIG['head_dim']}\n"
     f"rms_norm_eps = {CONFIG['rms_norm_eps']}\n"
     f"rope_theta = {CONFIG['rope_theta']}\n"
+    "norm_slots = [" + ", ".join(f'"{s}"' for s in NORM_SLOTS) + "]\n"
 )
 
 
+def norm_floats_per_block() -> int:
+    total = 0
+    for slot in NORM_SLOTS:
+        width_key = _NORM_SLOT_WIDTH[slot]
+        assert width_key in CONFIG, f"slot {slot}: unknown width key {width_key}"
+        total += CONFIG[width_key]
+    return total
+
+
 def write_norms_sidecar(root: Path) -> None:
-    """Deterministic norm sidecar: (2*n_layers+1)*d_model fp32 LE floats."""  # noqa: D401
+    """Deterministic norm sidecar: per-block inventory order (NORM_SLOTS) +
+    the final norm (d_model), fp32 LE."""
     import array
 
-    count = (2 * CONFIG["n_layers"] + 1) * CONFIG["d_model"]
+    count = norm_floats_per_block() * CONFIG["n_layers"] + CONFIG["d_model"]
     norms = array.array("f", [0.1 * (i + 1) for i in range(count)])
     (root / "norms.f32.bin").write_bytes(norms.tobytes())
 
@@ -463,8 +490,8 @@ def build_bad_variants(base: Path) -> dict[str, str]:
 
     derived("missing_norms_file", _missing_norms_file)
 
-    # 20. norms sidecar miscounted (5 floats instead of
-    #     (2*n_layers+1)*d_model = 12): stat-before-read length gate
+    # 20. norms sidecar miscounted (5 floats instead of the
+    #     inventory-derived count = 16): stat-before-read length gate
     def _norms_wrong_size(d: Path) -> None:
         import array
 
