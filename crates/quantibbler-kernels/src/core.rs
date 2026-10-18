@@ -59,33 +59,28 @@ pub fn splitmix_matrix(seed: u64, rank: usize) -> Vec<Vec<f64>> {
     out
 }
 
-/// Modified Gram-Schmidt orthonormalization, column by column, with every
-/// dot product and update an explicit left-to-right f64 loop.
-#[allow(clippy::needless_range_loop)]
+/// Modified Gram-Schmidt orthonormalization, column by column. Every dot
+/// product and update accumulates left-to-right in f64 element order;
+/// iterator `sum()`/folds are sequential, so the order is bit-identical to
+/// the NumPy reference.
 pub fn gram_schmidt(a: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, KernelError> {
     let rank = a.len();
     let mut r0 = a.to_vec();
     for j in 0..rank {
         let mut v: Vec<f64> = r0.iter().map(|row| row[j]).collect();
         for i in 0..j {
-            let mut d = 0.0f64;
-            for t in 0..rank {
-                d += r0[t][i] * v[t];
-            }
-            for t in 0..rank {
-                v[t] -= d * r0[t][i];
+            let d: f64 = r0.iter().zip(&v).map(|(row, &vt)| row[i] * vt).sum();
+            for (vt, row) in v.iter_mut().zip(&r0) {
+                *vt -= d * row[i];
             }
         }
-        let mut s = 0.0f64;
-        for t in 0..rank {
-            s += v[t] * v[t];
-        }
+        let s: f64 = v.iter().map(|vt| vt * vt).sum();
         let nrm = s.sqrt();
         if nrm == 0.0 {
             return err("joint_itq produced a degenerate zero column building R0");
         }
-        for t in 0..rank {
-            r0[t][j] = v[t] / nrm;
+        for (row, &vt) in r0.iter_mut().zip(&v) {
+            row[j] = vt / nrm;
         }
     }
     Ok(r0)
@@ -93,36 +88,28 @@ pub fn gram_schmidt(a: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, KernelError> {
 
 /// `a @ b` with explicit left-to-right f64 accumulation.
 fn matmul_lr(a: &[Vec<f64>], b: &[Vec<f64>]) -> Vec<Vec<f64>> {
-    let m = a.len();
-    let n = b.len();
-    let p = b.first().map_or(0, |row| row.len());
-    let mut out = vec![vec![0.0f64; p]; m];
-    for i in 0..m {
-        for j in 0..p {
-            let mut acc = 0.0f64;
-            for t in 0..n {
-                acc += a[i][t] * b[t][j];
-            }
-            out[i][j] = acc;
-        }
-    }
-    out
+    a.iter()
+        .map(|a_row| {
+            (0..b.first().map_or(0, |row| row.len()))
+                .map(|j| a_row.iter().zip(b).map(|(x, brow)| x * brow[j]).sum())
+                .collect()
+        })
+        .collect()
 }
 
 /// `a^T @ b` with explicit left-to-right f64 accumulation.
-#[allow(clippy::needless_range_loop)]
 fn matmul_at_b_lr(a: &[Vec<f64>], b: &[Vec<f64>]) -> Vec<Vec<f64>> {
-    let n = a.len();
     let m = a.first().map_or(0, |row| row.len());
     let p = b.first().map_or(0, |row| row.len());
     let mut out = vec![vec![0.0f64; p]; m];
-    for i in 0..m {
-        for j in 0..p {
-            let mut acc = 0.0f64;
-            for t in 0..n {
-                acc += a[t][i] * b[t][j];
-            }
-            out[i][j] = acc;
+    for (i, out_row) in out.iter_mut().enumerate() {
+        for (j, acc) in out_row.iter_mut().enumerate() {
+            // dot over the lockstep rows of a^T and b: sum_t a[t][i] * b[t][j]
+            *acc = a
+                .iter()
+                .zip(b)
+                .map(|(arow, brow)| arow[i] * brow[j])
+                .sum::<f64>();
         }
     }
     out
@@ -168,22 +155,21 @@ pub fn pack_bits(factor: &[i8], n_rows: usize, n_cols: usize) -> Result<Vec<u8>,
 
 /// Restore a ±1 factor from packed bitplanes with explicit logical width
 /// `n_bits`; pad bits beyond `n_bits` are ignored, never validated.
-#[allow(clippy::needless_range_loop)]
 pub fn unpack_bits(packed: &[u8], n_rows: usize, n_bits: usize) -> Result<Vec<i8>, KernelError> {
     let n_words = n_bits.div_ceil(8);
     if n_rows * n_words != packed.len() {
         return err(format!(
-            "packed length {} does not match {}x{} bitplanes",
+            "packed length {} does not match {} rows x {} bitplanes",
             packed.len(),
             n_rows,
             n_words
         ));
     }
     let mut out = vec![0i8; n_rows * n_bits];
-    for i in 0..n_rows {
-        for k in 0..n_bits {
-            let bit = (packed[i * n_words + (k >> 3)] >> (k & 7)) & 1;
-            out[i * n_bits + k] = if bit == 1 { 1 } else { -1 };
+    for (out_row, packed_row) in out.chunks_mut(n_bits).zip(packed.chunks_exact(n_words)) {
+        for (k, cell) in out_row.iter_mut().enumerate() {
+            let bit = (packed_row[k >> 3] >> (k & 7)) & 1;
+            *cell = if bit == 1 { 1 } else { -1 };
         }
     }
     Ok(out)
@@ -245,6 +231,28 @@ pub fn packed_matvec(
         .collect())
 }
 
+/// Multiply one packed row (row `i`'s `row_words` bytes) by one matrix
+/// column `j`, accumulating left-to-right in element order: element `t`
+/// contributes `sign(bit t) * mat[t * n_cols + j]`.
+fn accumulate_packed_row(
+    packed_row: &[u8],
+    n_bits: usize,
+    j: usize,
+    mat: &[f64],
+    n_cols: usize,
+) -> f64 {
+    packed_row
+        .iter()
+        .enumerate()
+        .flat_map(move |(w, &byte)| (0..8).map(move |k| (w * 8 + k, byte >> k)))
+        .take(n_bits)
+        .map(|(t, shifted)| {
+            let s = if shifted & 1 == 1 { 1.0f64 } else { -1.0f64 };
+            s * mat[t * n_cols + j]
+        })
+        .sum()
+}
+
 /// Column-batched `packed_matvec` (packed x dense-float only).
 pub fn packed_matmul(
     packed: &[u8],
@@ -262,16 +270,9 @@ pub fn packed_matmul(
     }
     let k = mat.len().checked_div(n_bits.max(1)).unwrap_or(mat.len());
     let mut out = vec![0.0f64; n_rows * k];
-    #[allow(clippy::needless_range_loop)]
-    for i in 0..n_rows {
-        for j in 0..k {
-            let mut acc = 0.0f64;
-            for t in 0..n_bits {
-                let bit = (packed[i * n_words + (t >> 3)] >> (t & 7)) & 1;
-                let s = if bit == 1 { 1.0f64 } else { -1.0f64 };
-                acc += s * mat[t * n_cols + j];
-            }
-            out[i * k + j] = acc;
+    for (out_row, packed_row) in out.chunks_mut(k).zip(packed.chunks_exact(n_words)) {
+        for (j, acc) in out_row.iter_mut().enumerate() {
+            *acc = accumulate_packed_row(packed_row, n_bits, j, mat, n_cols);
         }
     }
     Ok(out)
