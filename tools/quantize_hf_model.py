@@ -75,7 +75,6 @@ if str(REPO_ROOT / "src") not in sys.path:
 import numpy as np
 import pyarrow.parquet as pq
 import torch
-from huggingface_hub import hf_hub_download
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -283,7 +282,7 @@ def export_model_directory(
     model_id: str,
     eos_token_id: int,
     bos_token_id: int,
-    tokenizer_path: Path,
+    tokenizer,
     config_f64: dict,
 ) -> None:
     """Write the qk-server acquisition directory (loader-validated layout).
@@ -323,14 +322,11 @@ def export_model_directory(
         f'embedding = "e1.f32.bin"\n'
         f'lm_head = "e1.f32.bin"\n'
     )
-    tokenizer_local = Path(
-        hf_hub_download(
-            model_id,
-            "tokenizer.json",
-            local_files_only=bool(os.environ.get("HF_HUB_OFFLINE")),
-        )
-    )
-    (out_dir / "tokenizer.json").write_bytes(tokenizer_local.read_bytes())
+    # Serialize the already-loaded tokenizer straight into the export dir
+    # (tokenizer.json + config files). No hub lookup: offline containers and
+    # local snapshot paths both work, and the in-memory object is by
+    # definition the exact tokenizer the pipeline used.
+    tokenizer.save_pretrained(out_dir)
 
     # self-check: the serialized stream header parses back as expected
     first = sorted(layer_files.values())[0]
@@ -409,7 +405,6 @@ def main() -> int:
 
     print(f"[1/6] loading {args.model} (local cache, offline)")
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    tokenizer_path = Path(tokenizer.name_or_path) / "tokenizer.json"
     causal = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16).eval()
     rewire_trunk_embedding(causal)
     model = CausalLMLogits(causal).to(torch.bfloat16).eval()
@@ -464,7 +459,7 @@ def main() -> int:
         model_id=args.model.replace("/", "-"),
         eos_token_id=cfg.eos_token_id,
         bos_token_id=cfg.bos_token_id,
-        tokenizer_path=tokenizer_path,
+        tokenizer=tokenizer,
         config_f64={"dtype_note": "solver float64 / scales fp16 / artifact qpk1"},
     )
     report = {
