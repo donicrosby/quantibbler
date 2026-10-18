@@ -22,6 +22,9 @@ declaration order (A-12).
 
 from __future__ import annotations
 
+import os
+import time
+
 import numpy as np
 import torch
 from torch import nn
@@ -29,6 +32,30 @@ from torch import nn
 from .calibration import LayerStatsBook, collect_stats, robust_diag
 from .config import PTQConfig
 from .lb_admm import lb_admm, magnitude_balance
+
+
+def _note_block_progress(idx: int, name: str | None, x_running=None) -> None:
+    """Append a crash-safe breadcrumb before each block reconstruction.
+
+    The real-model driver runs under a hard cgroup cap; if the kernel
+    SIGKILLs us mid-solve, stdout dies unflushed and the only surviving
+    record of WHERE we died is this file. No-op on any error so the
+    solver never depends on it.
+    """
+    path = os.getenv("QUANTIBBLER_BREADCRUMBS")
+    if not path:
+        return
+    try:
+        with open("/sys/fs/cgroup/memory.current") as fh:
+            mem = int(fh.read()) / 2**30
+        line = f"block[{idx}] {name or '(stem)'} cgroup={mem:.2f}G"
+        if x_running is not None:
+            line += f" x_running={tuple(x_running.shape)}@{x_running.dtype}"
+        with open(path, "a") as fh:
+            fh.write(f"{time.time():.0f} :: {line}\n")
+    except Exception:
+        pass
+
 
 __all__ = [
     "BlockReconResult",
@@ -531,6 +558,7 @@ def reconstruct_model(
     # (embedding modules), yielding the float activations every block sees.
     stem = _model_input_stem(model, batches)
     x_running = stem(torch.cat(batches, dim=0)).detach()
+    _note_block_progress(0, None, x_running)
 
     # Snapshot the fp outputs of any fp stem layer that sits AFTER the last
     # quantized block (e.g. the LM head): reconstruct_model's in-place loop
@@ -547,6 +575,7 @@ def reconstruct_model(
         )
         if not has_quant:
             continue
+        _note_block_progress(len(results) + 1, name, x_running)
         with torch.no_grad():
             y_b = block(x_running)
         result = reconstruct_block(

@@ -1,0 +1,70 @@
+# syntax=docker/dockerfile:1
+# quantibbler PTQ runner — uv-managed, staged build.
+#
+# Design (staged, per review):
+#   stage 0  maturin  — build the quantibbler-kernels PyO3 wheel (Rust lives
+#                       ONLY here; the runner never sees a toolchain).
+#   stage 1  runner   — python:3.12-slim + pinned ghcr.io/astral-sh/uv binary;
+#                       deps are FROZEN from uv.lock (uv sync --locked), torch
+#                       comes exactly as locked (PyPI 2.14.1 — carries unused
+#                       nvidia-* wheels on disk; CPU-only runs never load them).
+#                       quantibbler-kernels is excluded from the sync (it is a
+#                       path dep — uv cannot fetch it from a registry) and the
+#                       prebuilt wheel is installed instead.
+# Run:
+#   docker run --rm \
+#     -v /opt/data/quantibbler:/work:ro \
+#     -v /opt/data/hf-cache:/hf \
+#     -v /opt/data/tmp:/tmp/ptq \
+#     -e HF_HOME=/hf -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
+#     quantibbler-ptq:latest \
+#     python tools/quantize_hf_model.py --model Qwen/Qwen3-0.6B ...
+FROM ghcr.io/pyo3/maturin:latest AS maturin
+
+WORKDIR /build
+COPY pyproject.toml README.md uv.lock ./
+COPY crates ./crates
+RUN maturin build --release --out /wheels -m crates/quantibbler-kernels/Cargo.toml \
+    && rm -rf /build/target
+
+FROM python:3.12-slim AS runner
+
+COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /uvx /bin/
+
+ENV UV_PYTHON_PREFERENCE=only-system \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    PATH=/opt/venv/bin:$PATH \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    MALLOC_ARENA_MAX=2 \
+    OMP_NUM_THREADS=4 \
+    MKL_NUM_THREADS=4 \
+    QUANTIBBLER_KD_TMPDIR=/tmp/ptq
+
+WORKDIR /work
+
+# Deps first, project last (layer cache): the heavy uv sync re-runs only
+# when uv.lock or the workspace layout changes. crates/ must exist because
+# tool.uv.sources declares quantibbler-kernels as a workspace member —
+# it is excluded from the sync and installed from the prebuilt wheel below.
+COPY pyproject.toml README.md uv.lock ./
+COPY crates ./crates
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-editable --all-extras --no-install-project --no-install-package quantibbler-kernels \
+    && /opt/venv/bin/python -c "import torch; print('deps layer:', torch.__version__)"
+
+# The kernels wheel is installed AFTER the final uv sync: sync enforces an
+# exact environment and would remove an earlier pip install.
+
+COPY src ./src
+COPY tools ./tools
+COPY --from=maturin /wheels /wheels
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-editable --all-extras --no-install-package quantibbler-kernels \
+    && uv pip install --python /opt/venv/bin/python /wheels/quantibbler_kernels-*.whl \
+    && rm -rf /wheels \
+    && /opt/venv/bin/python -c "import torch, transformers; from quantibbler import kernels; print('final:', torch.__version__, '| kernels:', kernels.HAVE_KERNELS)"
+
+ENV PATH="/opt/venv/bin:$PATH"
+ENTRYPOINT []
+CMD ["python", "tools/quantize_hf_model.py", "--help"]

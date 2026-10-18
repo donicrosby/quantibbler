@@ -51,6 +51,7 @@ import os
 import random
 import struct
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -60,6 +61,12 @@ from pathlib import Path
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 os.environ.setdefault("QUANTIBBLER_KD_TMPDIR", "/opt/data/tmp")
+# Bounded native allocations (hundreds of MB drift otherwise) and bounded
+# BLAS/torch thread pools (each thread's stacks and scratch count against
+# the cgroup this sandbox shares).
+os.environ.setdefault("MALLOC_ARENA_MAX", "2")
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("MKL_NUM_THREADS", "4")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT / "src") not in sys.path:
@@ -292,6 +299,53 @@ def export_model_directory(
 
 
 def main() -> int:
+    # ---- crash-safe breadcrumbs ------------------------------------
+    # SIGKILL can't flush our stdout, so a watchdog thread samples the
+    # shared cgroup's memory + this process's RSS and appends stage
+    # markers to a plain file. Whatever kills us, the tail of this file
+    # says WHERE we were and HOW BIG we were.
+    breadcrumb_path = Path(
+        os.getenv("QUANTIBBLER_BREADCRUMBS", "/opt/data/tmp/quantibbler-breadcrumbs.log")
+    )
+
+    def _bread(note: str) -> None:
+        try:
+            mem = 0
+            try:
+                with open("/sys/fs/cgroup/memory.current") as fh:
+                    mem = int(fh.read())
+            except OSError:
+                pass
+            with open(breadcrumb_path, "a") as fh:
+                fh.write(f"{time.time():.0f} cgroup={mem / 2**30:.2f}G :: {note}\n")
+        except OSError:
+            pass
+
+    def _watchdog() -> None:
+        peak = 0
+        while True:
+            time.sleep(5)
+            try:
+                with open("/sys/fs/cgroup/memory.current") as fh:
+                    cur = int(fh.read()) / 2**30
+                peak = max(peak, cur)
+                with open(breadcrumb_path, "a") as fh:
+                    fh.write(f"{time.time():.0f} cgroup={cur:.2f}G peak={peak:.2f}G\n")
+            except OSError:
+                pass
+
+    def _stage(note: str) -> None:
+        print(note, flush=True)
+        _bread(note)
+
+    threading.Thread(target=_watchdog, daemon=True).start()
+    _bread(f"start pid={os.getpid()} argv={' '.join(sys.argv[1:])}")
+    try:
+        with open("/sys/fs/cgroup/memory.events") as fh:
+            _bread("memory.events@start: " + " ".join(fh.read().split()))
+    except OSError:
+        pass
+
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--model", default="Qwen/Qwen3-0.6B")
     parser.add_argument("--rank", type=int, default=8)
@@ -346,9 +400,11 @@ def main() -> int:
     ppl_base = perplexity_from_logits(lambda b: model(b), held_out)
     print(f"      ppl_baseline = {ppl_base:.4f}", flush=True)
 
-    print("[4/6] PTQ: bf16 model, per-layer float64 solver (block recon + scale KD)")
+    _stage("[4/6] PTQ: bf16 model, per-layer float64 solver (block recon + scale KD)")
+    _bread("entering quantize_model: block recon first, then KD scale calibration")
     solver_t = time.time()
     qm = quantize_model(model, calib, quantized_config(args))
+    _bread(f"quantize_model returned: {len(qm.layers)} layers")
     print(f"      solver wall: {time.time() - solver_t:.0f}s", flush=True)
 
     print("[5/6] quantized perplexity (checkpoint-native dtype, artifact written back)")

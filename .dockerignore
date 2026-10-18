@@ -1,0 +1,10 @@
+.git
+.venv
+target
+artifacts
+openspec
+**/__pycache__
+**/*.pyc
+tests/fixtures
+Dockerfile*
+.dockerignore
