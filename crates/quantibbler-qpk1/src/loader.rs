@@ -45,6 +45,10 @@ const MAX_SIDECAR_BYTES: u64 = 4 << 30;
 /// product far below usize wraparound and below allocation-dangerous
 /// sizes; real models sit at ~1e5 vocab, ~1e4 d_model.
 const MAX_DIM: usize = 1 << 26;
+/// Cap on declared block count (config.toml). Bounds the norm-sidecar
+/// product (`(2 * n_layers + 1) * d_model`) through `checked_mul`; real
+/// frontier models top out around two hundred blocks.
+const MAX_LAYERS: usize = 1 << 12;
 
 /// A fully loaded and validated model directory.
 pub struct ModelDirectory {
@@ -56,10 +60,21 @@ pub struct ModelDirectory {
     pub bos_token_id: u32,
     pub vocab_size: usize,
     pub d_model: usize,
+    /// Validated attention geometry (qk-attention N-2).
+    pub n_layers: usize,
+    pub n_heads: usize,
+    pub n_kv_heads: usize,
+    pub head_dim: usize,
+    pub rms_norm_eps: f64,
+    pub rope_theta: f64,
     /// fp32 embedding, `vocab_size x d_model`, widened to f64.
     pub embedding: Vec<f64>,
     /// fp32 lm_head when not weight-tied, same layout.
     pub lm_head: Option<Vec<f64>>,
+    /// Norm sidecar, `(2 * n_layers + 1) * d_model` floats widened to f64:
+    /// per block `input_layernorm`, `post_attention_layernorm`, then the
+    /// model-final norm — the engine's block iteration order (N-1).
+    pub norm_weights: Vec<f64>,
 }
 
 /// Load a qpk1 model directory, or fail with a diagnostic naming the file.
@@ -124,12 +139,12 @@ pub fn load(model_dir: &Path) -> Result<ModelDirectory, String> {
         layers.push((name.clone(), layer));
     }
 
-    // Sidecar: same containment discipline on the manifest-controlled
+    // Sidecars: same containment discipline on the manifest-controlled
     // paths; fp32 matrices are exact-size by construction, so the stat
-    // length must equal `vocab_size * d_model * 4` before any read.
+    // length must equal the declared element count * 4 before any read.
     let sidecar = manifest.sidecar.ok_or_else(|| {
         format!(
-            "{}: missing [sidecar] block (embedding/lm_head weights)",
+            "{}: missing [sidecar] block (embedding/lm_head/norms weights)",
             manifest_path.display()
         )
     })?;
@@ -159,6 +174,29 @@ pub fn load(model_dir: &Path) -> Result<ModelDirectory, String> {
         Some(read_f32_bin_exact(&head_path, expected_bytes)?)
     };
 
+    // Norm sidecar (qk-attention N-1): one entry per transformer block
+    // (input layernorm + post-attention layernorm) plus the model-final
+    // norm, at d_model floats each.
+    let norms_path = contained_join(model_dir, &sidecar.norms).map_err(|why| {
+        format!(
+            "{}: sidecar norms path {:?} rejected: {why}",
+            manifest_path.display(),
+            sidecar.norms
+        )
+    })?;
+    let norm_floats = (2usize)
+        .checked_mul(config.n_layers)
+        .and_then(|p| p.checked_add(1))
+        .and_then(|p| p.checked_mul(config.d_model))
+        .ok_or_else(|| {
+            format!(
+                "{}: (2 * n_layers + 1) * d_model overflows",
+                config_path.display()
+            )
+        })?;
+    let norm_bytes = checked_bytes(norm_floats, &config_path)?;
+    let norm_weights = read_f32_bin_exact(&norms_path, norm_bytes)?;
+
     Ok(ModelDirectory {
         model_id: manifest.model_id,
         layers,
@@ -166,8 +204,15 @@ pub fn load(model_dir: &Path) -> Result<ModelDirectory, String> {
         bos_token_id: config.bos_token_id,
         vocab_size: config.vocab_size,
         d_model: config.d_model,
+        n_layers: config.n_layers,
+        n_heads: config.n_heads,
+        n_kv_heads: config.n_kv_heads,
+        head_dim: config.head_dim,
+        rms_norm_eps: config.rms_norm_eps,
+        rope_theta: config.rope_theta,
         embedding,
         lm_head,
+        norm_weights,
     })
 }
 
@@ -271,6 +316,9 @@ struct Sidecar {
     /// Path of the fp32 lm_head matrix; when equal to `embedding` the head
     /// is weight-tied.
     lm_head: String,
+    /// Path of the fp32 norm-weights sidecar (qk-attention N-1):
+    /// `(2 * n_layers + 1) * d_model` floats, row-major, LE float32.
+    norms: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -279,6 +327,13 @@ struct ModelConfig {
     d_model: usize,
     eos_token_id: u32,
     bos_token_id: u32,
+    /// Attention geometry (qk-attention N-2): all required, all validated.
+    n_layers: usize,
+    n_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    rms_norm_eps: f64,
+    rope_theta: f64,
     /// Documented forms (qk-server C5): unset, or `"lm_head=e1@fp32"`
     /// (weight-tied fp32 head). Anything else is a config error.
     #[serde(default)]
@@ -317,6 +372,70 @@ impl ModelConfig {
                 config_path.display(),
                 self.bos_token_id,
                 self.vocab_size
+            ));
+        }
+        // Attention geometry (qk-attention N-2): every field required
+        // (missing fields fail the TOML deserialize), every relationship
+        // validated before anything is loaded.
+        if self.n_layers == 0 || self.n_layers > MAX_LAYERS {
+            return Err(format!(
+                "{}: n_layers {} outside 1..={MAX_LAYERS}",
+                config_path.display(),
+                self.n_layers
+            ));
+        }
+        if self.n_heads == 0 || self.n_heads > MAX_DIM {
+            return Err(format!(
+                "{}: n_heads {} outside 1..={MAX_DIM}",
+                config_path.display(),
+                self.n_heads
+            ));
+        }
+        if self.n_kv_heads == 0 {
+            return Err(format!(
+                "{}: n_kv_heads must be at least 1 (got 0)",
+                config_path.display()
+            ));
+        }
+        if self.head_dim == 0 {
+            return Err(format!(
+                "{}: head_dim must be at least 1 (got 0)",
+                config_path.display()
+            ));
+        }
+        // GQA consistency: KV projection width must equal the residual
+        // stream, and every query head must share exactly one group.
+        let kv_width = self
+            .n_kv_heads
+            .checked_mul(self.head_dim)
+            .ok_or_else(|| format!("{}: n_kv_heads * head_dim overflows", config_path.display()))?;
+        if kv_width != self.d_model {
+            return Err(format!(
+                "{}: n_kv_heads * head_dim = {kv_width} != d_model {} (GQA width mismatch)",
+                config_path.display(),
+                self.d_model
+            ));
+        }
+        if self.n_heads % self.n_kv_heads != 0 {
+            return Err(format!(
+                "{}: n_heads {} is not a multiple of n_kv_heads {} (GQA group mismatch)",
+                config_path.display(),
+                self.n_heads,
+                self.n_kv_heads
+            ));
+        }
+        if !(self.rms_norm_eps > 0.0 && self.rms_norm_eps.is_finite()) {
+            return Err(format!(
+                "{}: rms_norm_eps must be finite and > 0 (got {})",
+                config_path.display(),
+                self.rms_norm_eps
+            ));
+        }
+        if !(self.rope_theta > 0.0 && self.rope_theta.is_finite()) {
+            return Err(format!(
+                "{}: rope_theta must be finite and > 0 (got {})",
+                config_path.display(),
+                self.rope_theta
             ));
         }
         match self.weight_tying.as_deref() {
@@ -373,12 +492,10 @@ mod tests {
 
     #[test]
     fn config_validation_rejects_bogus_weight_tying() {
+        let cfg = valid_config();
         let cfg = ModelConfig {
-            vocab_size: 32,
-            d_model: 4,
-            eos_token_id: 3,
-            bos_token_id: 1,
             weight_tying: Some("bogus".into()),
+            ..cfg
         };
         assert!(cfg.validate(Path::new("config.toml")).is_err());
         let cfg = ModelConfig {
@@ -386,5 +503,148 @@ mod tests {
             ..cfg
         };
         assert!(cfg.validate(Path::new("config.toml")).is_ok());
+    }
+
+    /// A geometry-valid config (qk-attention N-2 shape).
+    fn valid_config() -> ModelConfig {
+        ModelConfig {
+            vocab_size: 32,
+            d_model: 4,
+            eos_token_id: 3,
+            bos_token_id: 1,
+            n_layers: 1,
+            n_heads: 2,
+            n_kv_heads: 2,
+            head_dim: 2,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10_000.0,
+            weight_tying: Some("lm_head=e1@fp32".into()),
+        }
+    }
+
+    #[test]
+    fn consistent_geometry_passes() {
+        assert!(valid_config().validate(Path::new("config.toml")).is_ok());
+    }
+
+    #[test]
+    fn geometry_rejects_kv_width_mismatch() {
+        // n_kv_heads * head_dim (3 * 2 = 6) != d_model (4).
+        let cfg = ModelConfig {
+            n_kv_heads: 3,
+            ..valid_config()
+        };
+        let err = cfg
+            .validate(Path::new("config.toml"))
+            .expect_err("mismatched KV width must fail");
+        assert!(err.contains("GQA width mismatch"), "{err}");
+    }
+
+    #[test]
+    fn geometry_rejects_non_multiple_heads() {
+        // 3 query heads over 2 KV heads: no clean GQA grouping.
+        let cfg = ModelConfig {
+            n_heads: 3,
+            ..valid_config()
+        };
+        let err = cfg
+            .validate(Path::new("config.toml"))
+            .expect_err("non-multiple heads must fail");
+        assert!(err.contains("GQA group mismatch"), "{err}");
+    }
+
+    #[test]
+    fn geometry_rejects_zero_and_overflow() {
+        for (field, cfg) in [
+            (
+                "n_layers",
+                ModelConfig {
+                    n_layers: 0,
+                    ..valid_config()
+                },
+            ),
+            (
+                "n_layers cap",
+                ModelConfig {
+                    n_layers: MAX_LAYERS + 1,
+                    ..valid_config()
+                },
+            ),
+            (
+                "n_heads",
+                ModelConfig {
+                    n_heads: 0,
+                    ..valid_config()
+                },
+            ),
+            (
+                "n_kv_heads",
+                ModelConfig {
+                    n_kv_heads: 0,
+                    ..valid_config()
+                },
+            ),
+            (
+                "head_dim",
+                ModelConfig {
+                    head_dim: 0,
+                    ..valid_config()
+                },
+            ),
+            (
+                "rms_norm_eps",
+                ModelConfig {
+                    rms_norm_eps: 0.0,
+                    ..valid_config()
+                },
+            ),
+            (
+                "rms_norm_eps neg",
+                ModelConfig {
+                    rms_norm_eps: -1.0,
+                    ..valid_config()
+                },
+            ),
+            (
+                "rope_theta",
+                ModelConfig {
+                    rope_theta: 0.0,
+                    ..valid_config()
+                },
+            ),
+            (
+                "rope_theta inf",
+                ModelConfig {
+                    rope_theta: f64::INFINITY,
+                    ..valid_config()
+                },
+            ),
+        ] {
+            assert!(
+                cfg.validate(Path::new("config.toml")).is_err(),
+                "{field} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_config_field_fails_toml_parse() {
+        // N-2.2: any missing geometry field aborts the parse itself, so a
+        // crafted directory can never omit the contract.
+        let missing = "vocab_size = 32\nd_model = 4\neos_token_id = 3\nbos_token_id = 1\n";
+        let parsed: Result<ModelConfig, _> = toml::from_str(missing);
+        assert!(parsed.is_err(), "missing geometry must fail the parse");
+    }
+
+    #[test]
+    fn loads_the_valid_fixture_with_sidecar_and_geometry() {
+        let m = load(&dir()).expect("fixture model loads");
+        // Sidecar: (2 * n_layers + 1) * d_model = 3 * 4 floats.
+        assert_eq!(m.norm_weights.len(), (2 * m.n_layers + 1) * m.d_model);
+        assert_eq!(m.n_heads, 2);
+        assert_eq!(m.n_kv_heads, 2);
+        assert_eq!(m.head_dim, 2);
+        assert!((m.rms_norm_eps - 1e-6).abs() < 1e-30);
+        assert!((m.rope_theta - 10_000.0).abs() < 1e-30);
     }
 }

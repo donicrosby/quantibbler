@@ -10,3 +10,4 @@ layers = [ "block0.mlp.fc" ]
 # fp32 embedding / lm_head raw LE float32 (OQ2 minimal sidecar)
 embedding = "e1.f32.bin"
 lm_head = "e1.f32.bin"
+norms = "norms.f32.bin"

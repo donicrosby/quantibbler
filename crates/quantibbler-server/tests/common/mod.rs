@@ -337,6 +337,15 @@ pub fn corrupted_variants() -> Vec<(&'static str, &'static str)> {
         ("sidecar_too_big", "expected exactly"),
         ("bad_weight_tying", "unknown weight_tying"),
         ("eos_out_of_range", "eos_token_id"),
+        // qk-attention N-1: norm sidecar fail-closed paths.
+        ("missing_sidecar_block", "[sidecar]"),
+        ("missing_norms_manifest", "missing field `norms`"),
+        ("missing_norms_file", "norms.f32.bin"),
+        ("norms_wrong_size", "expected exactly"),
+        // qk-attention N-2: attention geometry validation paths.
+        ("missing_geometry", "missing field"),
+        ("gqa_width_mismatch", "GQA width mismatch"),
+        ("gqa_group_mismatch", "GQA group mismatch"),
     ]
 }
 

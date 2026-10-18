@@ -6,9 +6,11 @@
       post_attention_layernorm, then final norm) and extend `config.toml` with
       `n_layers`, `n_heads`, `n_kv_heads`, `head_dim`, `rms_norm_eps`,
       `rope_theta`; read them off the HF config/weights, never hardcoded.
-- [ ] 1.2 qpk1 loader: parse + fail-closed validate the new fields (count,
-      byte length, GQA consistency `n_kv*head_dim==d_model`,
-      `n_heads % n_kv == 0`); unit tests for each rejection path.
+- [x] 1.2 qpk1 loader: parse + fail-closed validate the new fields (sidecar
+      count/byte length `(2*n_layers+1)*d_model` floats, GQA consistency
+      `n_kv*head_dim==d_model`, `n_heads % n_kv == 0`, zero/negative/overflow
+      geometry guards); unit tests for each rejection path + server e2e
+      corrupted-variant coverage for all seven new fail-closed fixtures.
 - [ ] 1.3 Re-export the r8 artifact and confirm the server still reports
       ready (contract migration proof, old-artifact rejection covered).
 

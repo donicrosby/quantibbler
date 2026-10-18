@@ -8,3 +8,4 @@ layers = [ "block0.mlp.fc" ]
 [sidecar]
 embedding = "e1.f32.bin"
 lm_head = "e1.f32.bin"
+norms = "norms.f32.bin"

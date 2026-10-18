@@ -1,0 +1,7 @@
+# qk-server fixture manifest (design D3)
+model_id = "server-model-fixture"
+layers = [ "block0.mlp.fc" ]
+
+[layer_files]
+# quoted keys: TOML bare keys with dots would nest tables
+"block0.mlp.fc" = "layers/block0.mlp.fc.qpk1"

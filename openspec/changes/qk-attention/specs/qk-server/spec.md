@@ -4,10 +4,10 @@
 
 The exported model directory SHALL contain a norm sidecar holding every
 transformer block's input-layernorm and post-attention-layernorm weights
-plus the model-final norm (fp32, little-endian). The loader SHALL validate
-its byte length against `n_layers x d_model` and reject the directory
-fail-closed (per `qk-server` SR-1.2 semantics) when it is missing,
-truncated, or miscounted.
+plus the model-final norm — exactly `(2 x n_layers + 1) x d_model` fp32
+little-endian floats. The loader SHALL validate its byte length against
+that count and reject the directory fail-closed (per `qk-server` SR-1.2
+semantics) when it is missing, truncated, or miscounted.
 
 #### Scenario: N-1.1 — Load succeeds with a complete sidecar
 - **WHEN** the server loads a model directory whose sidecar matches
