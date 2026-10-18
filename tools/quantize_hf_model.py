@@ -164,11 +164,10 @@ def perplexity_from_logits(logits_fn, batches: list[torch.Tensor]) -> float:
     return float(np.exp(total_nats / (len(batches) * n_preds)))
 
 
-def load_wikitext_text(parquet_dir: Path) -> str:
-    """Concatenated wikitext-2 text from the cached parquet shards."""
-    shards = sorted(parquet_dir.glob("*.parquet"))
+def load_wikitext_text(shards: list[Path]) -> str:
+    """Concatenated wikitext-2 text from the given parquet shards."""
     if not shards:
-        raise FileNotFoundError(f"no wikitext parquet shards under {parquet_dir}")
+        raise FileNotFoundError("no wikitext parquet shards given")
     parts: list[str] = []
     for shard in shards:
         column = pq.read_table(shard, columns=["text"]).column("text").to_pylist()
@@ -176,12 +175,17 @@ def load_wikitext_text(parquet_dir: Path) -> str:
     return "\n".join(parts)
 
 
-def find_wikitext_split(split: str) -> Path:
-    """The cached wikitext-2-raw-v1 split dir (single snapshot expected)."""
+def find_wikitext_shards(split: str) -> list[Path]:
+    """The cached wikitext-2-raw-v1 shards for `split` (flat layout: the
+    hub cache stores ``<split>-<shard-index>.parquet`` directly under the
+    version dir, no per-split subdirectories)."""
     roots = sorted(WIKITEXT_TEST.glob("*/wikitext-2-raw-v1"))
     if not roots:
         raise FileNotFoundError(f"wikitext-2-raw-v1 not cached under {WIKITEXT_TEST}")
-    return roots[0] / split
+    shards = sorted(roots[0].glob(f"{split}-*.parquet"))
+    if not shards:
+        raise FileNotFoundError(f"no '{split}-*.parquet' shards under {roots[0]}")
+    return shards
 
 
 def tokenize_chunks(
@@ -203,7 +207,10 @@ def tokenize_chunks(
         )
     order = list(range(n_blocks))
     random.Random(seed).shuffle(order)
-    picked = stream[order[0 : n_chunks * BATCH]].view(n_chunks * BATCH, seq_len)
+    # Materialize seq_len token blocks FIRST, then seed-shuffled fancy-index
+    # picks whole blocks (indexing the 1-D stream would pick loose tokens).
+    blocks = stream[: n_blocks * seq_len].view(n_blocks, seq_len)
+    picked = blocks[order[: n_chunks * BATCH]]
     return [picked[i * BATCH : (i + 1) * BATCH] for i in range(n_chunks)]
 
 
@@ -316,14 +323,14 @@ def main() -> int:
     print("[2/6] tokenizing wikitext-2 (cached parquet)")
     calib = tokenize_chunks(
         tokenizer,
-        load_wikitext_text(find_wikitext_split("train")),
+        load_wikitext_text(find_wikitext_shards("train")),
         args.seq_len,
         args.calibration_seqs,
         args.seed,
     )
     held_out = tokenize_chunks(
         tokenizer,
-        load_wikitext_text(find_wikitext_split("test")),
+        load_wikitext_text(find_wikitext_shards("test")),
         args.seq_len,
         args.eval_seqs,
         args.seed + 1,
