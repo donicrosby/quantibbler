@@ -166,6 +166,11 @@ pub fn unpack_bits(packed: &[u8], n_rows: usize, n_bits: usize) -> Result<Vec<i8
         ));
     }
     let mut out = vec![0i8; n_rows * n_bits];
+    // Degenerate guard: chunks_mut(0) panics, and zero logical bits means
+    // every row is empty -- the zeroed (n_rows x 0) output IS the result.
+    if n_bits == 0 {
+        return Ok(out);
+    }
     for (out_row, packed_row) in out.chunks_mut(n_bits).zip(packed.chunks_exact(n_words)) {
         for (k, cell) in out_row.iter_mut().enumerate() {
             let bit = (packed_row[k >> 3] >> (k & 7)) & 1;
@@ -270,6 +275,11 @@ pub fn packed_matmul(
     }
     let k = mat.len().checked_div(n_bits.max(1)).unwrap_or(mat.len());
     let mut out = vec![0.0f64; n_rows * k];
+    // Degenerate guard: chunks_mut(0) panics; zero columns means the
+    // zeroed (n_rows x 0) output IS the result.
+    if k == 0 {
+        return Ok(out);
+    }
     for (out_row, packed_row) in out.chunks_mut(k).zip(packed.chunks_exact(n_words)) {
         for (j, acc) in out_row.iter_mut().enumerate() {
             *acc = accumulate_packed_row(packed_row, n_bits, j, mat, n_cols);

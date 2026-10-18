@@ -12,3 +12,4 @@ wheelhouse/
 .coverage
 target/
 *.so
+artifacts/

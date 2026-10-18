@@ -127,8 +127,13 @@ def calibrate_scales(
                 def scaled_forward(x_in, _ub=ub, _vb=vb, _s1=s1, _s2=s2, _lin=linear):
                     # W_q = (s1 ⊙ Ub) @ (s2 ⊙ Vb)ᵀ, shape (dout, din) — the
                     # artifact weight convention (nn.Linear applies x @ W.T).
+                    # Bias-free linears (every modern LLM's attention/MLP
+                    # projections) skip the bias term entirely.
                     w = (_s1.unsqueeze(1) * _ub) @ (_s2.unsqueeze(1) * _vb).T
-                    return x_in @ w.to(x_in.dtype).T + _lin.bias.to(x_in.dtype)
+                    out = x_in @ w.to(x_in.dtype).T
+                    if _lin.bias is not None:
+                        out = out + _lin.bias.to(x_in.dtype)
+                    return out
 
                 handles.append((linear, linear.forward))
                 linear.forward = scaled_forward  # type: ignore[method-assign]

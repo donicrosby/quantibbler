@@ -753,3 +753,28 @@ fn parity_itq_preserves_product() {
         }
     }
 }
+
+// Degenerate-shape guards: the iterator forms must reject/return exactly
+// where the pre-refactor index loops did (chunks_mut(0) panics otherwise).
+#[test]
+fn unpack_bits_zero_bits_returns_empty_rows() {
+    let packed: [u8; 0] = [];
+    let out = quantibbler_kernels::core::unpack_bits(&packed, 3, 0)
+        .expect("n_bits=0 with 0 rows of bits is valid");
+    assert_eq!(out.len(), 0);
+}
+
+#[test]
+fn unpack_bits_zero_bits_nonempty_packed_is_error() {
+    let packed = [0u8; 4];
+    assert!(quantibbler_kernels::core::unpack_bits(&packed, 3, 0).is_err());
+}
+
+#[test]
+fn packed_matmul_zero_columns_returns_empty() {
+    // mat.len() == 0 -> k == 0 -> zeroed (n_rows x 0) output, no panic.
+    let packed = [0u8; 2]; // 2 rows x 1 word (n_bits = 8)
+    let out = quantibbler_kernels::core::packed_matmul(&packed, 2, 8, &[], 0)
+        .expect("zero-column matmul is valid");
+    assert_eq!(out.len(), 0);
+}
