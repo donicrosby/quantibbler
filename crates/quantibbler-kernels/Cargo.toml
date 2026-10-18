@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 extension-module = ["pyo3/extension-module"]
 gpu = ["dep:cubecl"]
+fast-cpu = ["dep:wide", "dep:rayon"]
 default = []
 
 [dependencies]
@@ -20,6 +21,8 @@ pyo3 = { version = "0.30", features = ["abi3-py311"] }
 numpy = "0.30"
 nalgebra = "0.34.2"
 cubecl = { version = "0.11.0", features = ["hip"], optional = true }
+wide = { version = "0.7", optional = true }
+rayon = { version = "1.10", optional = true }
 
 [dev-dependencies]
 # float_roundtrip: correctly-rounded JSON float parsing, so fixture inputs

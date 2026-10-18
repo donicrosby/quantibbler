@@ -3766,7 +3766,9 @@ dependencies = [
  "nalgebra",
  "numpy",
  "pyo3",
+ "rayon",
  "serde_json",
+ "wide 0.7.33",
 ]
 
 [[package]]

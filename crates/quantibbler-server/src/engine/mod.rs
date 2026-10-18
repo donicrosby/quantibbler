@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use tokio::sync::Semaphore;
 
-use quantibbler_kernels::core;
 #[cfg(feature = "gpu")]
 use quantibbler_kernels::gpu::GpuContext;
 use quantibbler_qpk1::{Layer, NormSlot, inventory_block_floats};
@@ -35,11 +34,18 @@ pub struct FaceDecision {
 }
 
 impl FaceDecision {
-    /// The default-build selection: CPU rlib, always.
+    /// The default-build selection: the CPU face (scalar rlib, or the
+    /// SIMD+rayon fast face when `fast-cpu` is compiled in — a build-time
+    /// choice, reported honestly in the label).
     pub fn cpu_selected() -> Self {
+        let chosen: &'static str = if cfg!(feature = "fast-cpu") {
+            "cpu:fast"
+        } else {
+            "cpu"
+        };
         Self {
             face: MatvecFace::Cpu,
-            chosen: "cpu",
+            chosen,
         }
     }
 
@@ -142,6 +148,22 @@ fn row_words(r: usize) -> usize {
     r.div_ceil(8)
 }
 
+/// The CPU face's matvec: the scalar rlib by default, the SIMD+rayon fast
+/// face when `fast-cpu` is compiled in (task 3.5). One shim so `apply`
+/// carries no cfg noise; outputs of the two differ only within the
+/// backward-error budget crystallized in the kernels crate.
+fn cpu_matvec(
+    packed: &[u8],
+    n_rows: usize,
+    n_bits: usize,
+    vec: &[f64],
+) -> Result<Vec<f64>, quantibbler_kernels::core::KernelError> {
+    #[cfg(feature = "fast-cpu")]
+    return quantibbler_kernels::fast::packed_matvec(packed, n_rows, n_bits, vec);
+    #[cfg(not(feature = "fast-cpu"))]
+    quantibbler_kernels::core::packed_matvec(packed, n_rows, n_bits, vec)
+}
+
 /// Per-layer serving form of one factorized linear layer.
 #[derive(Debug)]
 pub struct PackedLayer {
@@ -221,7 +243,7 @@ impl PackedLayer {
         // t = Vb^T z  (length r; contraction over the din axis), then
         // u = Ub t  (length dout; contraction over the rank axis).
         let t = match face {
-            MatvecFace::Cpu => core::packed_matvec(&self.vb_t_rows, self.r, self.din, &z)
+            MatvecFace::Cpu => cpu_matvec(&self.vb_t_rows, self.r, self.din, &z)
                 .map_err(|e| EngineError(format!("layer {}: Vb^T matvec: {e}", self.name)))?,
             #[cfg(feature = "gpu")]
             MatvecFace::Gpu(ctx) => ctx
@@ -229,7 +251,7 @@ impl PackedLayer {
                 .map_err(|e| EngineError(format!("layer {}: Vb^T GPU matvec: {e}", self.name)))?,
         };
         let u = match face {
-            MatvecFace::Cpu => core::packed_matvec(&self.ub_rows, self.dout, self.r, &t)
+            MatvecFace::Cpu => cpu_matvec(&self.ub_rows, self.dout, self.r, &t)
                 .map_err(|e| EngineError(format!("layer {}: Ub matvec: {e}", self.name)))?,
             #[cfg(feature = "gpu")]
             MatvecFace::Gpu(ctx) => ctx

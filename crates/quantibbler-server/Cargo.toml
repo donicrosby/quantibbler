@@ -14,6 +14,9 @@ path = "src/main.rs"
 # GPU dispatch (qk-attention 3.4): pulls the CubeCL HIP face into the
 # kernels dependency. Default builds stay pure-CPU (binary_purity gate).
 gpu = ["quantibbler-kernels/gpu"]
+# CPU fast path (qk-attention 3.5): SIMD + rayon row-blocked matvecs.
+# Compile-time choice; the frozen face label reports "cpu:fast" when on.
+fast-cpu = ["quantibbler-kernels/fast-cpu"]
 
 [dependencies]
 # The kernels rlib face: default features (empty) keep the PyO3

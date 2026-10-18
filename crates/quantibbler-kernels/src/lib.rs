@@ -14,6 +14,9 @@ pub mod core;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 
+#[cfg(feature = "fast-cpu")]
+pub mod fast;
+
 use numpy::{Element, PyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArrayDyn};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;

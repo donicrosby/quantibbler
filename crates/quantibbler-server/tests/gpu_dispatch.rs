@@ -58,7 +58,10 @@ async fn gpu_face_generates_and_matches_cpu_token_stream() {
     // Face 1: CPU (no QUANTIBBLER_GPU).
     unsafe { std::env::remove_var("QUANTIBBLER_GPU") };
     let (prompt, cpu_tokens, cpu_face) = generate_tokens().await;
-    assert_eq!(cpu_face, "cpu");
+    assert!(
+        cpu_face.starts_with("cpu"),
+        "CPU pass must select a cpu* face, got {cpu_face}"
+    );
 
     // Face 2: GPU (QUANTIBBLER_GPU=1); from_layers consults the env at
     // construction and the decision is frozen per ModelWeights instance.
@@ -78,11 +81,17 @@ async fn gpu_face_generates_and_matches_cpu_token_stream() {
 #[cfg(not(feature = "gpu"))]
 fn gpu_flag_is_inert_without_the_feature() {
     // Default build: the env flag must not change the selection — the
-    // compile-time feature gate is the only door to the device face.
+    // compile-time feature gate is the only door to the device face. (The
+    // CPU label may be "cpu" or "cpu:fast" depending on the fast-cpu
+    // feature; the contract is only that it is NOT a gpu face.)
     unsafe { std::env::set_var("QUANTIBBLER_GPU", "1") };
     let d = engine::FaceDecision::select_from_env();
     unsafe { std::env::remove_var("QUANTIBBLER_GPU") };
-    assert_eq!(d.describe(), "cpu");
+    assert!(
+        d.describe().starts_with("cpu"),
+        "without the gpu feature the face must stay a cpu* face, got {}",
+        d.describe()
+    );
 }
 
 #[test]

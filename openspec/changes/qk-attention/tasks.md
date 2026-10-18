@@ -86,14 +86,21 @@
       matvecs, token stream identical to the CPU face. Default-feature
       server suite green incl. binary_purity (124 tests); clippy -D
       warnings + fmt green on both crates in both feature states.
-- [ ] 3.5 CPU fast path (user-directed): SIMD inner product for
+- [x] 3.5 CPU fast path (user-directed): SIMD inner product for
       packed_matvec/packed_matmul (±1 decode via byte LUT/shuffle into
       f32xN/f64xN ±1 vectors) + rayon row-parallelism behind an opt-in
-      feature. Determinism contract: parallelism across ROWS only, so
-      outputs stay bit-identical regardless of thread count; within-row
-      SIMD reassociation bounded by the rel 1e-12 budget vs the scalar
-      face + repeated-run bit-identity. Default (scalar) builds unchanged;
-      server opt-in via feature flag, same dispatch-seam pattern as 3.4.
+      feature. Done 2026-10-18: `fast-cpu` feature (wide 0.7 f64x4 + rayon
+      1.10); byte-LUT sign decode, lane-sequential f64x4 partials, fixed
+      reduce + scalar tail. Release measurement: 512×(1024×137) matvec
+      scalar 234 ms → fast 9.3 ms (**25.1×**). Parity gate is the
+      BACKWARD error (≤1e-12 · Σ|terms|) — forward-relative is
+      condition-bound and hit 1.53e-12 on a cancellation row while the
+      backward error stayed ~1e-15 of term scale (crystallized in
+      design.md); run-to-run bit-identity asserted exactly; parallelism
+      across 64-row blocks only (per-row tasks measured 1.2× in dev —
+      overhead-bound). Server wired via `cpu_matvec` shim; /health label
+      "cpu:fast" under the feature; clippy green in all four feature
+      combos; full suites green in default, fast-cpu, gpu, and both.
 
 ## 4. Landing
 

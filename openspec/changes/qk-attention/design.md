@@ -2,6 +2,40 @@
 
 ## Implementation crystallization
 
+### 2026-10-18 — CPU fast face: SIMD + rayon (task 3.5, user-directed)
+
+- **Parity criterion decision, resolved by measurement**: for any
+  REASSOCIATED accumulation the honest gate is the BACKWARD error
+  (|fast − scalar| ≤ tol · Σ_k |terms|), not forward-relative error.
+  Measured at 257×73: row 115 hit 1.53e-12 forward-relative while its
+  backward error was ~1e-15 of the term scale — forward-relative error is
+  set by the row's condition number (cancellation), not by the kernel,
+  and no fixed forward tolerance survives arbitrary data. The rel-1e-12
+  FORWARD gate remains correct only for order-PRESERVING faces (the GPU
+  sequential mirror: measured 0.0). Do not "fix" the fast face to meet a
+  forward gate; fix the gate.
+- **Measured speed (release profile)**: 512 × (1024×137) matvec — scalar
+  234 ms → fast 9.3 ms, **25.1×**. Dev-profile numbers (1.2–1.3×) are
+  build-artifacts of the unoptimized test binary; judge perf in release
+  or not at all.
+- **Rayon row-blocking (64 rows/task)**: per-row task overhead dominated
+  at 1024 rows (25× → would have been ~1.2×); blocking amortizes it.
+  Parallelism stays ACROSS ROWS ONLY; each row is one thread with a
+  fixed order (f64x4 lane partials → fixed horizontal reduce → scalar
+  tail), so outputs are bit-identical regardless of thread count —
+  asserted run-to-run in the parity tests.
+- **packed_matmul n_cols lesson (test-caught)**: `n_cols` participates in
+  the element addressing (mat[t*n_cols + j]) while the output width is
+  k = mat.len()/n_bits — off-nominal n_cols is legal input and faces must
+  agree element-for-element, not just on nominal shapes. My k-based
+  mat-row shortcut produced silently different elements until gated.
+- **Rejection-parity lesson**: over-wide n_bits is only a rejection when
+  it CROSSES a word boundary (n_bits+1 with a pad byte legitimately
+  computes on both faces). Probe with +2; assert same message on both.
+- Server wiring: `cpu_matvec` shim (cfg-selected scalar vs fast), CPU
+  face label honestly reports "cpu:fast" under the feature; same frozen
+  FaceDecision seam as 3.4 (never swapped mid-stream).
+
 ### 2026-10-18 — CubeCL GPU face: kernel, hardware parity, dispatch (tasks 3.1–3.4)
 
 - One arithmetic definition, now THREE faces (NumPy reference, CPU rlib,
