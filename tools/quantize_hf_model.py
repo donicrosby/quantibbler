@@ -320,8 +320,9 @@ def export_model_directory(
     )
 
     # Norm sidecar: fp32 LE — per block (input_layernorm,
-    # post_attention_layernorm), then the model-final norm. Validated at
-    # server load against n_layers x d_model (qk-attention N-1).
+    # post_attention_layernorm), then the model-final norm. The loader
+    # requires exactly (2 * n_layers + 1) * d_model floats (qk-attention
+    # N-1); asserted below so a miscount fails here, not at server load.
     norms = np.ascontiguousarray(norm_weights, dtype=np.float32)
     (out_dir / "norms.bin").write_bytes(norms.tobytes(order="C"))
 
@@ -335,6 +336,7 @@ def export_model_directory(
         f"\n[sidecar]\n"
         f'embedding = "e1.f32.bin"\n'
         f'lm_head = "e1.f32.bin"\n'
+        f'norms = "norms.bin"\n'
     )
     # Serialize the already-loaded tokenizer straight into the export dir
     # (tokenizer.json + config files). No hub lookup: offline containers and
@@ -342,10 +344,23 @@ def export_model_directory(
     # definition the exact tokenizer the pipeline used.
     tokenizer.save_pretrained(out_dir)
 
-    # self-check: the serialized stream header parses back as expected
+    # Self-check the loader-facing contract (cheap, byte-level — this is the
+    # tripwire that catches a half-updated export before 30 GPU-minutes are
+    # spent): layer stream header parses, and the norm sidecar carries
+    # exactly (2 * n_layers + 1) * d_model fp32 LE floats (N-1).
     first = sorted(layer_files.values())[0]
     header = struct.unpack("<4sIIIII", (out_dir / first).read_bytes()[:24])
     assert header[0] == b"QPK1" and header[1] == 1, header
+    # d_model as the loader computes it: the embedding column count (the
+    # GQA rule n_kv*head_dim == d_model is enforced server-side; heads/width
+    # need not equal it per-axis, so derive the count from the same place).
+    d_model = embedding_f64.shape[1]
+    expected_norm_floats = (2 * geometry["n_layers"] + 1) * d_model
+    assert norms.size == expected_norm_floats, (
+        f"norms.bin has {norms.size} floats; contract requires "
+        f"(2 * {geometry['n_layers']} + 1) * d_model = {expected_norm_floats}"
+    )
+    assert (out_dir / "norms.bin").stat().st_size == expected_norm_floats * 4
 
 
 def _export_geometry(causal) -> dict:
