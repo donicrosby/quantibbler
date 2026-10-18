@@ -101,22 +101,28 @@ WIKITEXT_TEST = _wikitext_cache_root()
 BATCH = 8  # eval/calibration microbatch (bf16 0.6B fits easily on CPU)
 
 
-class TrunkLogits(nn.Module):
-    """Tensor-returning view of an HF trunk (``Qwen3Model``).
+class LayerBlock(nn.Module):
+    """One decoder layer as a pipeline block: callable on bare activations.
 
-    One child (``trunk``) so ``reconstruct_model`` sees exactly one
-    quantizable block; forward returns ``last_hidden_state`` (a plain
-    tensor), which is what the block-reconstruction stages diff against.
-    Token ids and pre-embedded float activations both flow through the
-    rewired stock trunk forward (``rewire_trunk_embedding``).
+    Modern transformers decoder layers do NOT compute rotary embeddings
+    themselves — the trunk computes ``position_embeddings`` once and hands
+    them to every layer. This adapter supplies them per call (contiguous
+    positions; packed wikitext rows) and relies on mask-free causal
+    attention, which is exact for full-length packed rows.
     """
 
-    def __init__(self, trunk: nn.Module) -> None:
+    def __init__(self, layer: nn.Module, rotary: nn.Module) -> None:
         super().__init__()
-        self.trunk = trunk
+        self.inner = layer
+        self._rotary = [rotary]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.trunk(input_ids=x).last_hidden_state
+        pos = torch.arange(x.shape[1], device=x.device).unsqueeze(0)
+        pe = self._rotary[0](x, pos)
+        out = self.inner(x, position_embeddings=pe, attention_mask=None)
+        # transformers 5.x decoder layers return the tensor directly;
+        # older lines return (hidden_states, ...).
+        return out[0] if isinstance(out, tuple) else out
 
 
 class CausalLMLogits(nn.Module):
@@ -124,32 +130,42 @@ class CausalLMLogits(nn.Module):
 
     The PTQ pipeline is logits-semantics end to end (gate models return raw
     tensors; ``calibrate_scales`` feeds ``model(x)`` into the KL loss) and
-    its block loop iterates *direct children*, quantizing every child that
-    contains an ``nn.Linear`` and ending at the last non-quantized linear
-    (A-9 stem/post detection). HF's ``*ForCausalLM`` breaks both: it returns
-    ModelOutput objects and nests the embedding INSIDE the trunk, so a naive
-    wrapper makes the whole trunk one child (fine) but a re-embedded float
-    tensor crashes the embedding, while the block target is a ModelOutput
-    (crashes the MSE/KD stages).
+    its block loop iterates children (expanding ``nn.ModuleList`` members
+    into per-unit blocks), quantizing every block that contains an
+    ``nn.Linear`` and ending at the last non-quantized linear (A-9 stem/post
+    detection). HF's ``*ForCausalLM`` breaks both: it returns ModelOutput
+    objects and nests the embedding INSIDE the trunk.
 
-    This view exposes the three pieces as separate children:
+    This view exposes the anatomy as pipeline blocks:
 
     - ``embed`` — the embedding (no linears; skipped, becomes the stem);
-    - ``trunk`` — :class:`TrunkLogits` (THE quantized block; tensors in/out;
-      attention/norms/RoPE untouched — only its nn.Linears get swapped);
+    - ``layers.0 .. layers.N-1`` — the decoder stack as ONE BLOCK PER
+      LAYER (the papers reconstruct per transformer layer, Algorithm 1
+      line 9: the quantized prefix grows one layer at a time). Wrapping
+      the whole stack as a single block made every pipeline stage retain
+      all 28 layers' calibration activations at once (~28G at real
+      scale — the container OOM the breadcrumbs localized);
+    - ``norm`` — final RMSNorm (no linears; skipped; applied inside the
+      stock forward, never needed as a prefix block);
     - ``head`` — the tied LM head (leaf name excluded by A-9; the post).
 
-    and its own forward returns the logits tensor for Phase 3 KD.
+    ``forward`` runs the stock rewired trunk (embed-or-pass, RoPE, final
+    norm) and returns the logits tensor for Phase 3 KD. The trunk module
+    is held in a plain-list slot so it is NOT registered as a child —
+    it would otherwise re-register the whole stack as one block.
     """
 
     def __init__(self, causal: nn.Module) -> None:
         super().__init__()
         self.embed = causal.model.embed_tokens
-        self.trunk = TrunkLogits(causal.model)
+        rotary = causal.model.rotary_emb
+        self.layers = nn.ModuleList([LayerBlock(layer, rotary) for layer in causal.model.layers])
+        self.norm = causal.model.norm
         self.head = causal.lm_head
+        self._stock_trunk = [causal.model]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.head(self.trunk(x))
+        return self.head(self._stock_trunk[0](input_ids=x).last_hidden_state)
 
 
 def rewire_trunk_embedding(causal: nn.Module) -> None:

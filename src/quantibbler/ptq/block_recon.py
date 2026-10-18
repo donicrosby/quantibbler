@@ -421,6 +421,7 @@ def reconstruct_block(
         for name, m in quantizable_linears
     }
     _tune_fp(block, x_b, y_b, cfg, cfg.stage_pre.batch_size)
+    _note_block_progress(0, f"{name_prefix or 'block'}/tune_fp")
     if recorder is not None:
         recorder("tune_fp")
 
@@ -475,11 +476,14 @@ def reconstruct_block(
             fac.s2.copy_(torch.from_numpy(np.ascontiguousarray(bal.s2)))
         facs[name] = fac
     del res, bal
+    _note_block_progress(0, f"{name_prefix or 'block'}/lb_admm")
     if recorder is not None:
         recorder("lb_admm")
 
     # --- Step 3: TuneLatentSTE (line 19).
+    _note_block_progress(0, f"{name_prefix or 'block'}/stats_done")
     _tune_latent_ste(block, facs, x_b, y_b, cfg, cfg.stage_latent.batch_size)
+    _note_block_progress(0, f"{name_prefix or 'block'}/ste")
     if recorder is not None:
         recorder("ste")
 
@@ -596,8 +600,26 @@ def reconstruct_model(
 
 
 def _iter_named_children(model: nn.Module):
-    """Direct children in declaration order as (name, module) pairs."""
-    return [(name, child) for name, child in model.named_children()]
+    """Direct children in declaration order as (name, module) pairs.
+
+    ModuleList/ModuleDict containers (transformers stacks every decoder
+    layer into one ``model.layers`` list) are expanded one level: each
+    repeated unit becomes its own block. The papers' per-layer
+    reconstruction (Algorithm 1 line 9: the quantized prefix grows one
+    layer at a time) and bounded memory both need that granularity — a
+    28-layer ModuleList handled as a single block retains every layer's
+    calibration activations in one pass (~28G at real scale, the OOM the
+    breadcrumbs localized to block[1] trunk).
+    """
+    for name, child in model.named_children():
+        if isinstance(child, nn.ModuleList):
+            for i, unit in enumerate(child):
+                yield f"{name}.{i}", unit
+        elif isinstance(child, nn.ModuleDict):
+            for key, unit in child.items():
+                yield f"{name}.{key}", unit
+        else:
+            yield name, child
 
 
 def _model_input_stem(model: nn.Module, batches: list[torch.Tensor]) -> nn.Module:
