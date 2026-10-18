@@ -39,7 +39,34 @@ CONFIG = {
     "d_model": 4,
     "eos_token_id": 3,
     "bos_token_id": 1,
+    # Attention geometry (qk-attention N-2): n_kv*head_dim == d_model,
+    # n_heads % n_kv == 0 — the loader rejects anything else fail-closed.
+    "n_layers": 1,
+    "n_heads": 2,
+    "n_kv_heads": 2,
+    "head_dim": 2,
+    "rms_norm_eps": 1e-6,
+    "rope_theta": 10_000.0,
 }
+
+GEOMETRY_TOML = (
+    f"n_layers = {CONFIG['n_layers']}\n"
+    f"n_heads = {CONFIG['n_heads']}\n"
+    f"n_kv_heads = {CONFIG['n_kv_heads']}\n"
+    f"head_dim = {CONFIG['head_dim']}\n"
+    f"rms_norm_eps = {CONFIG['rms_norm_eps']}\n"
+    f"rope_theta = {CONFIG['rope_theta']}\n"
+)
+
+
+def write_norms_sidecar(root: Path) -> None:
+    """Deterministic norm sidecar: (2*n_layers+1)*d_model fp32 LE floats."""  # noqa: D401
+    import array
+
+    count = (2 * CONFIG["n_layers"] + 1) * CONFIG["d_model"]
+    norms = array.array("f", [0.1 * (i + 1) for i in range(count)])
+    (root / "norms.f32.bin").write_bytes(norms.tobytes())
+
 
 TOKENIZER_JSON = {
     "version": "1.0",
@@ -228,9 +255,10 @@ def build_valid_model(root: Path) -> None:
         '"block0.mlp.fc" = "layers/block0.mlp.fc.qpk1"\n'
         "\n"
         "[sidecar]\n"
-        "# fp32 embedding / lm_head raw LE float32 (OQ2 minimal sidecar)\n"
+        "# fp32 embedding / lm_head / norms raw LE float32\n"
         'embedding = "e1.f32.bin"\n'
-        'lm_head = "e1.f32.bin"\n',
+        'lm_head = "e1.f32.bin"\n'
+        'norms = "norms.f32.bin"\n',
         encoding="utf-8",
     )
     (root / "config.toml").write_text(
@@ -239,7 +267,7 @@ def build_valid_model(root: Path) -> None:
         f"d_model = {CONFIG['d_model']}\n"
         f"eos_token_id = {CONFIG['eos_token_id']}\n"
         f"bos_token_id = {CONFIG['bos_token_id']}\n"
-        'weight_tying = "lm_head=e1@fp32"\n',
+        'weight_tying = "lm_head=e1@fp32"\n' + GEOMETRY_TOML,
         encoding="utf-8",
     )
     (root / "tokenizer.json").write_text(
@@ -254,6 +282,7 @@ def build_valid_model(root: Path) -> None:
     for i in range(len(emb)):
         emb[i] = ((i % 7) - 3) * 0.25
     (root / "e1.f32.bin").write_bytes(emb.tobytes())
+    write_norms_sidecar(root)
 
 
 def build_bad_variants(base: Path) -> dict[str, str]:
@@ -354,7 +383,8 @@ def build_bad_variants(base: Path) -> dict[str, str]:
             "\n"
             "[sidecar]\n"
             'embedding = "e1.f32.bin"\n'
-            'lm_head = "e1.f32.bin"\n',
+            'lm_head = "e1.f32.bin"\n'
+            'norms = "norms.f32.bin"\n',
             encoding="utf-8",
         )
 
@@ -387,7 +417,7 @@ def build_bad_variants(base: Path) -> dict[str, str]:
             "d_model = 4\n"
             "eos_token_id = 3\n"
             "bos_token_id = 1\n"
-            'weight_tying = "banana"\n',
+            'weight_tying = "banana"\n' + GEOMETRY_TOML,
             encoding="utf-8",
         )
 
@@ -402,11 +432,77 @@ def build_bad_variants(base: Path) -> dict[str, str]:
             "d_model = 4\n"
             "eos_token_id = 99\n"
             "bos_token_id = 1\n"
-            'weight_tying = "lm_head=e1@fp32"\n',
+            'weight_tying = "lm_head=e1@fp32"\n' + GEOMETRY_TOML,
             encoding="utf-8",
         )
 
     derived("eos_out_of_range", _eos_out_of_range)
+
+    # --- qk-attention N-1: norm sidecar fail-closed paths ---
+
+    # 17. no [sidecar] block at all
+    def _missing_sidecar_block(d: Path) -> None:
+        m = d / "manifest.toml"
+        m.write_text(m.read_text(encoding="utf-8").split("[sidecar]")[0], encoding="utf-8")
+
+    derived("missing_sidecar_block", _missing_sidecar_block)
+
+    # 18. [sidecar] present but no `norms` key
+    def _missing_norms_manifest(d: Path) -> None:
+        m = d / "manifest.toml"
+        m.write_text(
+            m.read_text(encoding="utf-8").replace('norms = "norms.f32.bin"\n', ""),
+            encoding="utf-8",
+        )
+
+    derived("missing_norms_manifest", _missing_norms_manifest)
+
+    # 19. norms sidecar referenced but absent on disk
+    def _missing_norms_file(d: Path) -> None:
+        (d / "norms.f32.bin").unlink()
+
+    derived("missing_norms_file", _missing_norms_file)
+
+    # 20. norms sidecar miscounted (5 floats instead of
+    #     (2*n_layers+1)*d_model = 12): stat-before-read length gate
+    def _norms_wrong_size(d: Path) -> None:
+        import array
+
+        (d / "norms.f32.bin").write_bytes(array.array("f", [0.5] * 5).tobytes())
+
+    derived("norms_wrong_size", _norms_wrong_size)
+
+    # --- qk-attention N-2: attention geometry validation paths ---
+
+    # 21. a geometry field missing entirely: the TOML parse itself fails
+    def _missing_geometry(d: Path) -> None:
+        c = d / "config.toml"
+        c.write_text(
+            c.read_text(encoding="utf-8").replace("n_heads = 2\n", ""),
+            encoding="utf-8",
+        )
+
+    derived("missing_geometry", _missing_geometry)
+
+    # 22. n_kv_heads * head_dim != d_model
+    def _gqa_width_mismatch(d: Path) -> None:
+        c = d / "config.toml"
+        c.write_text(
+            c.read_text(encoding="utf-8").replace("n_kv_heads = 2", "n_kv_heads = 3"),
+            encoding="utf-8",
+        )
+
+    derived("gqa_width_mismatch", _gqa_width_mismatch)
+
+    # 23. n_heads %% n_kv_heads != 0
+    def _gqa_group_mismatch(d: Path) -> None:
+        c = d / "config.toml"
+        c.write_text(
+            c.read_text(encoding="utf-8").replace("n_heads = 2", "n_heads = 3"),
+            encoding="utf-8",
+        )
+
+    derived("gqa_group_mismatch", _gqa_group_mismatch)
     return variants
 
 

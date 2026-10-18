@@ -7,7 +7,7 @@ layers = [ "block0.mlp.fc" ]
 "block0.mlp.fc" = "layers/block0.mlp.fc.qpk1"
 
 [sidecar]
-# fp32 embedding / lm_head raw LE float32 (OQ2 minimal sidecar)
+# fp32 embedding / lm_head / norms raw LE float32
 embedding = "e1.f32.bin"
 lm_head = "e1.f32.bin"
 norms = "norms.f32.bin"
