@@ -284,6 +284,8 @@ def export_model_directory(
     bos_token_id: int,
     tokenizer,
     config_f64: dict,
+    geometry: dict,
+    norm_weights: np.ndarray,
 ) -> None:
     """Write the qk-server acquisition directory (loader-validated layout).
 
@@ -309,7 +311,19 @@ def export_model_directory(
         f"eos_token_id = {eos_token_id}\n"
         f"bos_token_id = {bos_token_id}\n"
         'weight_tying = "lm_head=e1@fp32"\n'
+        f"n_layers = {geometry['n_layers']}\n"
+        f"n_heads = {geometry['n_heads']}\n"
+        f"n_kv_heads = {geometry['n_kv_heads']}\n"
+        f"head_dim = {geometry['head_dim']}\n"
+        f"rms_norm_eps = {geometry['rms_norm_eps']}\n"
+        f"rope_theta = {geometry['rope_theta']}\n"
     )
+
+    # Norm sidecar: fp32 LE — per block (input_layernorm,
+    # post_attention_layernorm), then the model-final norm. Validated at
+    # server load against n_layers x d_model (qk-attention N-1).
+    norms = np.ascontiguousarray(norm_weights, dtype=np.float32)
+    (out_dir / "norms.bin").write_bytes(norms.tobytes(order="C"))
 
     manifest_layers = ",\n".join(f'  "{n}"' for n in layer_files)
     manifest_layer_files = "\n".join(f'"{n}" = "{p}"' for n, p in layer_files.items())
@@ -332,6 +346,37 @@ def export_model_directory(
     first = sorted(layer_files.values())[0]
     header = struct.unpack("<4sIIIII", (out_dir / first).read_bytes()[:24])
     assert header[0] == b"QPK1" and header[1] == 1, header
+
+
+def _export_geometry(causal) -> dict:
+    """Attention geometry + rope theta off the live HF config.
+
+    This transformers generation folds theta into ``rope_parameters``
+    (older versions carried a flat ``rope_theta`` attribute).
+    """
+    hcfg = causal.config
+    return {
+        "n_layers": hcfg.num_hidden_layers,
+        "n_heads": hcfg.num_attention_heads,
+        "n_kv_heads": hcfg.num_key_value_heads,
+        "head_dim": getattr(hcfg, "head_dim", None) or hcfg.hidden_size // hcfg.num_attention_heads,
+        "rms_norm_eps": hcfg.rms_norm_eps,
+        "rope_theta": float(
+            getattr(hcfg, "rope_theta", None)
+            or (hcfg.rope_parameters or {}).get("rope_theta", 1_000_000.0)
+        ),
+    }
+
+
+def _export_norm_weights(causal) -> np.ndarray:
+    """Per-block (input, post-attention) norm weights, then the trunk-final
+    norm — the server's block iteration order (qk-attention N-1)."""
+    parts = []
+    for layer in causal.model.layers:
+        parts.append(layer.input_layernorm.weight.detach().to(torch.float32))
+        parts.append(layer.post_attention_layernorm.weight.detach().to(torch.float32))
+    parts.append(causal.model.norm.weight.detach().to(torch.float32))
+    return torch.cat(parts).cpu().numpy()
 
 
 def main() -> int:
@@ -451,16 +496,26 @@ def main() -> int:
     print(f"      effective BPW  = {bpw:.4f}  (qpk1 layer bytes: {total_qpk1:,})", flush=True)
 
     print("[6/6] exporting qk-server model directory ->", out_dir, flush=True)
-    embedding = causal.get_input_embeddings().weight.detach().to(torch.float32).cpu().numpy()
+    embedding_f64 = causal.get_input_embeddings().weight.detach().to(torch.float64).cpu().numpy()
+    # Attention geometry + norm weights straight from the live model (never
+    # hardcoded): the exported artifact must be self-describing for the
+    # server's transformer forward (qk-attention N-1/N-2). Norm vector
+    # order: per block (input_layernorm, post_attention_layernorm), then
+    # the trunk-final norm — the server's block iteration order.
+    geometry = _export_geometry(causal)
+    norm_weights = _export_norm_weights(causal)
+
     export_model_directory(
         out_dir,
         qm,
-        embedding,
+        embedding_f64=embedding_f64,
         model_id=args.model.replace("/", "-"),
         eos_token_id=cfg.eos_token_id,
         bos_token_id=cfg.bos_token_id,
         tokenizer=tokenizer,
         config_f64={"dtype_note": "solver float64 / scales fp16 / artifact qpk1"},
+        geometry=geometry,
+        norm_weights=norm_weights,
     )
     report = {
         "model": args.model,
