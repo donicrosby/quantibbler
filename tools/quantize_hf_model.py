@@ -75,6 +75,7 @@ if str(REPO_ROOT / "src") not in sys.path:
 import numpy as np
 import pyarrow.parquet as pq
 import torch
+from huggingface_hub import hf_hub_download
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -322,7 +323,14 @@ def export_model_directory(
         f'embedding = "e1.f32.bin"\n'
         f'lm_head = "e1.f32.bin"\n'
     )
-    (out_dir / "tokenizer.json").write_bytes(tokenizer_path.read_bytes())
+    tokenizer_local = Path(
+        hf_hub_download(
+            model_id,
+            "tokenizer.json",
+            local_files_only=bool(os.environ.get("HF_HUB_OFFLINE")),
+        )
+    )
+    (out_dir / "tokenizer.json").write_bytes(tokenizer_local.read_bytes())
 
     # self-check: the serialized stream header parses back as expected
     first = sorted(layer_files.values())[0]
