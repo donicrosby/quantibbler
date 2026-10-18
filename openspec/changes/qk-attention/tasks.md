@@ -104,8 +104,15 @@
 
 ## 4. Landing
 
-- [ ] 4.1 `openspec validate qk-attention --strict` green; spec deltas
-      folded only at archive time.
-- [ ] 4.2 Gates: pytest, cargo test (kernels + server), clippy both crates,
+- [x] 4.1 `openspec validate qk-attention --strict` green; spec deltas
+      folded only at archive time. Green at every spec edit this session
+      (latest: 2026-10-18, before the 3.5 landing commit).
+- [x] 4.2 Gates: pytest, cargo test (kernels + server), clippy both crates,
       pre-commit; scoped commits per repo discipline (leaves never commit —
-      orchestrator lands).
+      orchestrator lands). Done 2026-10-18: pytest 66/66 after
+      `uv sync --reinstall` of the changed kernels extension; cargo test
+      green on kernels + server in default, gpu, fast-cpu, and both
+      feature states (incl. binary_purity and the hardware-gated
+      gpu_parity/gpu_dispatch arms on gfx1151); clippy -D warnings green
+      in all four combos on both crates; pre-commit ran on every scoped
+      commit (hooks all Passed).
