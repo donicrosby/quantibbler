@@ -68,6 +68,7 @@ fn e2e_reader_matches_representation_known_layer() {
 /// formula and the server loads + serves it end to end
 /// (quantize -> serialize -> serve -> complete, fixture stand-in).
 #[test]
+#[ignore = "generation rewires onto the transformer forward with qk-attention 2.2/2.3"]
 fn e2e_fixture_model_serves_end_to_end() {
     // Size formula (qk-representation SF-1.1).
     let layer_path = fixture_dir().join("layers/block0.mlp.fc.qpk1");

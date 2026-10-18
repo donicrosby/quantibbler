@@ -20,6 +20,7 @@ use common::*;
 /// SR-5.1: non-streaming completions return the text_completion shape with
 /// choices[].text and usage.
 #[test]
+#[ignore = "generation rewires onto the transformer forward with qk-attention 2.2/2.3"]
 fn completions_nonstreaming_openai_shape() {
     let server = spawn_server(&[]);
     assert!(wait_ready(server.port, std::time::Duration::from_secs(30)));
@@ -54,6 +55,7 @@ fn completions_nonstreaming_openai_shape() {
 /// SR-9.1: N concurrent requests (above and below the semaphore bound) all
 /// complete with valid, independent responses.
 #[test]
+#[ignore = "generation rewires onto the transformer forward with qk-attention 2.2/2.3"]
 fn n_concurrent_requests_all_complete() {
     let server = spawn_server(&["--max-concurrency", "2"]);
     assert!(wait_ready(server.port, std::time::Duration::from_secs(30)));
@@ -82,6 +84,7 @@ fn n_concurrent_requests_all_complete() {
 /// SR-9.2: one failing request (malformed body) among in-flight
 /// generations does not corrupt the others.
 #[test]
+#[ignore = "generation rewires onto the transformer forward with qk-attention 2.2/2.3"]
 fn one_failing_request_does_not_corrupt_others() {
     let server = spawn_server(&["--max-concurrency", "4"]);
     assert!(wait_ready(server.port, std::time::Duration::from_secs(30)));

@@ -43,6 +43,13 @@ pub fn load(model_dir: &Path) -> Result<LoadedModel, String> {
             dir.lm_head,
             dir.d_model,
             dir.vocab_size,
+            dir.n_layers,
+            dir.n_heads,
+            dir.n_kv_heads,
+            dir.head_dim,
+            dir.rms_norm_eps,
+            dir.rope_theta,
+            dir.norm_weights,
         )
         .map_err(|e| format!("{}: {e}", model_dir.join("manifest.toml").display()))?,
     );

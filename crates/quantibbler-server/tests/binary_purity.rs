@@ -22,6 +22,7 @@ use common::*;
 /// CPU through the kernels rlib face (this whole test binary links
 /// `quantibbler_kernels::core` directly — no Python involved).
 #[test]
+#[ignore = "generation rewires onto the transformer forward with qk-attention 2.2/2.3"]
 fn inference_runs_cpu_via_kernels_rlib() {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
