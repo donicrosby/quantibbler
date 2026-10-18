@@ -2,6 +2,31 @@
 
 ## Implementation crystallization
 
+### 2026-10-18 — r8 re-export + real-artifact serving proof (tasks 1.3 / 2.4)
+
+- Full driver re-run (container, 32G ceiling, breadcrumbs clean; peak
+  32.0G — tighter than the prior run's, driven by the added q/k-norm
+  export bookkeeping, still inside budget). Baseline ppl 28.6696 exactly
+  matches the 2026-10-18 acquisition run's regime; ppl_quant ≈ 1.5e7 at
+  BPW 0.0345 — the documented smoke-rank garbage (rank 137 is the
+  sub-1-bit operating point).
+- **Real Qwen3-0.6B is weight-TIED** (`tie_word_embeddings = true`),
+  unlike the tiny Qwen3Config default (untied) used by the parity
+  fixture — both paths of the new exporter tying logic are now exercised
+  on real artifacts (parity fixture = untied head export; r8 = tied
+  sentinel).
+- Acquisition + serving proof on the release binary: ready in <1s on
+  28 layers / vocab 151936; `/v1/completions` and
+  `/v1/chat/completions` (JSON + SSE stream) decode greedily through the
+  transformer engine; two identical prompts produce byte-identical
+  completions (E-2.1 determinism on a real artifact). Output "anced"
+  repeated — garbage by construction at r8; the gate was correctness of
+  the pipeline, which the tiny-parity suite already bounds at 4.1e-5.
+- Housekeeping: `gen_server_fixtures.build_valid_model` now rmtree's its
+  target first — regeneration can no longer leave stale layer files in
+  variant dirs (found as leftover `block0.mlp.fc.qpk1` after the
+  transformer-block fixture rewrite.
+
 ### 2026-10-18 — Engine transformer forward + head-tying contract fix (chunk B)
 
 - **2.2/2.3 landed:** RMSNorm (f32, config eps), RoPE (HF rotate_half

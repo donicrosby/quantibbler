@@ -11,8 +11,16 @@
       `n_kv*head_dim==d_model`, `n_heads % n_kv == 0`, zero/negative/overflow
       geometry guards); unit tests for each rejection path + server e2e
       corrupted-variant coverage for all seven new fail-closed fixtures.
-- [ ] 1.3 Re-export the r8 artifact and confirm the server still reports
+- [x] 1.3 Re-export the r8 artifact and confirm the server still reports
       ready (contract migration proof, old-artifact rejection covered).
+      Done 2026-10-18: full driver re-run (baseline ppl 28.6696, matching
+      the prior run's regime) exported under the declared-inventory
+      contract (`norm_slots = ["input","post_attention","q_norm","k_norm"]`,
+      genuinely-tied head — real Qwen3-0.6B IS tied; only the tiny config
+      defaults untied), release binary reports ready on the 28-layer /
+      151936-vocab artifact. Old-contract artifact kept at
+      `artifacts/qwen3-0.6B-r8-20261018-old-contract`; the loader's
+      fail-closed inventory validation rejects it (missing norm_slots).
 
 ## 2. Engine transformer forward (CPU-correct first)
 
@@ -32,9 +40,14 @@
 - [x] 2.3 SwiGLU MLP over gate/up/down packed projections; residual wiring;
       final norm + LM head; greedy decode parity test GREEN (max |Δlogit|
       = 4.1e-5 vs fp32-of-artifact goldens; budget 1e-2 — E-2.2).
-- [ ] 2.4 End-to-end: serve the r8 artifact, `/v1/chat/completions` greedy
+- [x] 2.4 End-to-end: serve the r8 artifact, `/v1/chat/completions` greedy
       stream; sample outputs reviewed for sanity (expectation: r8 quality is
-      garbage — correctness, not quality, is the gate).
+      garbage — correctness, not quality, is the gate). Demonstrated
+      2026-10-18 on the real 28-layer artifact: /health ready,
+      /v1/completions + /v1/chat/completions (non-stream and SSE stream)
+      greedy-decode through the transformer engine; determinism confirmed
+      (byte-identical "anced"*8 across runs — E-2.1 on a real artifact);
+      quality is garbage by construction at 0.0345 BPW.
 
 ## 3. CubeCL GPU kernels (parity-gated, opt-in)
 
