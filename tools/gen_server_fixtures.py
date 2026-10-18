@@ -281,6 +281,10 @@ PROBE_FILE = "layers/q_proj.qpk1"
 
 def build_valid_model(root: Path) -> None:
     """Write the valid fixture model directory (one transformer block)."""
+    import shutil
+
+    if root.exists():
+        shutil.rmtree(root)  # regenerate clean: no stale layer files
     (root / "layers").mkdir(parents=True, exist_ok=True)
     dout, din, r = 4, 4, 4
     expected = expected_size(dout, din, r, 2)
