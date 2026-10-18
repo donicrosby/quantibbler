@@ -187,12 +187,22 @@ def _quantized_forward_block(
                 # quantized-prefix capture), gradient-carrying during the
                 # TuneLatentSTE stage (gradients must reach U, V, s1, s2).
                 # W_q = (s1 ⊙ sign(U)) @ (s2 ⊙ sign(V))ᵀ, shape (dout, din).
+                # Built in the ACTIVATION dtype: for bf16-class models an
+                # f64 W_q per factorized layer materializes ~2.4GB of graph
+                # per layer-pair under torch autograd (68 of them live
+                # simultaneously through a 28-layer trunk) — instant OOM
+                # under a container cap, and bf16 W_q is the papers' own
+                # training regime. Latents stay float64; only the graph
+                # ops are cast. The f64 fixture path is bit-identical.
+                dt = x_in.dtype
                 ub = torch.sign(_f.u_latent)
                 ub = ub + _f.u_latent - _f.u_latent.detach()
                 vb = torch.sign(_f.v_latent)
                 vb = vb + _f.v_latent - _f.v_latent.detach()
-                w_q = (_f.s1.unsqueeze(1) * ub) @ (_f.s2.unsqueeze(1) * vb).T
-                return x_in @ w_q.to(x_in.dtype).T + _f.bias.to(x_in.dtype)
+                s1 = _f.s1.to(dt)
+                s2 = _f.s2.to(dt)
+                w_q = (s1.unsqueeze(1) * ub.to(dt)) @ (s2.unsqueeze(1) * vb.to(dt)).T
+                return x_in @ w_q.T + _f.bias.to(dt)
 
             originals[name] = linear.forward
             linear.forward = frozen_forward  # type: ignore[method-assign]
@@ -395,8 +405,18 @@ def reconstruct_block(
     # they are the statistics source; the embedding-adapter path is the
     # fallback for direct reconstruct_block calls with token-id batches.
     if stats_book is None:
-        if x_b.dtype.is_floating_point:
+        if x_b.dtype == torch.float64:
+            # The float64 reference path (executable-spec fixtures): one
+            # whole-batch backward, bit-identical to the landed behavior.
             stats_book = collect_stats(block, [x_b])
+        elif x_b.dtype.is_floating_point:
+            # Lower-precision (real-model) float activations: row-chunked
+            # backwards through the block — the statistic definition is
+            # unchanged (raw f64 grads accumulated across chunks, squared
+            # once per batch), but a whole-batch backward retains attention
+            # graphs for every row at once (~15GB on a 28-layer bf16 trunk)
+            # and OOMs under container caps.
+            stats_book = collect_stats(block, [x_b], chunk_rows=4)
         else:
             stats_book = collect_stats(_input_adapter(block, batches), batches)
         scope = {n for n, _ in quantizable_linears}

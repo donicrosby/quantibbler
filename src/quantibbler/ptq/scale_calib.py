@@ -16,6 +16,8 @@ overrides for test speed).
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import torch
 from torch import nn
@@ -101,15 +103,55 @@ def calibrate_scales(
     def quantized_forward_with_scales(x: torch.Tensor) -> torch.Tensor:
         return model(x)
 
-    # Teacher logits, cached once ([NQ] Sec 3.3 memory note).
-    teacher_logits = torch.cat([teacher(b) for b in batches], dim=0).detach()
+    # Teacher logits, cached once ([NQ] Sec 3.3 memory note). Under a
+    # container memory cap the cache is DISK-BACKED (np.memmap): a real
+    # 152k-vocab model x 128 rows x 512 positions is tens of GB in RAM (the
+    # papers cache on 80GB H100s; we trade a sequential write + mmap reads
+    # for the RAM). The teacher's logits for one calibration batch
+    # materialize only transiently, per time-chunk of the write. f64 models
+    # (the tiny fixtures) cache f64 exactly as before — bit-identical to
+    # the in-RAM path; lower-precision models cache float32 (already below
+    # the artifacts' fp16 scale precision impact).
+    import tempfile
+
+    # Teacher logits materialize in 2-row slices: a full 8x512x152k batch
+    # of bf16 logits is ~2.4GB at once; 2 rows is ~600MB. The cache write
+    # below walks the same slice shape, so peak transient stays bounded.
+    probe = teacher(batches[0][:2])
+    logit_shape = tuple(probe.shape)
+    vocab = logit_shape[-1]
+    rows_per_sample = logit_shape[1] if len(logit_shape) == 3 else 1
+    n_rows = sum(b.shape[0] for b in batches) * rows_per_sample
+    cache_dt = np.float64 if probe.dtype == torch.float64 else np.float32
+    torch_cache_dt = torch.float64 if probe.dtype == torch.float64 else torch.float32
+    tmp = tempfile.TemporaryDirectory(
+        prefix="quantibbler-kd-", dir=os.getenv("QUANTIBBLER_KD_TMPDIR")
+    )
+    teacher_mm = np.memmap(
+        f"{tmp.name}/teacher_logits.bin",
+        dtype=cache_dt,
+        mode="w+",
+        shape=(n_rows, vocab),
+    )
+    row = 0
+    with torch.no_grad():
+        for b in batches:
+            for lo in range(0, b.shape[0], 2):
+                t = teacher(b[lo : lo + 2]).detach().reshape(-1, vocab)
+                teacher_mm[row : row + t.shape[0]] = t.to(torch_cache_dt).cpu().numpy()
+                row += t.shape[0]
+                del t
+    teacher_mm.flush()
+    del probe
 
     n = sum(b.shape[0] for b in batches)
     bs = max(1, min(cfg.stage_global.batch_size, n))
     total = max(cfg.stage_global.epochs * (n // bs or 1), 1)
     kl_trace: list[float] = []
     inputs = torch.cat(batches, dim=0)
-    all_logits = teacher_logits
+    # Disk-backed cache: row-slices page in per step (bs x rows_per_sample
+    # logits only), so KD-step RAM is O(batch), not O(dataset).
+    all_logits = teacher_mm
 
     def scale_forward(x: torch.Tensor) -> torch.Tensor:
         """Forward with the tuned scales applied at each quantized layer."""
@@ -145,9 +187,8 @@ def calibrate_scales(
     step = 0
     for _epoch in range(cfg.stage_global.epochs):
         for lo in range(0, n, bs):
-            idx = slice(lo, min(lo + bs, n))
-            x_bs = inputs[idx]
-            y_bs = all_logits[idx]
+            hi = min(lo + bs, n)
+            x_bs = inputs[lo:hi]
             if cfg.cosine_schedule and total > 1:
                 import math
 
@@ -155,6 +196,18 @@ def calibrate_scales(
                 for group in opt.param_groups:
                     group["lr"] = lr
             student = scale_forward(x_bs)
+            # Page the step's teacher logits in from the disk cache. The
+            # cache's row space is (samples x positions) FLATTENED while the
+            # input index space is samples: rows_per_sample bridges them
+            # (identical to the old in-RAM path when rows_per_sample == 1,
+            # which is what the tiny fixtures exercise). Per-sample slices
+            # also keep the KL-loss transient at bs x vocab, not n x vocab.
+            row0 = lo * rows_per_sample
+            row1 = hi * rows_per_sample
+            y_flat = torch.from_numpy(
+                np.ascontiguousarray(all_logits[row0:row1], dtype=cache_dt)
+            ).to(student.dtype)
+            y_bs = y_flat.view(hi - lo, rows_per_sample, -1) if rows_per_sample > 1 else y_flat
             loss = _kl_with_logits(y_bs, student, cfg.temperature)
             opt.zero_grad()
             loss.backward()
@@ -167,6 +220,7 @@ def calibrate_scales(
             break
 
     # Write the tuned scales back into the layer artifacts (float64).
+    tmp.cleanup()  # release the disk-backed teacher cache
     for name, st in layers.items():
         st.s1 = s1_params[name].detach().cpu().numpy().astype(np.float64).copy()
         st.s2 = s2_params[name].detach().cpu().numpy().astype(np.float64).copy()

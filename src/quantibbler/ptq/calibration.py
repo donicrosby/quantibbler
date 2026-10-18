@@ -93,7 +93,9 @@ def _layer_statistic(feat_sq: torch.Tensor, grad_stat: torch.Tensor) -> torch.Te
     return feat_sq.mean(dim=0) + grad_stat
 
 
-def collect_stats(module: nn.Module, calibration_batches) -> LayerStatsBook:
+def collect_stats(
+    module: nn.Module, calibration_batches, *, chunk_rows: int | None = None
+) -> LayerStatsBook:
     """Run calibration batches forward (and backward) once through ``module``.
 
     For every ``nn.Linear`` in module declaration order, records the mean
@@ -101,6 +103,14 @@ def collect_stats(module: nn.Module, calibration_batches) -> LayerStatsBook:
     output-gradient feature (backward pass). ``module`` may be a single
     layer or a whole model; gradients are enabled for the statistics pass
     and the module's parameter ``.grad`` fields are restored afterwards.
+
+    ``chunk_rows`` splits each batch's backward into row chunks (the raw f64
+    gradient is accumulated across chunks and squared once, preserving the
+    per-batch statistic's definition). Default ``None`` = one backward per
+    batch — the float64 reference path stays bit-identical to the landed
+    single-pass behavior; lower-precision real-model paths opt in because a
+    whole-batch backward retains attention graphs for every row at once and
+    OOMs under container caps.
     """
     linears = [(name, m) for name, m in module.named_modules() if isinstance(m, nn.Linear)]
     if not linears:
@@ -134,20 +144,36 @@ def collect_stats(module: nn.Module, calibration_batches) -> LayerStatsBook:
         # statistics; a uniform output-gradient cotangent touches every
         # feature channel.
         for batch in calibration_batches:
-            torch.set_grad_enabled(True)
-            model_out = module(batch)
-            if not isinstance(model_out, torch.Tensor):
-                model_out = model_out[0]
-            model_out.backward(torch.ones_like(model_out))
-            torch.set_grad_enabled(False)
-            for name, m in linears:
-                if m.weight.grad is not None:
-                    g = m.weight.grad.to(torch.float64)  # (dout, din)
-                    # Mean square per input feature, per batch -> (din,).
-                    grad_in2[name].append(g.pow(2).mean(dim=0))
-                else:
-                    din = m.weight.shape[1]
-                    grad_in2[name].append(torch.zeros(din, dtype=torch.float64))
+            # The per-batch gradient statistic is the square of the TOTAL
+            # gradient over the batch's rows. With chunk_rows set (opt-in,
+            # non-f64 paths), the raw f64 gradient accumulates across row
+            # chunks and is squared once — same definition, bounded graph;
+            # without it, one whole-batch backward (bit-identical to the
+            # landed f64 reference path).
+            chunk_iter: list[torch.Tensor] = (
+                [batch[lo : lo + chunk_rows] for lo in range(0, batch.shape[0], chunk_rows)]
+                if chunk_rows
+                else [batch]
+            )
+            dout_din = {name: tuple(m.weight.shape) for name, m in linears}
+            acc = {
+                name: torch.zeros(shape, dtype=torch.float64) for name, shape in dout_din.items()
+            }
+            for piece in chunk_iter:
+                torch.set_grad_enabled(True)
+                model_out = module(piece)
+                if not isinstance(model_out, torch.Tensor):
+                    model_out = model_out[0]
+                model_out.backward(torch.ones_like(model_out))
+                torch.set_grad_enabled(False)
+                for name, m in linears:
+                    if m.weight.grad is not None:
+                        acc[name] += m.weight.grad.to(torch.float64)
+                    # The f64 accumulator is all that survives into the
+                    # next chunk; the chunk's graph and grad are dropped.
+                    m.weight.grad = None
+            for name in acc:
+                grad_in2[name].append(acc[name].pow(2).mean(dim=0))
     finally:
         torch.set_grad_enabled(grad_enabled)
         for h in handles:

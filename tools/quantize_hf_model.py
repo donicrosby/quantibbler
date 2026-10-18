@@ -54,9 +54,12 @@ import sys
 import time
 from pathlib import Path
 
-# Fail closed on network before transformers/HF get a chance to phone home.
+# Fail closed on network before transformers/HF get a chance to phone home,
+# and keep the (multi-GB) KD teacher-logit cache off tmpfs — /tmp is a
+# small tmpfs here; /opt/data is real disk.
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+os.environ.setdefault("QUANTIBBLER_KD_TMPDIR", "/opt/data/tmp")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT / "src") not in sys.path:
@@ -147,21 +150,23 @@ def rewire_trunk_embedding(causal: nn.Module) -> None:
 
 @torch.no_grad()
 def perplexity_from_logits(logits_fn, batches: list[torch.Tensor]) -> float:
-    """Next-token perplexity over equal-size batches (mean-of-means is
-    exact here: every batch carries BATCH * (seq_len - 1) predictions)."""
+    """Next-token perplexity over equal-size batches.
+
+    The cross-entropy is accumulated per row: casting a whole batch's
+    logits (8 x 511 x 152k) to float32 at once is a multi-GB transient,
+    which matters under a container memory cap. Mean-of-means stays exact
+    (every batch carries BATCH * (seq_len - 1) predictions).
+    """
     total_nats = 0.0
     n_preds = 0
     for batch in batches:
         logits = logits_fn(batch[:, :-1])
         targets = batch[:, 1:]
-        nats = torch.nn.functional.cross_entropy(
-            logits.reshape(-1, logits.shape[-1]).float(),
-            targets.reshape(-1),
-            reduction="sum",
-        )
-        total_nats += float(nats)
-        n_preds = targets.numel()
-    return float(np.exp(total_nats / (len(batches) * n_preds)))
+        for i in range(logits.shape[0]):
+            nats = torch.nn.functional.cross_entropy(logits[i].float(), targets[i], reduction="sum")
+            total_nats += float(nats)
+        n_preds += targets.numel()
+    return float(np.exp(total_nats / n_preds))
 
 
 def load_wikitext_text(shards: list[Path]) -> str:
@@ -337,28 +342,25 @@ def main() -> int:
     )
     print(f"      calib {len(calib)} batches, eval {len(held_out)} batches")
 
-    print("[3/6] bf16 baseline perplexity (paper-regime pedestal)")
+    print("[3/6] bf16 baseline perplexity (paper-regime pedestal)", flush=True)
     ppl_base = perplexity_from_logits(lambda b: model(b), held_out)
-    print(f"      ppl_baseline = {ppl_base:.4f}")
+    print(f"      ppl_baseline = {ppl_base:.4f}", flush=True)
 
-    print("[4/6] PTQ: upcast to float64, block reconstruction + scale KD")
+    print("[4/6] PTQ: bf16 model, per-layer float64 solver (block recon + scale KD)")
     solver_t = time.time()
-    model = model.to(torch.float64)
     qm = quantize_model(model, calib, quantized_config(args))
-    print(f"      solver wall: {time.time() - solver_t:.0f}s")
+    print(f"      solver wall: {time.time() - solver_t:.0f}s", flush=True)
 
-    print("[5/6] quantized perplexity (float64 artifact-exact + bf16 serving)")
+    print("[5/6] quantized perplexity (checkpoint-native dtype, artifact written back)")
     host = model  # quantize_model wrote the artifact back into the host
-    ppl_q64 = perplexity_from_logits(lambda b: host(b), held_out)
-    ppl_qbf16 = perplexity_from_logits(lambda b: host.to(torch.bfloat16)(b), held_out)
+    ppl_quant = perplexity_from_logits(lambda b: host(b), held_out)
     bpw = qm.effective_bpw()
     total_qpk1 = sum(len(b) for b in qm.serialize().values())
-    print(f"      ppl_quant_f64   = {ppl_q64:.4f}")
-    print(f"      ppl_quant_bf16  = {ppl_qbf16:.4f}")
-    print(f"      effective BPW   = {bpw:.4f}  (qpk1 layer bytes: {total_qpk1:,})")
+    print(f"      ppl_quant      = {ppl_quant:.4f}")
+    print(f"      effective BPW  = {bpw:.4f}  (qpk1 layer bytes: {total_qpk1:,})", flush=True)
 
-    print("[6/6] exporting qk-server model directory ->", out_dir)
-    embedding = causal.get_input_embeddings().weight.detach().to(torch.float64).cpu().numpy()
+    print("[6/6] exporting qk-server model directory ->", out_dir, flush=True)
+    embedding = causal.get_input_embeddings().weight.detach().to(torch.float32).cpu().numpy()
     export_model_directory(
         out_dir,
         qm,
@@ -378,16 +380,15 @@ def main() -> int:
         "max_admm_iter": args.max_admm_iter,
         "seed": args.seed,
         "ppl_baseline_bf16": ppl_base,
-        "ppl_quant_f64": ppl_q64,
-        "ppl_quant_bf16": ppl_qbf16,
-        "ppl_ratio_bf16": ppl_qbf16 / ppl_base,
+        "ppl_quant_native": ppl_quant,
+        "ppl_ratio": ppl_quant / ppl_base,
         "effective_bpw": bpw,
         "qpk1_layer_bytes": total_qpk1,
         "regime": {
             "baseline_eval": "bfloat16 (checkpoint native; papers' pedestal)",
-            "solver": "float64 (qk-representation design; falsifiable via this report)",
+            "solver": "float64, per-layer just-in-time (sign margins + parity reference)",
+            "kd_and_ste": "model dtype (the papers' distillation regime)",
             "artifact": "qpk1: +-1 bitplanes + float16 scales",
-            "quantized_eval": "float64 = artifact-exact check; bf16 = serving-regime headline",
         },
         "wall_seconds": round(time.time() - t0, 1),
     }
