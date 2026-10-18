@@ -2,7 +2,7 @@
 
 ## 1. Export + loader contract (norm sidecar + geometry)
 
-- [ ] 1.1 Driver export: write `norms.bin` (fp32 LE: per-block input_layernorm,
+- [x] 1.1 Driver export: write `norms.bin` (fp32 LE: per-block input_layernorm,
       post_attention_layernorm, then final norm) and extend `config.toml` with
       `n_layers`, `n_heads`, `n_kv_heads`, `head_dim`, `rms_norm_eps`,
       `rope_theta`; read them off the HF config/weights, never hardcoded.
