@@ -107,3 +107,93 @@ def _fac_from_balance(bal, linear: nn.Linear):
         fac.s1.copy_(torch.from_numpy(np.ascontiguousarray(bal.s1)))
         fac.s2.copy_(torch.from_numpy(np.ascontiguousarray(bal.s2)))
     return fac
+
+
+def _kd_layer_book(model, rank: int = 4):
+    """Shared setup: factorized fc1/fc2 with alpha-consistent, slightly
+    perturbed scales (same recipe as test_scn_kl_scale_calibration)."""
+    from quantibbler.ptq.block_recon import QuantizedLayerState, _set_linear
+    from quantibbler.ptq.lb_admm import magnitude_balance
+
+    layers: dict[str, QuantizedLayerState] = {}
+    for name, m in (("fc1", model.fc1), ("fc2", model.fc2)):
+        w = m.weight.detach().to(torch.float64).cpu().numpy()
+        u0, s0, vt0 = np.linalg.svd(w, full_matrices=False)
+        uu = u0[:, :rank] * np.sqrt(s0[:rank])
+        vv = vt0[:rank].T * np.sqrt(s0[:rank])
+        bal = magnitude_balance(uu.copy(), vv.copy(), np.ones(8), np.ones(8), target=w)
+        bal.s1 = bal.s1 * 1.15
+        bal.s2 = bal.s2 * 0.9
+        st = QuantizedLayerState(name, bal.Ub, bal.Vb, bal.s1, bal.s2, w * 0)
+        st.bias = m.bias.detach().cpu().numpy().astype(np.float64).copy()
+        layers[name] = st
+        _set_linear(m, _fac_from_balance(bal, m))
+    return layers
+
+
+def test_scn_kd_nonfinite_poison_restores_snapshot():
+    """r137-v4 regression: with no armor, one non-finite student forward
+    mid-KD poisoned Adam state and 72/196 layers exported NaN scales.
+    Every poisoned tensor must come back as its exact pre-stage snapshot;
+    NaN must never reach the layer book (the export gate's last resort)."""
+    from quantibbler.ptq.config import StageHyper
+
+    torch.manual_seed(0)
+    model = _TinyKDModel(seed=1)
+    gen = torch.Generator().manual_seed(2)
+    batches = [torch.randn(2, 4, 8, generator=gen, dtype=torch.float64) for _ in range(2)]
+    cfg = PTQConfig(rank=4, stage_global=StageHyper(2e-2, 16, 10))
+    layers = _kd_layer_book(model)
+    pre = {n: (st.s1.copy(), st.s2.copy()) for n, st in layers.items()}
+
+    # Bomb: the 3rd and later student forwards return NaN logits -> NaN
+    # KL loss -> NaN grads -> Adam poisons every scale it touches.
+    calls = {"n": 0}
+    orig_forward = model.forward
+
+    def bombing_forward(x):
+        calls["n"] += 1
+        out = orig_forward(x)
+        if calls["n"] >= 3:
+            out = out * float("nan")
+        return out
+
+    model.forward = bombing_forward
+    teacher = _TinyKDModel(seed=1)
+    result = calibrate_scales(model, layers, teacher, batches, cfg)
+    model.forward = orig_forward
+
+    assert len(result.kl_trace) >= 3  # bombs actually fired
+    assert any(not np.isfinite(v) for v in result.kl_trace)
+    for name, st in layers.items():
+        assert np.isfinite(st.s1).all() and np.isfinite(st.s2).all(), name
+        # Restored tensors are the EXACT pre-stage snapshot (a clipped NaN
+        # would not compare equal).
+        assert np.array_equal(st.s1, pre[name][0]), name
+        assert np.array_equal(st.s2, pre[name][1]), name
+
+
+def test_scn_kd_trust_region_bounds_movement():
+    """Adam's unit-scale steps at absolute lr 1e-3 must not randomize
+    polished scales (v4: 128 steps x 1e-3 >> q_proj s1 ~ 1e-2). The
+    per-entry trust region caps every scale within [0.5x, 2x] of its
+    pre-stage value even at an absurd learning rate."""
+    from quantibbler.ptq.config import StageHyper
+
+    torch.manual_seed(0)
+    model = _TinyKDModel(seed=1)
+    gen = torch.Generator().manual_seed(2)
+    batches = [torch.randn(2, 4, 8, generator=gen, dtype=torch.float64) for _ in range(2)]
+    cfg = PTQConfig(rank=4, stage_global=StageHyper(1e3, 16, 2))
+    layers = _kd_layer_book(model)
+    pre = {n: (st.s1.copy(), st.s2.copy()) for n, st in layers.items()}
+
+    teacher = _TinyKDModel(seed=1)
+    calibrate_scales(model, layers, teacher, batches, cfg)
+
+    for name, st in layers.items():
+        assert np.isfinite(st.s1).all() and np.isfinite(st.s2).all(), name
+        p1 = np.maximum(np.abs(pre[name][0]), 1e-30)
+        p2 = np.maximum(np.abs(pre[name][1]), 1e-30)
+        assert (st.s1 <= 2.0 * p1 + 1e-30).all() and (st.s1 >= 0.5 * p1 - 1e-30).all(), name
+        assert (st.s2 <= 2.0 * p2 + 1e-30).all() and (st.s2 >= 0.5 * p2 - 1e-30).all(), name

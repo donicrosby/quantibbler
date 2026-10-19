@@ -166,9 +166,32 @@ class QuantizedModel:
     # -- qpk1 round trip -------------------------------------------------
 
     def serialize(self) -> dict[str, bytes]:
-        """Serialize every layer to its canonical qpk1 byte stream."""
-        from .. import qpk1
+        """Serialize every layer to its canonical qpk1 byte stream.
 
+        Raises a :class:`Qpk1Error` subclass if ANY layer's scales are
+        non-finite — the v4 export gate: a run whose KD stage poisoned
+        72/196 layers once shipped NaN scales to disk silently, and the
+        container still exited 0 (ppl was reported NaN downstream). No
+        artifact with non-finite scales leaves the pipeline again.
+        """
+        import numpy as _np
+
+        from .. import qpk1
+        from ..qpk1 import Qpk1Error
+
+        bad = sorted(
+            name
+            for name, st in self.layers.items()
+            if not (
+                _np.isfinite(_np.asarray(st.s1, _np.float64)).all()
+                and _np.isfinite(_np.asarray(st.s2, _np.float64)).all()
+            )
+        )
+        if bad:
+            raise Qpk1Error(
+                f"export gate: {len(bad)}/{len(self.layers)} layers carry "
+                f"non-finite scales (first: {bad[0]}); refusing to serialize"
+            )
         dtype = np.float16 if self.config.scale_dtype == "float16" else np.float32
         return {
             name: qpk1.serialize(st.Ub, st.Vb, st.s1, st.s2, dtype=dtype)

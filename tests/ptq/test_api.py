@@ -162,6 +162,34 @@ def _apply_to_host(host: nn.Module, qm: QuantizedModel) -> None:
                     module.bias.copy_(torch.from_numpy(np.ascontiguousarray(st.bias)))
 
 
+def test_scn_export_gate_refuses_nonfinite_scales():
+    """r137-v4 regression: v4 shipped 72/196 layers with NaN scales to disk
+    while the container exited 0. The serialize path is the last chokepoint
+    every export and e2e run flows through; it must refuse hard."""
+    model = _TinyApiModel(seed=3)
+    cfg = _gate_cfg()
+    qm = quantize_model(model, _calib(seed=7), cfg)
+    name = next(iter(qm.layers))
+    st = qm.layers[name]
+    st.s2 = st.s2.copy()
+    st.s2[0] = float("nan")
+
+    import pytest
+
+    from quantibbler.qpk1 import Qpk1Error
+
+    with pytest.raises(Qpk1Error, match="non-finite scales"):
+        qm.serialize()
+
+    # inf is caught too; a finite artifact still serializes fine.
+    st.s2[0] = float("inf")
+    with pytest.raises(Qpk1Error, match="non-finite scales"):
+        qm.serialize()
+    st.s2[0] = 1.0
+    blobs = qm.serialize()
+    assert name in blobs
+
+
 def test_scn_float32_opt_in():
     """float32_opt_in: default config runs float64; compute_dtype="float32"
     flips the solver entry dtype — opt-in observable via config only."""

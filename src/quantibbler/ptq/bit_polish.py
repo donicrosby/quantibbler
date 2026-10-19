@@ -115,12 +115,43 @@ def greedy_polish(
                 rj += 2.0 * b * base * ub_s1[:, k]
                 total_flips += 1
         # --- alternating least-squares scale refit (bits held) ---
+        # Two hard invariants, both learned from r137-v4 (108,691 negative
+        # s1 entries; s1~1e-4 paired against s2>=233):
+        # (1) SIGN-FOLD: the per-row LS optimum may come out negative when
+        #     bits sit anti-aligned; a negative scale is legal in weight
+        #     space but inverts that row of the effective matrix and (at
+        #     1e-4 magnitudes) signals a degenerate split. diag(s1)·Ub
+        #     equals diag(|s1|)·(sign(s1)·Ub), so the sign folds into the
+        #     bit row for free and s1, s2 stay strictly positive.
+        # (2) TRUST REGION: near-zero-energy binary columns make the LS
+        #     denominator degenerate and the refit explodes the paired
+        #     scale (the alpha-refit inflation seen on v2 hot scales).
+        #     Reject any refit that moves a scale outside [1/8x, 8x] of
+        #     its pre-refit value; the flip sweeps reopen those directions
+        #     next round (4 rounds still allow ~4000x cumulative motion).
         Bc = ub @ (vb * s2[:, None]).T  # W ~ diag(s1) Bc
         d1 = (Bc * Bc).sum(axis=1)
-        s1 = np.where(d1 > 0, (w * Bc).sum(axis=1) / np.maximum(d1, 1e-300), s1)
+        raw1 = np.where(d1 > 0, (w * Bc).sum(axis=1) / np.maximum(d1, 1e-300), s1)
+        ref1 = np.maximum(np.abs(s1), 1e-30)
+        new1 = np.abs(raw1)
+        new1 = np.minimum(np.maximum(new1, 0.125 * ref1), 8.0 * ref1)
+        sgn1 = np.where(raw1 < 0.0, -1.0, 1.0)
+        flip_rows = sgn1 < 0
+        if flip_rows.any():
+            ub[flip_rows] = -ub[flip_rows]
+        # Sign lives ONLY in the bits: |raw| * (sgn*U) == raw*U exactly.
+        s1 = new1
         Br = (ub * s1[:, None]) @ vb.T  # W ~ Br diag(s2)
         d2 = (Br * Br).sum(axis=0)
-        s2 = np.where(d2 > 0, (w * Br).sum(axis=0) / np.maximum(d2, 1e-300), s2)
+        raw2 = np.where(d2 > 0, (w * Br).sum(axis=0) / np.maximum(d2, 1e-300), s2)
+        ref2 = np.maximum(np.abs(s2), 1e-30)
+        new2 = np.abs(raw2)
+        new2 = np.minimum(np.maximum(new2, 0.125 * ref2), 8.0 * ref2)
+        sgn2 = np.where(raw2 < 0.0, -1.0, 1.0)
+        flip_cols = sgn2 < 0
+        if flip_cols.any():
+            vb[flip_cols] = -vb[flip_cols]
+        s2 = new2
         if total_flips == 0:
             break  # local optimum reached
 

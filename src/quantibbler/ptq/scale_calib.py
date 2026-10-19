@@ -90,6 +90,9 @@ def calibrate_scales(
         name: torch.from_numpy(np.ascontiguousarray(st.s2, dtype=np.float64))
         for name, st in layers.items()
     }
+    # Pre-stage snapshots (trust-region references + restore sources).
+    pre_s1 = {n: t.numpy().copy() for n, t in s1_params.items()}
+    pre_s2 = {n: t.numpy().copy() for n, t in s2_params.items()}
     for t in (*s1_params.values(), *s2_params.values()):
         t.requires_grad_(True)
     opt = torch.optim.Adam([*s1_params.values(), *s2_params.values()], lr=cfg.stage_global.lr)
@@ -221,7 +224,49 @@ def calibrate_scales(
 
     # Write the tuned scales back into the layer artifacts (float64).
     tmp.cleanup()  # release the disk-backed teacher cache
+
+    # Finiteness armor + trust region (r137-v4 post-mortem): this stage had
+    # NO armor while every tuning stage upstream got it, and its absolute
+    # lr (1e-3, 128 steps) is orders of magnitude larger than the polished
+    # scales it tunes (q_proj s1 ~ 1e-2..1e-1). One early blow-up poisons
+    # every tensor Adam touches; 72/196 layers exported NaN scales, born
+    # depth-ordered in exactly this stage. Two guards, mirroring
+    # _tune_fp/_tune_latent_ste:
+    #   (1) non-finite post-stage tensors -> restore pre-stage snapshot
+    #       (poisoned scales never reach ``layers``; the KL trace shows
+    #       when the loss blew up);
+    #   (2) per-tensor trust region: Adam's unit-scale steps may not move
+    #       any scale vector by more than 2x / below 1/2x its pre-stage
+    #       values (per-entry, pre-stage |s| as reference; the reference
+    #       floor avoids pinning legitimately tiny scales to zero).
+    s1_fin = {n: np.isfinite(t.detach().cpu().numpy()).all() for n, t in s1_params.items()}
+    s2_fin = {n: np.isfinite(t.detach().cpu().numpy()).all() for n, t in s2_params.items()}
     for name, st in layers.items():
-        st.s1 = s1_params[name].detach().cpu().numpy().astype(np.float64).copy()
-        st.s2 = s2_params[name].detach().cpu().numpy().astype(np.float64).copy()
+        if not (s1_fin[name] and s2_fin[name]):
+            # Poisoned: restore the EXACT pre-stage snapshot. (s1_params
+            # share memory with the layer book via from_numpy, so the
+            # stale st.s1 arrays are themselves NaN — rebinding is not
+            # optional here.)
+            st.s1 = np.array(pre_s1[name], dtype=np.float64, copy=True)
+            st.s2 = np.array(pre_s2[name], dtype=np.float64, copy=True)
+            continue
+        pre1 = np.maximum(np.abs(pre_s1[name]), 1e-30)
+        pre2 = np.maximum(np.abs(pre_s2[name]), 1e-30)
+        t1 = s1_params[name].detach().cpu().numpy()
+        t2 = s2_params[name].detach().cpu().numpy()
+        st.s1 = np.clip(t1, 0.5 * pre1, 2.0 * pre1).astype(np.float64).copy()
+        st.s2 = np.clip(t2, 0.5 * pre2, 2.0 * pre2).astype(np.float64).copy()
+    n_restored = sum(
+        1
+        for name in layers
+        if not (s1_fin[name] and s2_fin[name])
+        or not np.isfinite(s1_params[name].detach().cpu().numpy()).all()
+        or not np.isfinite(s2_params[name].detach().cpu().numpy()).all()
+    )
+    if n_restored:
+        print(
+            f"[calibrate_scales] restored {n_restored}/{len(layers)} layers "
+            "(non-finite post-KD scales -> pre-stage snapshot)",
+            flush=True,
+        )
     return ScaleCalibResult(kl_trace=kl_trace, n_steps=step)
