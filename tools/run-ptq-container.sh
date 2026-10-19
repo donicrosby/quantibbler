@@ -15,6 +15,7 @@ REPO=/opt/data/quantibbler
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 OUT="${OUT:-/opt/data/quantibbler/artifacts/qwen3-0.6B-r8}"
 RANK="${RANK:-8}"
+SOLVER="${SOLVER:-admm}"
 
 mkdir -p /opt/data/tmp "$(dirname "$OUT")"
 : > /opt/data/tmp/quantibbler-breadcrumbs.log
@@ -39,5 +40,6 @@ exec docker run --rm \
     --model "$MODEL" --rank "$RANK" \
     --seq-len 512 --calibration-seqs 16 --eval-seqs 5 \
     --max-admm-iter 400 \
+    --solver "$SOLVER" \
     --checkpoint-dir /out/checkpoints \
     --out /out

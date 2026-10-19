@@ -16,10 +16,24 @@ Flip-gain algebra (b = bit value before flip, c = s1[i] * Vb[:,k] * s2):
     dSSE = 4 b s1[i] <R_i, Vb[:,k]*s2> + 4 s1[i]^2 ||Vb[:,k]*s2||^2
 (the +4s^2||c||^2 term is the squared norm of the row change and is
 always positive). Accept the most negative dSSE per row until none is
-negative. Measured on Qwen3-0.6B block-0 production geometry: cos
+negative.
+
+Gram-table hot loop (why each flip costs O(r), not O(din*r)): with
+``proj = R_i @ (Vb*s2)`` and ``G = (Vb*s2)^T (Vb*s2)``, the flip's
+residual update ``R_i += 2 b s1[i] (Vb*s2)[:,k]`` gives EXACTLY
+
+    proj' = proj + 2 b s1[i] G[k, :]
+
+so the naive per-flip re-projection (a full gemv per flip) is redundant.
+Each sweep batches the initial projections as one GEMM, shares one Gram
+table across the sweep, leaves R untouched mid-sweep (rows are
+independent), and folds the sweep's accumulated bit flips into R with a
+single corrective GEMM. Descent decisions match the naive path up to
+float64 associativity (parity-tested against a reference copy of the
+naive loop). Measured on Qwen3-0.6B block-0 production geometry: cos
 0.09 -> 0.51 (q_proj), 0.08 -> 0.45 (gate_proj), 0.17 -> 0.39
-(down_proj) in 8-11 s per layer — two orders of magnitude cheaper than
-the ADMM stage it refines.
+(down_proj); ~10 s/layer naive at r137, fraction-of-a-second class at
+any rank with the Gram table.
 """
 
 from __future__ import annotations
@@ -78,42 +92,59 @@ def greedy_polish(
     for _rnd in range(max(rounds, 0)):
         total_flips = 0
         R = w - (s1[:, None] * (ub @ vb.T)) * s2[None, :]
-        # --- sweep U rows (output channels) ---
+
+        # --- sweep U rows (output channels), Gram-table O(r) flips ---
         vb_s2 = vb * s2[:, None]  # (din, r); column k = Vb[:,k]*s2
-        nrm2u = (vb_s2 * vb_s2).sum(axis=0)
+        g_u = vb_s2.T @ vb_s2  # (r, r) shared across the whole sweep
+        nrm2u = np.diag(g_u).copy()
+        proj_all = R @ vb_s2  # (dout, r) — one batched GEMM for all rows
+        ub_sweep0 = ub.copy()
         for i in range(dout):
             base = s1[i]
             if base == 0.0:
                 continue
-            ri = R[i]
+            proj = proj_all[i]
             for _ in range(r):
-                proj = ri @ vb_s2
                 gain = 4.0 * ub[i] * base * proj + 4.0 * base * base * nrm2u
                 k = int(np.argmin(gain))
                 if gain[k] >= 0.0:
                     break
                 b = ub[i, k]
                 ub[i, k] = -b
-                ri += 2.0 * b * base * vb_s2[:, k]
+                proj += 2.0 * b * base * g_u[k]  # exact O(r) update
                 total_flips += 1
-        # --- sweep V rows (input channels) ---
+        # Fold the sweep's accumulated flips into R with one GEMM:
+        # du entries are {0, +-2} with du[i,k] = -2*b, so
+        # R -= (s1*du) @ vb_s2.T == R + sum(2 b base vb_s2[:,k]) per row.
+        du = ub - ub_sweep0
+        if total_flips:
+            R -= (s1[:, None] * du) @ vb_s2.T
+
+        # --- sweep V rows (input channels), symmetric ---
         ub_s1 = ub * s1[:, None]  # (dout, r); column k = Ub[:,k]*s1
-        nrm2v = (ub_s1 * ub_s1).sum(axis=0)
+        g_v = ub_s1.T @ ub_s1
+        nrm2v = np.diag(g_v).copy()
+        proj_all = R.T @ ub_s1  # (din, r) — one batched GEMM
+        vb_sweep0 = vb.copy()
+        v_flips = 0
         for j in range(din):
             base = s2[j]
             if base == 0.0:
                 continue
-            rj = R[:, j]
+            proj = proj_all[j]
             for _ in range(r):
-                proj = rj @ ub_s1
                 gain = 4.0 * vb[j] * base * proj + 4.0 * base * base * nrm2v
                 k = int(np.argmin(gain))
                 if gain[k] >= 0.0:
                     break
                 b = vb[j, k]
                 vb[j, k] = -b
-                rj += 2.0 * b * base * ub_s1[:, k]
-                total_flips += 1
+                proj += 2.0 * b * base * g_v[k]
+                v_flips += 1
+        dv = vb - vb_sweep0
+        if v_flips:
+            R -= ub_s1 @ (dv * s2[:, None]).T
+        total_flips += v_flips
         # --- alternating least-squares scale refit (bits held) ---
         # Two hard invariants, both learned from r137-v4 (108,691 negative
         # s1 entries; s1~1e-4 paired against s2>=233):
