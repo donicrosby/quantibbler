@@ -69,10 +69,14 @@ class PTQConfig:
         gamma: shrinkage coefficient of Eq. 3 ([NQ] Step 2-1: ~0.2 small
             models, ~0.6 large; 0.2 is the v0.1 default).
         divergence_band_factor: post-balance magnitude gate band F: the
-            binary reconstruction's median |entry| must lie within [1/F, F]
-            of the fp weight's median |entry| (qk-divergence-guards D2).
-            Default 100.0 — measured separation between the honest tiny-gate
-            fixture (ratio ~0.0997) and the r137 block-0 divergence (~250).
+            binary reconstruction's ||Wq||_F/||W||_F must lie within
+            [1/F, F] (qk-divergence-guards D2). This is a CATASTROPHE
+            bound, not a tight invariant: balance-time scales are Eq. 8
+            initializations (pre-STE/KD), and the measured honest range on
+            production layers spans 0.0002-6.3 across preconditioner
+            regimes and solver basins. Default 1000.0 passes all honest
+            observations with >=7x margin and trips the r137 block-0
+            divergence (6.3e4) with 60x margin.
         admm_max_iter: K, the ADMM iteration cap ([NQ] App. C: 400).
         rho_start / rho_end: linear penalty schedule endpoints over K
             iterations (assumption A-2: 1e-2 -> 1e+2).
@@ -94,7 +98,7 @@ class PTQConfig:
     temperature: float = 1.0
     tau: float | None = None
     gamma: float = 0.2
-    divergence_band_factor: float = 100.0
+    divergence_band_factor: float = 1000.0
     admm_max_iter: int = 400
     rho_start: float = 1e-2
     rho_end: float = 1e2

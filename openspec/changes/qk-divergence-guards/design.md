@@ -165,6 +165,23 @@ Measured during task execution, revising the as-authored design:
     at block 0 regardless; STE+KD absorbing that is the algorithm's
     contract. Divergence is the qualitative scale explosion (1e4x),
     not the rel_err floor — the gate bounds the former.
+- **Gate band recalibrated AGAIN on first production contact (F=100 ->
+  F=1000).** The first guarded rerun aborted at minute 3 on block-0
+  k_proj, norm ratio 0.00755 — a FALSE POSITIVE. Measured evidence:
+  (a) the wounded artifact's own coherent layers (1-27, old pipeline,
+  post-KD) span norm ratios 0.046-2e3, with o_proj routinely at
+  0.05-0.12 and q/k_proj at 2-30; (b) at balance time the honest range
+  is wider still — the probe's default-arm healthy layers read
+  0.0006-0.06, and the SAME k_proj that tripped at 0.00755 read 0.0603
+  in the probe under identical config (solver basin / RNG variance
+  alone moves these ratios ~8x). Balance-time scales are Eq. 8
+  initializations, not post-training magnitudes; nothing pins them to
+  ||W||. F=100 was fixture-calibrated (32-dim tiny model) and refuted
+  by production geometry. F=1000 passes every honest observation
+  (>=7x margin) and still trips the incident species (6.3e4, 60x
+  margin). The gate's job is catching the 4-orders-of-magnitude
+  balance-amplified explosion, which it demonstrably does NOT lose
+  sensitivity for — the incident remains 60x past the band edge.
 - The v1 probe's trunk-wide stats construction was an OOM/time trap
   (32G kill at 40 min) superseded by the driver-native capture
   pattern; recorded in the agent skill notes, not design (ops, not

@@ -2,7 +2,7 @@
 
 ### Requirement: The pipeline SHALL gate each reconstructed layer against the fp weight's magnitude before any refinement or downstream use
 
-Immediately after magnitude balancing yields `(Ub, Vb, s1, s2)` for a linear layer, the pipeline SHALL verify the binary reconstruction's Frobenius norm against the fp weight's within the band factor `PTQConfig.divergence_band_factor` (default 100.0), and SHALL require every scale entry to be finite. A violation SHALL abort quantization with a dedicated error naming the layer, the measured ratio, and the band.
+Immediately after magnitude balancing yields `(Ub, Vb, s1, s2)` for a linear layer, the pipeline SHALL verify the binary reconstruction's Frobenius norm against the fp weight's within the band factor `PTQConfig.divergence_band_factor` (default 1000.0, a catastrophe bound calibrated to the measured honest range of balance-time ratios), and SHALL require every scale entry to be finite. A violation SHALL abort quantization with a dedicated error naming the layer, the measured ratio, and the band.
 
 #### Scenario: divergence_gate_healthy_passes
 

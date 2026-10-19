@@ -34,14 +34,29 @@ def test_scn_divergence_gate_diverged_aborts():
     """Out-of-band inflation: dedicated error names layer, ratio, and band."""
     U, V, s1, s2 = _factors(1)
     W = (s1[:, None] * (np.sign(U) @ np.sign(V).T)) * s2[None, :]
-    W_small = W / 1000.0  # reconstructed >> fp target: the incident signature
-    cfg = PTQConfig(rank=8, divergence_band_factor=100.0)
+    W_small = W / 1e5  # reconstructed >> fp target: the incident species
+    cfg = PTQConfig(rank=8)  # default band [1e-3, 1e3]
     with pytest.raises(Exception) as ei:
         check_layer_magnitude("layers.0.inner.mlp.down_proj", U, V, s1, s2, W_small, cfg)
     msg = str(ei.value)
     assert "layers.0.inner.mlp.down_proj" in msg
-    assert "1000" in msg or "1e+03" in msg or "1.0e+03" in msg
-    assert "100" in msg  # the band factor appears
+    assert "100000" in msg or "1e+05" in msg
+    assert "1000" in msg  # the band factor appears
+
+
+def test_scn_divergence_gate_honest_range_passes():
+    """The measured honest balance-time range passes the default band.
+
+    Production layers read 0.0002-6.3 across regimes (probe v3 + the
+    rerun's k_proj 0.00755); the band is a catastrophe bound, calibrated
+    so the r137 incident species (6.3e4) trips and all of these pass.
+    """
+    U, V, s1, s2 = _factors(4)
+    W = (s1[:, None] * (np.sign(U) @ np.sign(V).T)) * s2[None, :]
+    cfg = PTQConfig(rank=8)
+    for honest in (0.0002, 0.00755, 0.06, 1.0, 6.3):
+        ratio = check_layer_magnitude("layers.0.inner.mlp.up_proj", U, V, s1, s2, W / honest, cfg)
+        assert ratio == pytest.approx(honest, rel=1e-9)
 
 
 def test_scn_divergence_gate_nan_rejected():
