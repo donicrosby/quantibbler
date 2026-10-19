@@ -204,8 +204,47 @@ def svid_proxy(z: np.ndarray) -> np.ndarray:
 
 
 def _warm_start(w: np.ndarray, r: int, dt: np.dtype) -> tuple[np.ndarray, np.ndarray]:
-    """Truncated rank-r SVD warm start (A-6): U = U_r, V = V_r (economic)."""
-    u_mat, s_vec, vt_mat = np.linalg.svd(w, full_matrices=False)
+    """Truncated rank-r SVD warm start (A-6): U = U_r, V = V_r (economic).
+
+    ``gesdd`` (numpy's default SVD driver) is known to declare
+    non-convergence on finite but extreme-dynamic-range inputs; after
+    scale normalization the target is O(1) in norm, so a single retry on
+    the transpose (different reduction order, the classical gesdd
+    workaround) plus a ``gesvd``-style eigendecomposition fallback covers
+    the flaky case. A target with non-finite entries is a pipeline bug,
+    not an SVD problem: it fails here with a loud, diagnosable error.
+    """
+    if not np.all(np.isfinite(w)):
+        bad = int(np.count_nonzero(~np.isfinite(w)))
+        raise ValueError(
+            f"warm start: target has {bad} non-finite entries "
+            f"(max|w|={np.nanmax(np.abs(w)):.3e}) — TuneFP/calibration "
+            "produced NaN/Inf upstream"
+        )
+    try:
+        u_mat, s_vec, vt_mat = np.linalg.svd(w, full_matrices=False)
+    except np.linalg.LinAlgError:
+        try:
+            u_mat, s_vec, vt_mat = np.linalg.svd(w.T, full_matrices=False)
+            vt_mat, s_vec, u_mat = (
+                u_mat.T,
+                s_vec,
+                vt_mat.T,
+            )
+        except np.linalg.LinAlgError:
+            # symmetric eig on the Gram matrix: slower, unconditionally
+            # stable for finite inputs.
+            s2_vec, v_mat = np.linalg.eigh(w.T @ w)
+            order = np.argsort(s2_vec)[::-1][:r]
+            s_vec = np.sqrt(np.maximum(s2_vec[order], 0.0))
+            v0 = v_mat[:, order]
+            u0 = w @ v0
+            nrm = np.linalg.norm(u0, axis=0, keepdims=True)
+            u0 = u0 / np.maximum(nrm, 1e-300)
+            return (
+                np.ascontiguousarray(u0 * s_vec[None, :], dtype=dt),
+                np.ascontiguousarray(v0 * s_vec[None, :], dtype=dt),
+            )
     u0 = u_mat[:, :r] * np.sqrt(s_vec[:r])
     v0 = vt_mat[:r].T * np.sqrt(s_vec[:r])
     return np.ascontiguousarray(u0, dtype=dt), np.ascontiguousarray(v0, dtype=dt)

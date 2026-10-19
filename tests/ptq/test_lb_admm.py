@@ -148,3 +148,29 @@ def test_magnitude_balance_rejects_degenerate():
     zeros = np.zeros((4, 2))
     with pytest.raises(ValueError):
         magnitude_balance(zeros, zeros, np.ones(4), np.ones(4))
+
+
+def test_scn_warm_start_svd_flaky_fallback_and_nan_guard():
+    """_warm_start survives gesdd non-convergence (transpose retry /
+    eigendecomposition fallback) and fails LOUD on non-finite targets."""
+    from quantibbler.ptq.lb_admm import _warm_start
+
+    gen = np.random.default_rng(7)
+    # extreme dynamic range but finite: the gesdd-flaky species
+    scales = 10.0 ** gen.uniform(-12, 12, size=(64, 1))
+    w = (gen.standard_normal((64, 32)) * scales).astype(np.float64)
+    u0, v0 = _warm_start(np.ascontiguousarray(w), 8, np.dtype("float64"))
+    assert np.all(np.isfinite(u0)) and np.all(np.isfinite(v0))
+    assert u0.shape == (64, 8) and v0.shape == (32, 8)
+    # warm start spans the dominant subspace: rank-8 recon of a rank-8
+    # slice beats a random basis by a wide margin.
+    u8, s8, vt8 = np.linalg.svd(w, full_matrices=False)
+    err_ws = np.linalg.norm(w - u0 @ v0.T)
+    err_top8 = np.linalg.norm(w - (u8[:, :8] * s8[:8]) @ vt8[:8])
+    assert err_ws <= 2.0 * err_top8
+
+    # non-finite target: pipeline bug, loud error with diagnostics
+    w_bad = w.copy()
+    w_bad[3, 5] = np.nan
+    with pytest.raises(ValueError, match="non-finite"):
+        _warm_start(np.ascontiguousarray(w_bad), 8, np.dtype("float64"))
