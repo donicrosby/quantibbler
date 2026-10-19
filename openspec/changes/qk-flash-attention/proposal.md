@@ -16,17 +16,27 @@ N×N score matrix. [FA] Theorem 2 bounds the IO win.
 ## What Changes
 
 - Add a tiled, online-softmax, EXACT attention forward to
-  `quantibbler-kernels` as a CubeCL kernel (f32 compute, per the paper's
-  Algorithm 1: tiling + running max/sum statistics + output rescaling),
-  with a NumPy tiled reference as the executable specification per config.
-- Add a GPU attention face to the server engine behind the `gpu` feature +
-  an env opt-in, reusing the frozen-decision dispatch pattern proven for
-  matvec (qk-attention 3.4): face selected once at model load, soft-fallback
-  to the scalar face on init failure, honest `/health` label.
-- Parity regime shifts per the 3.5 crystallization: this kernel REASSOCIATES
-  (blockwise accumulation), so the gate is a bounded relative error on f32
-  (≤ 1e-5) against the existing scalar face — NOT bit-identity, which is
-  achievable only for order-preserving faces.
+  `quantibbler-kernels` as a NumPy tiled reference (f64) — the executable
+  specification and parity oracle, per config's reference-first rule.
+- Adopt `cubek-attention` 0.3.0 (tracel-ai/cubek — the CubeCL team's
+  kernel collection; same `cubecl 0.11` we are pinned to, registry
+  evidence 2026-10-06, 447k recent downloads, Apache-2.0, pure Rust) as
+  the GPU implementation substrate behind the `gpu` feature: its forward
+  pass ships causal masking, ragged tails, per-tensor element types, an
+  accumulator-precision option, and a `cpu-reference` feature whose
+  independent CPU implementation becomes a THIRD parity face.
+- Two engine adapters bridge cubek's contract to ours: (1) GQA — cubek's
+  `AttentionDims` carries ONE `num_heads` (no separate kv-heads), so the
+  adapter materializes repeated K/V heads (correct output; the 2× KV
+  traffic cost is part of what the perf probe must beat); (2) no softmax
+  scale field — the adapter pre-scales Q by 1/√d in f32 (exact to
+  round-off; verify no hidden scale at integration before trusting).
+- Add the GPU attention face to the server engine (opt-in env, frozen
+  decision at load, soft fallback to scalar, honest `/health` label) per
+  the qk-attention 3.4 pattern.
+- Parity regime per the 3.5 crystallization: this face REASSOCIATES, so
+  the gate is bounded relative error on f32 (≤ 1e-5) against our NumPy
+  reference — NOT bit-identity.
 
 ## Non-goals
 

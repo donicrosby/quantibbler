@@ -43,6 +43,25 @@
   **Wrong-if:** compile failures force new forms — captured as
   crystallization entries, cost bounded by the proven 0.11 pin.
 
+## Substrate decision (2026-10-19): cubek-attention 0.3.0
+
+Registry evidence (crates.io, verified 2026-10-19): `cubek` 0.3.0 stable
+(2026-10-06), 447k recent downloads, Apache-2.0, MSRV unset, by the CubeCL
+maintainers; `cargo add cubek@0.3.0` in the throwaway bench resolves with
+`cargo tree` unifying on OUR pinned `cubecl 0.11.0` — no fork. Source
+audit of the published `cubek-attention-0.3.0` tarball: `AttentionProblem`
+exposes `causal`, `masked` (mask tensor [b, h, sq, skv]), per-tensor
+`AttentionGlobalTypes`, and an accumulator-precision option; tests cover
+masking, ragged tails, and LSE; a `cpu-reference` feature ships an
+independent CPU implementation and benchmark catalog (a third parity face
+against our NumPy reference). Backward is scaffolded `todo!()` — irrelevant
+(inference only). Two contract gaps, adapter-shaped: single `num_heads`
+(no first-class GQA → materialize repeated K/V heads; traffic cost counted
+against the perf probe) and no softmax-scale field → pre-scale Q by 1/√d
+in f32 (exact to round-off). Fallback if the contract misses at
+integration: the hand-rolled tiled kernel per the discarded-alternatives
+note — the specs' parity gates do not care which substrate computes.
+
 ## Open Questions
 
 - OQ-1 (owner: orchestrator, probe = task 5): does the tiled face clear

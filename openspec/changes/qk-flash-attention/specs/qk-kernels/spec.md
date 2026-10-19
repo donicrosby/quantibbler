@@ -27,13 +27,14 @@ n_heads/n_kv_heads grouping).
 
 ### Requirement: CubeCL tiled attention GPU face (exact, f32)
 
-`quantibbler-kernels` (opt-in `gpu` feature) SHALL provide a CubeCL kernel
-computing the same tiled algorithm in f32: one workgroup per Q block, K/V
-blocks iterated with running (m, ℓ) statistics, no N×N materialization in
-global memory. Construction SHALL follow the landed fail-closed boundary
-pattern (typed error with the validated staging hint), and hardware tests
-MUST be double-gated (QUANTIBBLER_GPU_TESTS=1 + feature) per the qk-kernels
-hardware-gate requirement.
+The kernels crate (`gpu` feature) SHALL provide an f32 GPU attention face
+with no N×N global-memory materialization, on the adopted `cubek-attention`
+substrate (registry evidence and contract-gap adapters recorded in
+design.md), with causal masking enabled. The face MUST use the fail-closed
+construction pattern (typed error with the validated staging hint), and
+hardware tests MUST be double-gated (QUANTIBBLER_GPU_TESTS=1 + feature).
+The independent cubek `cpu-reference` implementation is a THIRD face in
+the parity matrix.
 
 #### Scenario: GPU parity within the reassociation budget
 

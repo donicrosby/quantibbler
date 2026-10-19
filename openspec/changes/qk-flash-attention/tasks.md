@@ -15,19 +15,24 @@ gate suite.
       ([FA] §3.1 Algorithm 1, f64, ragged-tail safe); same command exits
       0 with all scenarios passing.
 
-## 2. CubeCL GPU kernel (kernels crate, `gpu` feature)
+## 2. GPU attention face (kernels crate, `gpu` feature, cubek substrate)
 
 - [ ] 2.1 RED: author `crates/quantibbler-kernels/tests/gpu_attention_parity.rs`
       (hardware-gated per house pattern: unset env = clean skip notice, set
       = device run) with scenario `gpu-parity-budget` (rel ≤ 1e-5 vs the
-      NumPy reference via the PyO3 face or fixture vectors) and
-      `fail-closed-construction`; OBSERVE compile/run failure before the
-      kernel exists; record it.
-- [ ] 2.2 GREEN: implement `src/gpu_attention.rs` — tiled online-softmax
-      kernel, working forms from landed gpu.rs (0.11 idioms, bounds
-      guards, u32 ceiling); hardware gate green on gfx1151 in BOTH env
-      states; clippy/fmt green.
-- [ ] 2.3 Re-sync the PyO3 face (`uv sync --reinstall-package
+      NumPy reference) and `fail-closed-construction`; OBSERVE compile/run
+      failure before wiring exists; record it.
+- [ ] 2.2 GREEN: wire the cubek-attention forward pass behind the `gpu`
+      feature — `cubek-attention = "0.3.0"` dep (verified: resolves on our
+      cubecl 0.11 pin), GQA adapter (repeat K/V heads), Q pre-scale 1/√d,
+      causal flag from the engine's mask, fail-closed typed init; hardware
+      gate green on gfx1151 in BOTH env states; clippy/fmt green.
+- [ ] 2.3 Third-face cross-check: run the cubek `cpu-reference` feature
+      against our NumPy reference on the fixture battery (both CPU, exact
+      f64-class comparison where the reference allows) — independent
+      implementations agreeing is the strongest available guard against a
+      shared misreading of the conventions; record deltas.
+- [ ] 2.4 Re-sync the PyO3 face (`uv sync --reinstall-package
       quantibbler-kernels`) and confirm the CHANGED behavior (new symbol
       computes, not just imports).
 

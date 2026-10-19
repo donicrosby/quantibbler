@@ -48,11 +48,12 @@
   exact face exceeds the recorded bound — the face stays
   opt-in-experimental with the failure recorded, per the same discipline
   as the solver's fp32 discussion: accelerators are opt-in, never silent.
-- **Assumption:** CubeCL exposes usable INT8 vector ops on HIP
-  (`i8` tensors + `dot`/manual u32-packed dot). **Wrong-if:** compile
-  probes fail — fall back to u32-packed-ladder-int8-in-i32 forms from the
-  landed kernel idioms; cost bounded by the 0.11 pin, captured as
-  crystallization.
+- **Assumption:** cubek-quant 0.3.0's symmetric quantization primitives
+  (per-block / per-tensor, q8) cover or compose into [SA]'s per-token-Q/K,
+  static-P̃, per-channel-V axes on device. **Wrong-if:** the task-2.1
+  compile/run probe shows a granularity mismatch — fall back to hand-rolled
+  quantize epilogues on the landed gpu.rs forms (the i8/u32-packed ladder),
+  recorded as crystallization; the parity gates are substrate-agnostic.
 
 ## Open Questions
 

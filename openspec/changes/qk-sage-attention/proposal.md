@@ -12,6 +12,12 @@ by construction; per-channel V) with an FP32 accumulator ([SA] §4.3, their
 Table 4). Locally the mechanism to verify is NOT the paper's tensor-core
 count but RDNA3's byte-domain INT8 dot instructions plus halved K/V memory
 traffic — an assumption this change is built to probe, not to presume.
+Substrate note (2026-10-19): `cubek` 0.3.0 — the CubeCL team's kernel
+collection, verified to resolve on our exact `cubecl 0.11` pin — ships
+`cubek-quant` with symmetric per-block/per-tensor quantization primitives
+that [SA]'s scheme composes from; adopted for those primitives in the
+sibling change, with the INT8 attention loop remaining our code on the
+same scaffold.
 
 ## What Changes
 
@@ -20,8 +26,16 @@ traffic — an assumption this change is built to probe, not to presume.
   P̃ quantized at static scale 1/127, per-channel V, softmax statistics and
   output accumulation in the reference's f64 (emulating the kernel's f32
   accumulator semantics).
-- Add the INT8 tile path to the CubeCL attention kernel (sibling change's
-  scaffold: same tiling, online softmax, dispatch and gate patterns).
+- Adopt the sibling's substrate path: [SA]'s quantization primitives map to
+  `cubek-quant` 0.3.0 (symmetric quantization with per-block and
+  per-tensor granularity, q2/q4/q8/fp4 variants — same crate family, same
+  `cubecl 0.11` pin) for the device-side quantize/dequantize primitives,
+  layered on the sibling change's attention scaffold. The tiled attention
+  loop with online softmax stays ours (cubek-attention is fp-path only);
+  its parity harness and gate patterns are reused unchanged. If
+  `cubek-quant`'s granularity axes don't cover per-token-K/post-softmax-P̃
+  at integration, hand-rolled quantize epilogues on the landed forms are
+  the fallback — the gates do not care which substrate computes.
 - Add the `gpu:sage` server attention face: opt-in env, frozen at load,
   soft fallback chain sage → tiled → scalar, honest `/health` label.
 - Gate the face on MEASURED quality, per [SA] §4.3's own metrics (Cosine
