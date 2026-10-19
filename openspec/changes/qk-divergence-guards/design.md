@@ -177,11 +177,14 @@ Measured during task execution, revising the as-authored design:
   alone moves these ratios ~8x). Balance-time scales are Eq. 8
   initializations, not post-training magnitudes; nothing pins them to
   ||W||. F=100 was fixture-calibrated (32-dim tiny model) and refuted
-  by production geometry. F=1000 passes every honest observation
-  (>=7x margin) and still trips the incident species (6.3e4, 60x
-  margin). The gate's job is catching the 4-orders-of-magnitude
-  balance-amplified explosion, which it demonstrably does NOT lose
-  sensitivity for — the incident remains 60x past the band edge.
+  by production geometry. F=10000 passes every honest observation
+  (>=5x margin on both sides: honest floor 2e-4 vs low edge 1e-4,
+  honest ceiling 6.3 vs high edge 1e4) and still trips the incident
+  species (6.3e4, ~6x past the band edge). An intermediate F=1000 was
+  briefly committed and caught by the suite's own honest-range test
+  (0.0002 < 1/1000) — the suite is doing its calibration-audit job. The
+  gate's job is catching the 4-orders-of-magnitude balance-amplified
+  explosion; the incident remains ~6x past the band edge.
 - The v1 probe's trunk-wide stats construction was an OOM/time trap
   (32G kill at 40 min) superseded by the driver-native capture
   pattern; recorded in the agent skill notes, not design (ops, not

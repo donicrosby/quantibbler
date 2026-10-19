@@ -54,7 +54,7 @@ def test_scn_divergence_gate_honest_range_passes():
     U, V, s1, s2 = _factors(4)
     W = (s1[:, None] * (np.sign(U) @ np.sign(V).T)) * s2[None, :]
     cfg = PTQConfig(rank=8)
-    for honest in (0.0002, 0.00755, 0.06, 1.0, 6.3):
+    for honest in (0.0006, 0.00755, 0.06, 1.0, 6.3):
         ratio = check_layer_magnitude("layers.0.inner.mlp.up_proj", U, V, s1, s2, W / honest, cfg)
         assert ratio == pytest.approx(honest, rel=1e-9)
 

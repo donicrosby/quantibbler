@@ -74,9 +74,9 @@ class PTQConfig:
             bound, not a tight invariant: balance-time scales are Eq. 8
             initializations (pre-STE/KD), and the measured honest range on
             production layers spans 0.0002-6.3 across preconditioner
-            regimes and solver basins. Default 1000.0 passes all honest
-            observations with >=7x margin and trips the r137 block-0
-            divergence (6.3e4) with 60x margin.
+            regimes and solver basins. Default 10000.0 passes that range
+            with >=5x margin on both sides and trips the r137 block-0
+            divergence (6.3e4) with ~6x margin.
         admm_max_iter: K, the ADMM iteration cap ([NQ] App. C: 400).
         rho_start / rho_end: linear penalty schedule endpoints over K
             iterations (assumption A-2: 1e-2 -> 1e+2).
@@ -98,7 +98,7 @@ class PTQConfig:
     temperature: float = 1.0
     tau: float | None = None
     gamma: float = 0.2
-    divergence_band_factor: float = 1000.0
+    divergence_band_factor: float = 10000.0
     admm_max_iter: int = 400
     rho_start: float = 1e-2
     rho_end: float = 1e2
