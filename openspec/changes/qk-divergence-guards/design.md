@@ -143,6 +143,29 @@ Measured during task execution, revising the as-authored design:
   binary reconstruction had zero median magnitude; the norm gate now
   bounds exactly that pathology (a fully-dead layer reads ratio 0 and
   aborts).
-- The isolated probe (`l0_probe.py`) imported the pre-change module, so
-  its default arm remains the honest historical baseline; its results
-  close OQ-1/OQ-4 in the rerun task.
+- The isolated probe (v3, driver-native capture) CLOSED OQ-1 and OQ-4
+  on 2026-10-19, POSITIVE. Driver-faithful block-0 capture (robust_diag
+  monkeypatch, solve stubbed, recorder unwind — 84s, driver memory
+  profile), then offline treatment screen on the captured state:
+  - Reproduction: under the HISTORICAL default (no-op cap), block-0
+    down_proj diverges at norm_ratio 6.28e4 (s1_max 35.4) while its six
+    siblings sit at 1e-4..1e-2 — the wounded artifact's exact species
+    break (exported s1 max 48). Block 0's raw stats are extreme
+    heavy-tailed (d_in max/median: q 2.3e3, v 6.3e3, up_proj 2.4e4) —
+    precisely what the no-op ceiling passed through unclipped.
+  - Treatment: the landed tail-gated default heals it (down_proj
+    norm_ratio 0.027, all 7 layers in 0.021-0.060, inside the gate
+    band). Unconditional q95 only shrinks the explosion (83) and is
+    independently refuted on healthy layers; median-clip heals but is
+    strictly more aggressive than the tail gate. No adaptive-rho work
+    needed (OQ-2 stays closed unless the rerun says otherwise).
+  - Note: block-0 rel_err(Wq, W) ~ 1.0 in ALL arms including healed
+    ones — the flat down_proj spectrum (see skill notes) means the
+    binary rank-137 factorization captures little entrywise structure
+    at block 0 regardless; STE+KD absorbing that is the algorithm's
+    contract. Divergence is the qualitative scale explosion (1e4x),
+    not the rel_err floor — the gate bounds the former.
+- The v1 probe's trunk-wide stats construction was an OOM/time trap
+  (32G kill at 40 min) superseded by the driver-native capture
+  pattern; recorded in the agent skill notes, not design (ops, not
+  spec).

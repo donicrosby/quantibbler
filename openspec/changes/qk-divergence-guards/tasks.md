@@ -2,17 +2,19 @@
 
 ## 1. Block-0 evidence + treatment screen (isolated probe)
 
-- [ ] 1.1 Run the isolated block-0 treatment probe inside the ptq
-      container (`/tmp/ptq/l0_probe.py`: driver-faithful trunk stats →
-      default vs q95-tau vs median-tau per-linear solves at rank 137);
-      record per-arm scale ratios and binary rel errors in the run notes.
-      Command: `docker run --rm l0-probe ...` (exact invocation in
-      design.md context); expected: `l0_probe_results.json` with three
-      treatment arms over 7 linears.
-- [ ] 1.2 Compare the probe's default-arm ratios against the wounded
+- [x] 1.1 Run the isolated block-0 treatment probe inside the ptq
+      container (driver-native capture: robust_diag monkeypatch +
+      stubbed solve + recorder unwind; then offline tau treatment
+      screen at rank 137); results in
+      `/tmp/ptq/l0_probe_results.json` + probe log: default (no-op)
+      arm reproduces the divergence on down_proj (norm_ratio 6.28e4,
+      s1_max 35.4); tail-gated default heals (0.027).
+- [x] 1.2 Compare the probe's default-arm ratios against the wounded
       artifact's exported block-0 scales and against the r8 artifact's
       block-0 scales; confirm or refute A-i/A-iv in a crystallization
-      note appended to design.md (OQ-1/OQ-4 close here).
+      note appended to design.md (OQ-1/OQ-4 close here). CONFIRMED:
+      same species break, same mechanism (raw-stat tails), r8 is the
+      milder manifestation; recorded in design.md crystallization.
 
 ## 2. tau default policy (D1)
 
