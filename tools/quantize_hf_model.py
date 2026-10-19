@@ -534,6 +534,18 @@ def main() -> int:
         help="qpk1 scale storage dtype (float16 overflows to inf when any "
         "scale exceeds 65,504 — the cast now raises instead of shipping it)",
     )
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=Path,
+        default=Path("artifacts") / "ptq-checkpoints",
+        help="per-block solve checkpoints (fingerprint-guarded); enables "
+        "crash resume of the dominant-cost stage",
+    )
+    parser.add_argument(
+        "--no-checkpoints",
+        action="store_true",
+        help="disable solve checkpointing entirely",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path, default=Path("artifacts") / "model-qpk1")
     args = parser.parse_args()
@@ -578,7 +590,12 @@ def main() -> int:
     _stage("[4/6] PTQ: bf16 model, per-layer float64 solver (block recon + scale KD)")
     _bread("entering quantize_model: block recon first, then KD scale calibration")
     solver_t = time.time()
-    qm = quantize_model(model, calib, quantized_config(args))
+    qm = quantize_model(
+        model,
+        calib,
+        quantized_config(args),
+        checkpoint_dir=None if args.no_checkpoints else args.checkpoint_dir,
+    )
     _bread(f"quantize_model returned: {len(qm.layers)} layers")
     print(f"      solver wall: {time.time() - solver_t:.0f}s", flush=True)
 

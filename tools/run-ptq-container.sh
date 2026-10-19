@@ -39,4 +39,5 @@ exec docker run --rm \
     --model "$MODEL" --rank "$RANK" \
     --seq-len 512 --calibration-seqs 16 --eval-seqs 5 \
     --max-admm-iter 400 \
+    --checkpoint-dir /out/checkpoints \
     --out /out

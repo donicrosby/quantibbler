@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path  # checkpoint resume: accept str or Path
 
 import numpy as np
 import torch
@@ -702,6 +703,7 @@ def reconstruct_model(
     cfg: PTQConfig,
     *,
     recorder=None,
+    checkpoint_dir=None,
 ) -> list[BlockReconResult]:
     """Phase 2 over every direct child block of ``model``, sequentially.
 
@@ -717,10 +719,32 @@ def reconstruct_model(
     state: reconstruction modifies the block in place, so teacher targets
     for the final stem layer (embedding + head) are snapshotted before the
     loop and reattached for Phase 3 (which needs a genuinely fp teacher).
+
+    Checkpointing (``checkpoint_dir`` set): each finished block's layer
+    states are persisted losslessly (int8 bits, float64 scales) and a
+    partially-complete checkpoint dir is resumed block-wise — boundary
+    activations are rebuilt by replaying the quantized prefix forward,
+    which is bit-identical to a fresh run's prefix (the solve is
+    deterministic; asserted by test_scn_checkpoint_resume). Resume
+    refuses on config/code fingerprint mismatch.
     """
     quantizable = _quantizable_names(model)
     if not quantizable:
         raise ValueError("model has no quantizable nn.Linear layers")
+
+    from . import checkpoints as ckpt
+
+    ckpt_dir = Path(checkpoint_dir) if checkpoint_dir is not None else None
+    if ckpt_dir is not None:
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        done = ckpt.completed_blocks(ckpt_dir)
+        if done:
+            ckpt.check_fingerprint(ckpt_dir, cfg)
+        else:
+            ckpt.write_fingerprint(ckpt_dir, cfg)
+        done_set = set(done)
+    else:
+        done_set = set()
 
     batches = list(calibration_batches)
     # Map raw token-id batches once through the model's own input stem
@@ -736,7 +760,7 @@ def reconstruct_model(
     # reconstruction (a fresh construction from the untouched constructor
     # seed reproduces the fp teacher exactly for seeded gate models).
     results: list[BlockReconResult] = []
-    for name, block in _iter_named_children(model):
+    for i, (name, block) in enumerate(_iter_named_children(model)):
         # A direct child that is itself a quantized linear (flat model) or
         # that contains a quantized linear under its module path.
         has_quant = name in quantizable or any(
@@ -745,18 +769,33 @@ def reconstruct_model(
         if not has_quant:
             continue
         _note_block_progress(len(results) + 1, name, x_running)
-        with torch.no_grad():
-            y_b = block(x_running)
-        result = reconstruct_block(
-            block,
-            batches,
-            cfg,
-            x_b=x_running.clone(),
-            y_b=y_b,
-            recorder=recorder,
-            name_prefix=name,
-        )
-        results.append(result)
+        if i in done_set:
+            # Resume: restore this block's solved layers bit-exactly,
+            # write them into the host (the quantized prefix then
+            # advances exactly as a fresh run's would), skip the solve.
+            layers = ckpt.load_block_checkpoint(ckpt_dir, i, QuantizedLayerState)
+            ckpt.apply_layer_states(block, name, layers)
+            results.append(BlockReconResult(layers))
+            print(
+                f"[checkpoint] block {i} ({name}): restored from checkpoint, skipping solve",
+                flush=True,
+            )
+        else:
+            with torch.no_grad():
+                y_b = block(x_running)
+            result = reconstruct_block(
+                block,
+                batches,
+                cfg,
+                x_b=x_running.clone(),
+                y_b=y_b,
+                recorder=recorder,
+                name_prefix=name,
+            )
+            layers = result.layers
+            results.append(result)
+            if ckpt_dir is not None:
+                ckpt.save_block_checkpoint(ckpt_dir, i, layers)
         # Prefix advances through the block with its factorized layers active
         # (frozen binaries already written back by reconstruct_block).
         with torch.no_grad():

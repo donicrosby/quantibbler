@@ -24,7 +24,13 @@ from .config import PTQConfig
 __all__ = ["QuantizedModel", "quantize_model"]
 
 
-def quantize_model(model: nn.Module, calibration_data, config: PTQConfig) -> QuantizedModel:
+def quantize_model(
+    model: nn.Module,
+    calibration_data,
+    config: PTQConfig,
+    *,
+    checkpoint_dir=None,
+) -> QuantizedModel:
     """Run the NanoQuant PTQ pipeline (Phases 1-3) and return the artifact.
 
     The input ``model`` is left with its factorized layers' frozen weights
@@ -33,6 +39,11 @@ def quantize_model(model: nn.Module, calibration_data, config: PTQConfig) -> Qua
     Phase 3's teacher is the caller's model in its pre-reconstruction state:
     a structural deep copy is taken up front so seeded models reproduce the
     fp teacher exactly.
+
+    ``checkpoint_dir`` (optional): enables per-block solve checkpointing
+    and crash resume — see :mod:`quantibbler.ptq.checkpoints`. Resumed
+    runs are byte-identical to fresh runs (deterministic solve;
+    fingerprint-guarded against stale configs/code).
     """
     from .scale_calib import calibrate_scales
 
@@ -57,7 +68,7 @@ def quantize_model(model: nn.Module, calibration_data, config: PTQConfig) -> Qua
 
     # Phase 2: block-wise reconstruction (Algorithm 1 lines 8-24). Each
     # BlockReconResult carries the per-layer artifacts in declaration order.
-    results = reconstruct_model(model, batches, config)
+    results = reconstruct_model(model, batches, config, checkpoint_dir=checkpoint_dir)
     layers: dict[str, QuantizedLayerState] = {}
     for result in results:
         for st in result.layers:
