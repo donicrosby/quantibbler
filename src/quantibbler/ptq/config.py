@@ -93,7 +93,7 @@ class PTQConfig:
 
     rank: int = 8
     compute_dtype: str = "float64"
-    scale_dtype: str = "float16"
+    scale_dtype: str = "float32"
     seed: int = 0
     temperature: float = 1.0
     tau: float | None = None

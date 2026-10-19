@@ -106,7 +106,12 @@ def gate_config(seed: int = 0) -> PTQConfig:
 
     rank 8 is the PTQConfig default and the gate keeps it: at (32,128)/(128,32)
     layer shapes the qpk1 aggregate works out to 0.984 BPW < 1.0 with float16
-    scales, verified by the gate itself. Stage steps/lr are documented
+    scales — the fixture's layers are small enough that scale bytes dominate
+    the blend, so the gate pins scale_dtype="float16" (a supported opt-in tag;
+    production keeps the float32 default, which adds only ~0.03 BPW at
+    realistic widths). Fixture scales are bounded (the corruption tripwire
+    computes geometry dynamically for both tags), so the f16 cast cannot
+    overflow here. Stage steps/lr are documented
     test-speed overrides per A-10 (paper defaults stay in PTQConfig): TuneFP
     off (the class-exact teacher needs no fp polish), STE refinement 3 epochs
     at 2e-3, global scale KD 4 epochs at 1e-3 (2e-2 was measured to diverge:
@@ -114,6 +119,7 @@ def gate_config(seed: int = 0) -> PTQConfig:
     """
     return PTQConfig(
         seed=seed,
+        scale_dtype="float16",
         stage_pre=StageHyper(1e-4, 4, 0),
         stage_latent=StageHyper(2e-3, 4, 3),
         stage_global=StageHyper(1e-3, 4, 4),

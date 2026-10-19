@@ -85,8 +85,25 @@ def quantize_model(model: nn.Module, calibration_data, config: PTQConfig) -> Qua
     # scales, forward equality at float64 round-off, D4).
     scale_dt = np.float16 if config.scale_dtype == "float16" else np.float32
     for st in layers.values():
-        st.s1 = st.s1.astype(scale_dt).astype(np.float64)
-        st.s2 = st.s2.astype(scale_dt).astype(np.float64)
+        # Storage-cast finiteness (r137-v5 post-mortem): KD's f64 scales
+        # were all finite (armor never fired), then astype(float16) sent
+        # 54/196 layers' s2 to inf — anything above 65,504 overflows and
+        # the cast is silent. Default storage is now float32 (tag 2,
+        # +~0.03 BPW at r137); if float16 is ever opted back in, an
+        # overflow must die HERE with a message naming the real stage,
+        # not downstream at the export gate.
+        s1_cast = st.s1.astype(scale_dt).astype(np.float64)
+        s2_cast = st.s2.astype(scale_dt).astype(np.float64)
+        if not (np.isfinite(s1_cast).all() and np.isfinite(s2_cast).all()):
+            from ..qpk1 import Qpk1Error
+
+            raise Qpk1Error(
+                f"scale storage cast to {scale_dt} overflowed to non-finite "
+                f"(layer {st.name!r}); raise scale_dtype or clamp the stage "
+                f"that inflated the scales"
+            )
+        st.s1 = s1_cast
+        st.s2 = s2_cast
     _write_scales_to_host(model, layers)
 
     stem, post = _split_stem_post(model)

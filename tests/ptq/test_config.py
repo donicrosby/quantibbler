@@ -53,7 +53,7 @@ def test_scn_float32_opt_in():
     with pytest.raises(ValueError):
         PTQConfig(compute_dtype="float64 ")
     # Serialization knob is likewise explicit and validated.
-    assert PTQConfig().scale_dtype == "float16"
+    assert PTQConfig().scale_dtype == "float32"
     assert PTQConfig(scale_dtype="float32").scale_dtype == "float32"
     with pytest.raises(ValueError):
         PTQConfig(scale_dtype="float64")
