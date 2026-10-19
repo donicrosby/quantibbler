@@ -266,12 +266,19 @@ def tokenize_chunks(
 def quantized_config(args: argparse.Namespace) -> PTQConfig:
     """PTQConfig for real models: gate-shaped stages (TuneFP off — the fp
     checkpoint needs no polish; STE + global scale KD at the gate's measured
-    lr), paper-style solver knobs, caller-selected rank."""
+    lr), paper-style solver knobs, caller-selected rank.
+
+    scale_dtype follows --scale-dtype (default float32): v5/v6 proved the
+    hard-coded float16 overflows late-block s2 (>65,504 -> inf, 54/196
+    layers). float16 remains available for BPW-tight artifacts whose
+    post-polish scales are verified bounded; the storage cast now raises
+    instead of silently emitting inf.
+    """
     return PTQConfig(
         seed=args.seed,
         rank=args.rank,
         compute_dtype="float64",
-        scale_dtype="float16",
+        scale_dtype=args.scale_dtype,
         admm_max_iter=args.max_admm_iter,
         stage_pre=StageHyper(1e-4, 4, 0),
         stage_latent=StageHyper(2e-3, 4, 3),
@@ -520,6 +527,13 @@ def main() -> int:
     )
     parser.add_argument("--eval-seqs", type=int, default=5, help="5 batches of 8 = 40 eval rows")
     parser.add_argument("--max-admm-iter", type=int, default=400)
+    parser.add_argument(
+        "--scale-dtype",
+        choices=("float16", "float32"),
+        default="float32",
+        help="qpk1 scale storage dtype (float16 overflows to inf when any "
+        "scale exceeds 65,504 — the cast now raises instead of shipping it)",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path, default=Path("artifacts") / "model-qpk1")
     args = parser.parse_args()
