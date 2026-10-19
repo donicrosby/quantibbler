@@ -99,6 +99,7 @@ class PTQConfig:
     tau: float | None = None
     gamma: float = 0.2
     divergence_band_factor: float = 10000.0
+    polish_rounds: int = 4
     admm_max_iter: int = 400
     rho_start: float = 1e-2
     rho_end: float = 1e2

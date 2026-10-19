@@ -29,6 +29,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from .bit_polish import greedy_polish
 from .calibration import LayerStatsBook, collect_stats, robust_diag
 from .config import PTQConfig
 from .lb_admm import lb_admm, magnitude_balance
@@ -549,26 +550,32 @@ def reconstruct_block(
             w,
             cfg,
         )
-        u0 = torch.from_numpy(np.ascontiguousarray(bal.U))
-        v0 = torch.from_numpy(np.ascontiguousarray(bal.V))
-        # STE-boundary scale fold: TuneLatentSTE's Adam lr is ABSOLUTE
-        # ([NQ] App. C), while balanced latents sit at whatever scale the
-        # preconditioned solve left them (~1e-4 on production statistics;
-        # Eq. 8 scales absorb the magnitude, so the latents themselves stay
-        # tiny). An lr=2e-3 step on a 1e-4 latent is a ~20x perturbation
-        # per step — it bulldozes the sign pattern past random instead of
-        # refining it (exported layers measured cos BELOW the random-sign
-        # floor). Folding the latents' global scale into s1 is an EXACT
-        # refold of the layer function Wq = diag(s1) sign(U) sign(V)^T
-        # diag(s2) (up to global sign, which the scales re-absorb), and
-        # puts the latents in the O(1) class the lr was calibrated in.
-        latent_scale = float(np.mean(np.abs(bal.U)))
-        if np.isfinite(latent_scale) and latent_scale > 0.0:
-            u0 = u0 / latent_scale
-            bal_s1 = np.asarray(bal.s1, dtype=np.float64) * latent_scale
-        else:
-            bal_s1 = np.asarray(bal.s1, dtype=np.float64)
-        s1_np = np.ascontiguousarray(bal_s1)
+        # Greedy bit-flip polish (r137 root-cause line of work): the
+        # continuous stages never perform a discrete move on the packed
+        # binaries (measured: 4,096 STE steps flip zero sign bits), so the
+        # stored artifacts carried whatever signs the ADMM init produced
+        # (cos ~0.02-0.17). This stage directly minimizes the STORED
+        # objective ||W - diag(s1) Ub Vb^T diag(s2)||_F^2 by exact-gain
+        # coordinate descent + alternating-LS scale refits (measured:
+        # cos x4-6 per layer in ~10 s). The latents below become exactly
+        # +-1, so TuneLatentSTE's sign() sees fixed bits and its continuous
+        # knobs (scales) refine on top of the polished signs.
+        ub_p, vb_p, s1_p, s2_p = greedy_polish(
+            w,
+            np.asarray(bal.Ub, dtype=np.float64),
+            np.asarray(bal.Vb, dtype=np.float64),
+            np.asarray(bal.s1, dtype=np.float64),
+            np.asarray(bal.s2, dtype=np.float64),
+            rounds=cfg.polish_rounds,
+        )
+        # Exact refold: latents = polished bits themselves (sign(latent) is
+        # then a fixed point — STE cannot and need not move them), scales
+        # carry the magnitude. cos(latent, bal.U) is irrelevant; the
+        # artifact is (bits, scales), and those are the polished ones.
+        u0 = torch.from_numpy(np.ascontiguousarray(ub_p))
+        v0 = torch.from_numpy(np.ascontiguousarray(vb_p))
+        s1_np = np.ascontiguousarray(s1_p)
+        s2_np = np.ascontiguousarray(s2_p)
         bias0 = original_bias[name]
         fac = FactorizedLinear(
             u0, v0, bias0 if bias0 is not None else torch.zeros(linear.weight.shape[0])
@@ -576,7 +583,7 @@ def reconstruct_block(
         # Scales initialized from Eq. 8 (with the latent scale folded in).
         with torch.no_grad():
             fac.s1.copy_(torch.from_numpy(s1_np))
-            fac.s2.copy_(torch.from_numpy(np.ascontiguousarray(bal.s2)))
+            fac.s2.copy_(torch.from_numpy(s2_np))
         facs[name] = fac
     del res, bal
     _note_block_progress(0, f"{name_prefix or 'block'}/lb_admm")

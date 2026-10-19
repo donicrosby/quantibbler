@@ -2,6 +2,7 @@
 ste_refinement_improves_mse, sign_extraction_packing_parity)."""
 
 import numpy as np
+import pytest
 import torch
 from torch import nn
 
@@ -174,3 +175,52 @@ def test_scn_sign_extraction_parity():
         pu_ref = kernels.pack_bits(st.Ub, backend="numpy-reference")
         pu_rust = kernels.pack_bits(st.Ub, backend="rust")
         assert np.array_equal(pu_ref, pu_rust)
+
+
+def test_bit_polish_recovers_perturbed_exact_factorization():
+    """Greedy polish strictly improves a perturbed exact +-1 factorization
+    and rejects malformed inputs (validation contract)."""
+    import numpy as np
+
+    from quantibbler.ptq.bit_polish import greedy_polish
+
+    gen = np.random.default_rng(3)
+    ub0 = np.where(gen.random((16, 4)) < 0.5, -1.0, 1.0)
+    vb0 = np.where(gen.random((12, 4)) < 0.5, -1.0, 1.0)
+    s1_0 = gen.uniform(0.5, 2.0, 16)
+    s2_0 = gen.uniform(0.5, 2.0, 12)
+    W = (s1_0[:, None] * (ub0 @ vb0.T)) * s2_0[None, :]
+
+    # perturb: 40 random bit flips + 2x scale noise
+    ub = ub0.copy()
+    vb = vb0.copy()
+    for _ in range(40):
+        if gen.random() < 0.5:
+            ub[gen.integers(16), gen.integers(4)] *= -1
+        else:
+            vb[gen.integers(12), gen.integers(4)] *= -1
+    s1_p = s1_0 * gen.uniform(0.5, 1.5, 16)
+    s2_p = s2_0 * gen.uniform(0.5, 1.5, 12)
+
+    def rel(ubX, vbX, a, b):
+        Wq = (a[:, None] * (ubX @ vbX.T)) * b[None, :]
+        return float(np.linalg.norm(Wq - W) / np.linalg.norm(W))
+
+    before = rel(ub, vb, s1_p, s2_p)
+    ub_f, vb_f, s1_f, s2_f = greedy_polish(W, ub, vb, s1_p, s2_p, rounds=8)
+    after = rel(ub_f, vb_f, s1_f, s2_f)
+    assert after < 0.5 * before, f"polish failed to converge: {before:.4f} -> {after:.4f}"
+    assert np.isfinite(s1_f).all() and np.isfinite(s2_f).all()
+    assert np.all(np.abs(ub_f) == 1.0) and np.all(np.abs(vb_f) == 1.0)
+
+    # validation: non-finite target, wrong shapes, non-binary factors
+    w_nan = W.copy()
+    w_nan[3, 5] = np.nan
+    with pytest.raises(ValueError, match="finite"):
+        greedy_polish(w_nan, ub, vb, s1_f, s2_f)
+    with pytest.raises(ValueError, match="shapes"):
+        greedy_polish(W, ub[:, :2], vb, s1_f, s2_f)
+    with pytest.raises(ValueError, match="binary"):
+        bad = ub_f.copy()
+        bad[0, 0] = 2.0
+        greedy_polish(W, bad, vb_f, s1_f, s2_f)
