@@ -246,9 +246,21 @@ def _tune_fp(
     y_b: torch.Tensor,
     cfg: PTQConfig,
     batch_size: int,
+    *,
+    label: str = "block",
 ) -> None:
     """TuneFP ([NQ] Step 1): T_pre steps of full-precision block tuning
-    against the teacher targets with Adam + cosine lr ([NQ] App. C)."""
+    against the teacher targets with Adam + cosine lr ([NQ] App. C).
+
+    Bulletproofing (r137 run #3b autopsy): a single inf/NaN gradient in
+    bf16 poisons EVERY parameter of a tensor at the next opt.step(), and
+    the NaN then cascades through statistics/preconditioning into the
+    solver (observed: an entire o_proj weight all-NaN by the lb_admm
+    boundary, killing the run at block ~8). A tuning stage therefore
+    never trusts its own step: non-finite losses are skipped, a parameter
+    snapshot is restored and the stage ends early if finiteness is ever
+    violated. A slightly underfit block beats a poisoned pipeline.
+    """
     linears = _linear_children(block)
     if not linears:
         return
@@ -257,6 +269,8 @@ def _tune_fp(
     n = x_b.shape[0]
     bs = max(1, min(batch_size, n))
     total = max(cfg.stage_pre.epochs * (n // bs), 1)
+    snapshot = [p.detach().clone() for p in params]
+    skipped = 0
     for step in range(total):
         if cfg.cosine_schedule and total > 1:
             import math
@@ -267,9 +281,25 @@ def _tune_fp(
         idx = torch.arange((step % (n // bs or 1)) * bs, (step % (n // bs or 1)) * bs + bs)
         out = block(x_b[idx])
         loss = (out - y_b[idx]).pow(2).mean()
+        if not torch.isfinite(loss):
+            skipped += 1
+            opt.zero_grad()
+            continue
         opt.zero_grad()
         loss.backward()
         opt.step()
+        if not all(bool(torch.isfinite(p).all()) for p in params):
+            with torch.no_grad():
+                for p, p0 in zip(params, snapshot, strict=True):
+                    p.copy_(p0)
+            print(
+                f"[tune_fp:{label}] non-finite parameters after step {step}; "
+                "restored snapshot, ending stage early",
+                flush=True,
+            )
+            return
+    if skipped:
+        print(f"[tune_fp:{label}] skipped {skipped}/{total} non-finite-loss steps", flush=True)
 
 
 def _tune_latent_ste(
@@ -297,6 +327,11 @@ def _tune_latent_ste(
     n = x_b.shape[0]
     bs = max(1, min(batch_size, n))
     total = max(cfg.stage_latent.epochs * (n // bs or 1), 1)
+    # Same finiteness armor as TuneFP (r137 run #3b): a NaN loss or a
+    # poisoned step must not kill the run or corrupt latents that the
+    # exported binaries come from.
+    snapshot = [p.detach().clone() for p in params]
+    skipped = 0
     for step in range(total):
         if cfg.cosine_schedule and total > 1:
             import math
@@ -308,9 +343,25 @@ def _tune_latent_ste(
         idx = torch.arange(lo, lo + bs)
         out = _quantized_forward_block(block, facs, x_b[idx])
         loss = (out - y_b[idx]).pow(2).mean()
+        if not torch.isfinite(loss):
+            skipped += 1
+            opt.zero_grad()
+            continue
         opt.zero_grad()
         loss.backward()
         opt.step()
+        if not all(bool(torch.isfinite(p).all()) for p in params):
+            with torch.no_grad():
+                for p, p0 in zip(params, snapshot, strict=True):
+                    p.copy_(p0)
+            print(
+                f"[tune_latent_ste] non-finite parameters after step {step}; "
+                "restored snapshot, ending stage early",
+                flush=True,
+            )
+            return
+    if skipped:
+        print(f"[tune_latent_ste] skipped {skipped}/{total} non-finite-loss steps", flush=True)
 
 
 def extract_and_pack(u_latent, v_latent, name: str = "") -> QuantizedLayerState:
@@ -409,6 +460,21 @@ def reconstruct_block(
     if y_b is None:
         with torch.no_grad():
             y_b = block(x_b)
+    # Boundary finiteness check (r137 run #3b autopsy): non-finite inputs
+    # here mean the PREVIOUS block's quantized artifact is broken (its
+    # forward produces inf/NaN), and every statistic, solve, and export
+    # downstream would inherit the poison. Fail at the exact boundary,
+    # naming the block — never let it surface later as a cryptic solver
+    # error or a silently garbage artifact.
+    for tag, t in (("x_b", x_b), ("y_b", y_b)):
+        if t is not None and not torch.isfinite(t).all():
+            n_bad = int((~torch.isfinite(t)).sum())
+            raise ValueError(
+                f"block {name_prefix or layer_offset}: captured {tag} has "
+                f"{n_bad}/{t.numel()} non-finite entries — the quantized "
+                "prefix upstream is broken; not solving this block on "
+                "poisoned data"
+            )
     if recorder is not None:
         recorder("capture", x_b=x_b.detach().clone(), y_b=y_b.detach().clone())
 
@@ -420,7 +486,14 @@ def reconstruct_block(
         name: (m.bias.detach().clone() if m.bias is not None else None)
         for name, m in quantizable_linears
     }
-    _tune_fp(block, x_b, y_b, cfg, cfg.stage_pre.batch_size)
+    _tune_fp(
+        block,
+        x_b,
+        y_b,
+        cfg,
+        cfg.stage_pre.batch_size,
+        label=name_prefix or f"offset{layer_offset}",
+    )
     _note_block_progress(0, f"{name_prefix or 'block'}/tune_fp")
     if recorder is not None:
         recorder("tune_fp")
