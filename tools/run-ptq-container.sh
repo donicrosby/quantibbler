@@ -33,6 +33,7 @@ exec docker run --rm \
   -e QUANTIBBLER_BREADCRUMBS=/tmp/ptq/quantibbler-breadcrumbs.log \
   -e OMP_NUM_THREADS=16 \
   -e MKL_NUM_THREADS=16 \
+  -e OPENBLAS_NUM_THREADS=16 \
   quantibbler-ptq:latest \
   python tools/quantize_hf_model.py \
     --model "$MODEL" --rank "$RANK" \

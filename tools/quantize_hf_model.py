@@ -67,6 +67,11 @@ os.environ.setdefault("QUANTIBBLER_KD_TMPDIR", "/opt/data/tmp")
 os.environ.setdefault("MALLOC_ARENA_MAX", "2")
 os.environ.setdefault("OMP_NUM_THREADS", "4")
 os.environ.setdefault("MKL_NUM_THREADS", "4")
+# numpy's scipy-openblas is PTHREADS-backed: OMP/MKL pins do NOT size its
+# pool, which defaults to visible-CPU count. Measured 2026-10-18 (r64
+# slab): unpinned 235.5s vs pinned-to-optimum 3.98s — a 59x thread-thrash
+# artifact, not algorithm scaling. Pin it with the others.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT / "src") not in sys.path:
