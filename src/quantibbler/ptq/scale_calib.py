@@ -95,7 +95,16 @@ def calibrate_scales(
     pre_s2 = {n: t.numpy().copy() for n, t in s2_params.items()}
     for t in (*s1_params.values(), *s2_params.values()):
         t.requires_grad_(True)
-    opt = torch.optim.Adam([*s1_params.values(), *s2_params.values()], lr=cfg.stage_global.lr)
+    # Per-tensor RELATIVE lr (r137-v7 post-mortem, user-directed fix): an
+    # absolute lr 1e-3 is irrelevant to the tensors it steps — at polish
+    # exit s1 can live at 1e-7 while s2 lives at 1e4, so one absolute rate
+    # is 1e4x too small for one side and 1e4x too big for the other. Each
+    # scale tensor now steps at lr_rel * its own median magnitude.
+    groups = []
+    for t in (*s1_params.values(), *s2_params.values()):
+        lr_scale = max(float(t.detach().abs().median()), 1e-30)
+        groups.append({"params": [t], "lr": cfg.stage_global.lr * lr_scale, "lr_scale": lr_scale})
+    opt = torch.optim.Adam(groups)
 
     # Build the quantized-prefix input by running the batches through the
     # frozen model once (input token ids feed embeddings upstream; for a
@@ -195,9 +204,9 @@ def calibrate_scales(
             if cfg.cosine_schedule and total > 1:
                 import math
 
-                lr = cfg.stage_global.lr * 0.5 * (1 + math.cos(math.pi * step / total))
+                cos_f = 0.5 * (1 + math.cos(math.pi * step / total))
                 for group in opt.param_groups:
-                    group["lr"] = lr
+                    group["lr"] = group["lr_scale"] * cfg.stage_global.lr * cos_f
             student = scale_forward(x_bs)
             # Page the step's teacher logits in from the disk cache. The
             # cache's row space is (samples x positions) FLATTENED while the

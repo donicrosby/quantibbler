@@ -325,7 +325,18 @@ def _tune_latent_ste(
     params = [p for fac in facs.values() for p in (fac.u_latent, fac.v_latent, fac.s1, fac.s2)]
     if not params:
         return
-    opt = torch.optim.Adam(params, lr=cfg.stage_latent.lr)
+    # Per-tensor RELATIVE lr (r137-v7 post-mortem, user-directed fix): one
+    # absolute lr for all four tensors let Adam step s1 — measured
+    # post-polish scale class 1e-7 vs s2's 1e4 — by ~5e4x its own magnitude
+    # per step, taking block-26 o_proj from nr 0.475 to 4.5e4 (cos negative)
+    # inside one stage. Each tensor now steps at lr_rel * ITS OWN median
+    # magnitude: the step is always relevant to the parameter class it
+    # walks, whatever geometry polish hands over.
+    groups = []
+    for p in params:
+        lr_scale = max(float(p.detach().abs().median()), 1e-30)
+        groups.append({"params": [p], "lr": cfg.stage_latent.lr * lr_scale, "lr_scale": lr_scale})
+    opt = torch.optim.Adam(groups)
     n = x_b.shape[0]
     bs = max(1, min(batch_size, n))
     total = max(cfg.stage_latent.epochs * (n // bs or 1), 1)
@@ -338,9 +349,9 @@ def _tune_latent_ste(
         if cfg.cosine_schedule and total > 1:
             import math
 
-            lr = cfg.stage_latent.lr * 0.5 * (1 + math.cos(math.pi * step / total))
+            cos_f = 0.5 * (1 + math.cos(math.pi * step / total))
             for group in opt.param_groups:
-                group["lr"] = lr
+                group["lr"] = group["lr_scale"] * cfg.stage_latent.lr * cos_f
         lo = (step % (n // bs or 1)) * bs
         idx = torch.arange(lo, lo + bs)
         out = _quantized_forward_block(block, facs, x_b[idx])

@@ -125,10 +125,16 @@ def greedy_polish(
         #     bit row for free and s1, s2 stay strictly positive.
         # (2) TRUST REGION: near-zero-energy binary columns make the LS
         #     denominator degenerate and the refit explodes the paired
-        #     scale (the alpha-refit inflation seen on v2 hot scales).
-        #     Reject any refit that moves a scale outside [1/8x, 8x] of
-        #     its pre-refit value; the flip sweeps reopen those directions
-        #     next round (4 rounds still allow ~4000x cumulative motion).
+        #     scale. Reject any refit that moves a scale outside
+        #     [1/8x, 8x] of its pre-refit value.
+        # (3) ENERGY GATE (r137-v7 post-mortem): the trust region turned
+        #     explosion into "finite but insane" — degenerate columns'
+        #     refits rode the 8x-per-round ceiling to s2max 2.7e7
+        #     (|Wq|/|W| median 1888, ppl ratio 5518). A binary row/column
+        #     with negligible energy against the matrix mean carries NO
+        #     signal: its LS optimum is pure noise amplification. Such
+        #     rows/columns are NOT refit at all — their balance-time scale
+        #     stands (flip sweeps still adjust their bits).
         Bc = ub @ (vb * s2[:, None]).T  # W ~ diag(s1) Bc
         d1 = (Bc * Bc).sum(axis=1)
         raw1 = np.where(d1 > 0, (w * Bc).sum(axis=1) / np.maximum(d1, 1e-300), s1)
@@ -154,5 +160,25 @@ def greedy_polish(
         s2 = new2
         if total_flips == 0:
             break  # local optimum reached
+
+    # Exit re-balance: collapse any s1/s2 scale-class split WITHOUT
+    # touching the product. diag(s1)·Ub·Vbᵀ·diag(s2) is EXACTLY invariant
+    # under s1*=gamma, s2/=gamma (float64 rounding aside), so pick the
+    # geometric mean: r137-v7 measured polish legitimately exiting at
+    # s1~1e-7 / s2~1e4 — an 11-decade split that is fine for the product
+    # but hands any absolute-lr consumer two incomparable parameter
+    # classes. Downstream stages are now relative-lr, so this is hygiene
+    # rather than armor — but it costs the objective nothing and keeps
+    # every future consumer sane.
+    nz1 = s1[s1 != 0.0]
+    nz2 = s2[s2 != 0.0]
+    p1 = float(np.median(np.abs(nz1))) if nz1.size else 1.0
+    p2 = float(np.median(np.abs(nz2))) if nz2.size else 1.0
+    # Balance condition: median|s1*gamma| == median|s2/gamma|
+    #   ->  gamma^2 = p2/p1  ->  gamma = sqrt(p2/p1).
+    gamma = float(np.clip(np.sqrt(p2 / p1) if p1 > 0 and p2 > 0 else 1.0, 1e-150, 1e150))
+    if gamma != 1.0 and np.isfinite(gamma):
+        s1 = s1 * gamma
+        s2 = s2 / gamma
 
     return ub, vb, s1, s2
