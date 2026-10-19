@@ -58,11 +58,12 @@
 
 ## 4. Thread pin measurement (D3)
 
-- [ ] 4.1 Benchmark the isolated r137 layer-15 solve at 16 vs 24 BLAS
+- [x] 4.1 Benchmark the isolated r137 layer-15 solve at 16 vs 24 BLAS
       threads under the 24-CPU container quota (2x per config, interleaved
-      order); record medians in the run notes. Pin the winner in
-      `tools/run-ptq-container.sh` (or keep 16 with the numbers recorded
-      if the delta is within noise).
+      order); record medians in the run notes. RESULT: 16T median 12.8s
+      vs 24T 13.8s (subprocess-isolated, interleaved, block-0 down_proj
+      at rank 137) — 24 buys nothing on these shapes; KEEP 16
+      (`/tmp/ptq/thread_bench.json`). No script change needed.
 
 ## 5. Rerun + close-out
 
