@@ -63,9 +63,16 @@ class PTQConfig:
             the paper states the objective but not a value).
         tau: robust-diagonal clipping ceiling (assumption A-1: absolute cap
             applied to raw diagonal statistics before shrinkage; ``None``
-            means the per-layer adaptive cap ``max(D)`` of ``robust_diag``).
+            means the tail-gated per-vector cap derived inside
+            ``robust_diag``: q95 engages only on genuinely heavy-tailed
+            vectors, max > 10x q95).
         gamma: shrinkage coefficient of Eq. 3 ([NQ] Step 2-1: ~0.2 small
             models, ~0.6 large; 0.2 is the v0.1 default).
+        divergence_band_factor: post-balance magnitude gate band F: the
+            binary reconstruction's median |entry| must lie within [1/F, F]
+            of the fp weight's median |entry| (qk-divergence-guards D2).
+            Default 100.0 — measured separation between the honest tiny-gate
+            fixture (ratio ~0.0997) and the r137 block-0 divergence (~250).
         admm_max_iter: K, the ADMM iteration cap ([NQ] App. C: 400).
         rho_start / rho_end: linear penalty schedule endpoints over K
             iterations (assumption A-2: 1e-2 -> 1e+2).
@@ -87,6 +94,7 @@ class PTQConfig:
     temperature: float = 1.0
     tau: float | None = None
     gamma: float = 0.2
+    divergence_band_factor: float = 100.0
     admm_max_iter: int = 400
     rho_start: float = 1e-2
     rho_end: float = 1e2
@@ -121,6 +129,10 @@ class PTQConfig:
             raise ValueError(f"gamma must lie in [0, 1], got {self.gamma}")
         if self.tau is not None and self.tau <= 0.0:
             raise ValueError(f"tau must be positive or None, got {self.tau}")
+        if self.divergence_band_factor <= 1.0:
+            raise ValueError(
+                f"divergence_band_factor must be > 1.0, got {self.divergence_band_factor}"
+            )
         if self.admm_max_iter < 1:
             raise ValueError(f"admm_max_iter must be >= 1, got {self.admm_max_iter}")
         if self.rho_start <= 0.0:

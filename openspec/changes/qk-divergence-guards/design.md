@@ -18,48 +18,48 @@ facts and one measurement left in flight:
 
 ## Decisions
 
-### D1: finite per-vector tau as the default ceiling policy
+### D1: tail-gated per-vector tau as the default ceiling policy
 
-Replace the no-op default with a per-vector robust ceiling estimated from
-the vector's own statistics: `tau = q95(D)` (95th percentile of the raw
-diagonal entries of that vector), applied by the existing clip-then-shrink
-path. Rationale:
+Replace the no-op default with a per-vector robust ceiling, **tail-gated**:
+`tau = q95(D)` becomes the ceiling only when the raw vector is genuinely
+heavy-tailed (`max(D) > 10 x q95(D)`); otherwise no clipping occurs.
+Rationale:
 
-- It is a real absolute cap: entries above the 95th percentile clip,
-  bounding any single heavy tail.
+- Block-0-style heavy tails (the incident) exceed the gate by orders of
+  magnitude and get clipped; degenerate/zero statistics still hit the
+  positive floor.
+- Healthy concentrated vectors pass through exactly untouched. This is a
+  measured correction, not a preference: the unconditional-q95 variant
+  degraded the honest tiny-gate fixture (logit delta 0.795 -> 1.43, over
+  the A-8 bound) by clipping vectors where the cap at max was effectively
+  inert (assumption A-iii was REFUTED — see crystallization).
 - It is layer-local and vector-local (d_in and d_out each get their own
   estimate), matching A-1's per-layer "absolute cap" reading.
-- Healthy layers have concentrated diagonals where q95 ≈ max, so the
-  default path change is a near-no-op exactly where no treatment is
-  needed (assumption A-iii below).
 
-`tau=None` in `PTQConfig` is redefined to mean "derive per-vector q95";
-an explicit numeric tau continues to override (spec A-1 absolute cap
-semantics unchanged for callers who pin one).
+`tau=None` in `PTQConfig` means "derive the tail-gated per-vector cap";
+an explicit numeric tau continues to override (A-1 verbatim semantics).
 
-### D2: post-balance sanity gate
+### D2: post-balance sanity gate (Frobenius-norm ratio)
 
 Immediately after `magnitude_balance` produces `(Ub, Vb, s1, s2)` for a
 layer (before STE, before any downstream block sees a poisoned prefix),
-compute `rho = median(|diag(s1) (Ub Ub-signs) diag(s2)|) / median(|W|)` —
-concretely `median(|Wq_binary|) / median(|W|)` — and require it inside a
-band `[1/F, F]` with default `F = 10` (config knob `divergence_band_factor`).
-Also reject any NaN/Inf scale entry. On violation raise
-`QuantizationDivergenceError` naming the layer, the measured ratio, and
-the band; the driver surfaces it as a nonzero exit before export and
-before the dataset stages run.
+compute `||Wq||_F / ||W||_F` where `Wq` is the binary reconstruction
+`diag(s1) (sign U)(sign V)^T diag(s2)`, and require it inside `[1/F, F]`
+with default `F = 100` (`PTQConfig.divergence_band_factor`). Also reject
+any NaN/Inf scale entry. On violation raise `QuantizationDivergenceError`
+naming the layer, the measured ratio, and the band; the driver surfaces it
+as a nonzero exit before export and before the dataset stages run.
 
+- The **norm ratio** (not a median of entries) is the gated statistic,
+  and the band default is **100** — both measured corrections (see
+  crystallization): honest fixtures read as low as ~0.1 on the entry
+  median with dead scale-floor rows pinning some layers at exactly 0,
+  while the incident divergence is an energy explosion (~250x median,
+  more in norm). The norm ratio separates them with >2 orders of margin
+  on each side.
 - Placement inside `reconstruct_block` (per layer, at balance time) means
   a divergence aborts within the first minutes of the solve phase and
   never contaminates later blocks' calibration inputs.
-- The binary-product median (not the continuous factors') is the gated
-  quantity because the serialized artifact is the binary product; the
-  incident's 250x signature was measured exactly there.
-- Band calibration: the healthy population and the diverged population
-  sit orders apart (incident: ~250x; coherent layers: O(1) at balance
-  time — pinned from probe output during task execution and recorded in
-  the crystallization note). F = 10 is the provisional default; the task
-  adjusts it only with measured balance-time ratios from both artifacts.
 
 ### D3: thread pin re-benchmark (ops hygiene, same change)
 
@@ -109,14 +109,40 @@ record; this task only claims a change if the measurement says so.
 
 ## Open questions
 
-- **OQ-1 — does the q95 tau heal block 0 at r137?** Owner: agent.
+- **OQ-1 — does the tail-gated tau heal block 0 at r137?** Owner: agent.
   Status: OPEN — isolated block-0 treatment screen in flight
-  (`l0_probe.py` inside the ptq container); closes with measured
-  per-treatment scale ratios and binary rel errors.
+  (`l0_probe.py` inside the ptq container; arms re-baselined against the
+  pre-change no-op default); closes with the rerun's per-layer scale audit.
 - **OQ-2 — adaptive rho fallback.** Owner: agent, deferred to a
   follow-up change; only activates if OQ-1 closes negative.
-- **OQ-3 — exact gate band default.** Owner: agent; closes during task
-  execution from measured balance-time ratios (provisional F=10).
+- **OQ-3 — exact gate band default.** Owner: agent.
+  RESOLVED 2026-10-19 (implementation crystallization, below): F=100,
+  Frobenius-norm ratio.
 - **OQ-4 — is r8's block-0 elevation the same mechanism?** Owner:
-  agent; the probe's default-arm ratios are compared against the r8
-  artifact's exported block-0 scales; closes with OQ-1's results.
+  agent; closes with OQ-1's results.
+
+## Implementation crystallization (2026-10-19)
+
+Measured during task execution, revising the as-authored design:
+
+- **A-iii REFUTED (unconditional q95 harms healthy layers).** The
+  tiny-gate fixture's honest quantization degraded from logit delta
+  0.795 (old default) to 1.434 (unconditional q95), over the A-8 bound
+  of 1.0 — clipping concentrated vectors is NOT a no-op. D1 became the
+  tail-gated policy (max > 10x q95 engages the cap); with the gate,
+  healthy vectors are bit-identical to the no-clip path
+  (`preconditioner_tau_tail_gate_inert`).
+- **Gate statistic and band recalibrated by measurement.** The tiny-gate
+  fixture's honest median-ratio is 0.0997 (and two fixture layers read
+  exactly 0 from scale-floor dead rows), so the as-authored
+  median-ratio/F=10 gate false-positived on the suite itself. The
+  Frobenius-norm ratio with F=100 passes all honest fixtures
+  (32/32) and sits >2 orders below the incident signature (~250x
+  median, more in norm). The dead-row anatomy of the tiny fixtures is
+  itself a finding: the pre-gate pipeline silently shipped layers whose
+  binary reconstruction had zero median magnitude; the norm gate now
+  bounds exactly that pathology (a fully-dead layer reads ratio 0 and
+  aborts).
+- The isolated probe (`l0_probe.py`) imported the pre-change module, so
+  its default arm remains the honest historical baseline; its results
+  close OQ-1/OQ-4 in the rerun task.

@@ -2,16 +2,16 @@
 
 ### Requirement: The pipeline SHALL gate each reconstructed layer against the fp weight's magnitude before any refinement or downstream use
 
-Immediately after magnitude balancing yields `(Ub, Vb, s1, s2)` for a linear layer, the pipeline SHALL verify the binary reconstruction's median absolute entry against the fp weight's within the band factor `PTQConfig.divergence_band_factor` (default 10.0), and SHALL require every scale entry to be finite. A violation SHALL abort quantization with a dedicated error naming the layer, the measured ratio, and the band.
+Immediately after magnitude balancing yields `(Ub, Vb, s1, s2)` for a linear layer, the pipeline SHALL verify the binary reconstruction's Frobenius norm against the fp weight's within the band factor `PTQConfig.divergence_band_factor` (default 100.0), and SHALL require every scale entry to be finite. A violation SHALL abort quantization with a dedicated error naming the layer, the measured ratio, and the band.
 
 #### Scenario: divergence_gate_healthy_passes
 
-- **WHEN** magnitude balancing produces scales whose binary reconstruction's median absolute entry is within the configured factor of the fp weight's median absolute entry
+- **WHEN** magnitude balancing produces scales whose binary reconstruction's Frobenius norm is within the configured factor of the fp weight's Frobenius norm
 - **THEN** the gate passes without raising, and the pipeline proceeds to refinement with the balanced factors
 
 #### Scenario: divergence_gate_diverged_aborts
 
-- **WHEN** a layer's balanced scales reconstruct a binary weight whose median absolute entry exceeds the fp weight's median absolute entry by more than the band factor
+- **WHEN** a layer's balanced scales reconstruct a binary weight whose Frobenius norm exceeds the fp weight's Frobenius norm by more than the band factor
 - **THEN** quantization aborts with the layer's module path, the measured ratio, and the configured band in the error message, raised before Straight-Through refinement and before any later block's calibration inputs are captured, and no qpk1 bytes are exported for the model
 
 #### Scenario: divergence_gate_nan_rejected
@@ -37,8 +37,13 @@ Phase 1 SHALL run the calibration data through the fp teacher once, collecting p
 
 #### Scenario: preconditioner_tau_default_q95
 
-- **WHEN** the configuration leaves tau unset and a raw statistic vector is heavy-tailed (maximum far above its 95th percentile)
+- **WHEN** the configuration leaves tau unset and a raw statistic vector is heavy-tailed (maximum more than 10x its 95th percentile)
 - **THEN** the derived ceiling equals that vector's 95th percentile, entries above it are clipped before shrinkage, and the resulting preconditioner entries are strictly bounded below the raw maximum
+
+#### Scenario: preconditioner_tau_tail_gate_inert
+
+- **WHEN** the configuration leaves tau unset and a raw statistic vector is moderately tailed (maximum at most 10x its 95th percentile)
+- **THEN** no clipping is applied, and the preconditioner equals the no-clip shrinkage path exactly
 
 #### Scenario: preconditioner_tau_explicit_override
 

@@ -464,6 +464,18 @@ def reconstruct_block(
         w_tilde = w_tilde.astype(dt)
         res = lb_admm(w_tilde, cfg)
         bal = magnitude_balance(res.P_u, res.P_v, d_out_t, d_in_t, target=w)
+        # Post-balance divergence gate (qk-divergence-guards): a diverged
+        # layer must abort here, before it poisons this block's refinement
+        # and every later block's calibration inputs.
+        check_layer_magnitude(
+            name,
+            np.asarray(bal.U),
+            np.asarray(bal.V),
+            np.asarray(bal.s1),
+            np.asarray(bal.s2),
+            w,
+            cfg,
+        )
         u0 = torch.from_numpy(np.ascontiguousarray(bal.U))
         v0 = torch.from_numpy(np.ascontiguousarray(bal.V))
         bias0 = original_bias[name]
@@ -529,6 +541,61 @@ def _input_adapter(block: nn.Module, batches: list[torch.Tensor]) -> nn.Module:
         "calibration batches are integer token ids but the block exposes no "
         "nn.Embedding to map them into its input space"
     )
+
+
+class QuantizationDivergenceError(RuntimeError):
+    """A layer's balanced factors diverged from the fp target's magnitude.
+
+    Raised by the post-balance magnitude gate (qk-divergence-guards):
+    the layer's module path, the measured median ratio, and the configured
+    band travel in the message; the driver aborts before any export.
+    """
+
+
+def check_layer_magnitude(name, U, V, s1, s2, W, cfg) -> float:
+    """Post-balance divergence gate (qk-divergence-guards, D2).
+
+    Reconstructs the SERIALIZED quantity — the binary weight
+    ``Wq = diag(s1) (sign U)(sign V)^T diag(s2)`` — and requires its
+    Frobenius norm to lie within ``divergence_band_factor`` of the fp
+    weight's. Returns the measured ratio on success; raises
+    :class:`QuantizationDivergenceError` naming the layer otherwise (any
+    non-finite scale entry is likewise rejected).
+
+    The norm ratio (not a median of entries) is the gated statistic:
+    scale-floor rows from degenerate statistics leave it untouched, while
+    the balance-amplified divergence it exists to catch is an energy
+    explosion by mechanism (r137 block 0 measured ~250x on the median and
+    more in norm).
+
+    Called at balance time per layer, this trips within the first minutes
+    of the solve phase instead of surfacing as garbage perplexity after
+    the full pipeline.
+    """
+    s1 = np.asarray(s1, dtype=np.float64)
+    s2 = np.asarray(s2, dtype=np.float64)
+    if not (np.all(np.isfinite(s1)) and np.all(np.isfinite(s2))):
+        raise QuantizationDivergenceError(
+            f"quantization divergence in layer {name!r}: balancing produced a "
+            "non-finite scale entry (NaN/Inf)"
+        )
+    U = np.asarray(U, dtype=np.float64)
+    V = np.asarray(V, dtype=np.float64)
+    su = np.sign(U)
+    su[su == 0] = 1.0
+    sv = np.sign(V)
+    sv[sv == 0] = 1.0
+    Wq = (s1[:, None] * (su @ sv.T)) * s2[None, :]
+    norm_w = float(np.linalg.norm(np.asarray(W, dtype=np.float64)))
+    norm_q = float(np.linalg.norm(Wq))
+    ratio = (1.0 if norm_q <= 0.0 else float("inf")) if norm_w <= 0.0 else norm_q / norm_w
+    band = float(cfg.divergence_band_factor)
+    if not (1.0 / band <= ratio <= band):
+        raise QuantizationDivergenceError(
+            f"quantization divergence in layer {name!r}: ||Wq||_F/||W||_F = "
+            f"{ratio:.6g} outside band [1/{band:g}, {band:g}]"
+        )
+    return ratio
 
 
 def reconstruct_model(

@@ -16,36 +16,43 @@
 
 ## 2. tau default policy (D1)
 
-- [ ] 2.1 RED: add `tests/ptq/test_preconditioner_tau.py` covering
+- [x] 2.1 RED: add `tests/ptq/test_preconditioner_tau.py` covering
       scenario IDs `preconditioner_tau_default_q95` (tau=None yields a
       finite cap strictly below max(D) on a heavy-tailed vector),
       `preconditioner_tau_explicit_override` (numeric tau unchanged), and
       `preconditioner_tau_healthy_noop` (concentrated vector: q95 clip
       leaves entries within 1 ulp of the no-op path). Observe RED.
-- [ ] 2.2 GREEN: implement the q95 default in `robust_diag`
+- [x] 2.2 GREEN: implement the q95 default in `robust_diag`
       (calibration.py) behind the same `tau=None` signature; update the
       `PTQConfig.tau` docstring and the qk-ptq spec delta wording if the
       scenario language needs it. Observe GREEN.
-- [ ] 2.3 Verify no healthy-layer regression: run the existing
+      (Tail-gate refinement + `preconditioner_tau_tail_gate_inert`
+      amendment recorded in design.md crystallization — A-iii refuted
+      by the tiny-gate fixture mid-implementation.)
+- [x] 2.3 Verify no healthy-layer regression: run the existing
       preconditioner/solver pytest tier plus the tiny-model e2e gate;
       confirm the gate's BPW and logit-delta assertions still pass.
 
 ## 3. Post-balance divergence gate (D2)
 
-- [ ] 3.1 RED: add `tests/ptq/test_divergence_gate.py` covering
+- [x] 3.1 RED: add `tests/ptq/test_divergence_gate.py` covering
       `divergence_gate_healthy_passes` (ratio in band → no raise, layers
       proceed), `divergence_gate_diverged_aborts` (inflated s1 → raise
       naming the layer and measured ratio), and
       `divergence_gate_nan_rejected` (NaN scale → raise). Observe RED.
-- [ ] 3.2 GREEN: implement the gate in `block_recon.reconstruct_block`
+- [x] 3.2 GREEN: implement the gate in `block_recon.reconstruct_block`
       at balance time; add `divergence_band_factor` to `PTQConfig`
-      (default 10.0) and a dedicated error type in the ptq package;
-      wire the driver to fail fast with a nonzero exit before export.
-      Observe GREEN.
-- [ ] 3.3 End-to-end tripwire proof: run the tiny-model quantize gate
+      (default 100.0 after measurement) and a dedicated error type in the
+      ptq package; wire the driver to fail fast with a nonzero exit
+      before export. Observe GREEN. (Metric: Frobenius-norm ratio — see
+      design.md crystallization; the as-authored entry-median metric
+      false-positived on honest fixtures.)
+- [x] 3.3 End-to-end tripwire proof: run the tiny-model quantize gate
       with an artificially inflated block-0 scale via a test-only hook;
       assert the run aborts naming `layers.0` and that no artifact is
-      written.
+      written. (`tests/ptq/test_divergence_tripwire.py`: abort raised
+      inside quantize_model, before any QuantizedModel/serialized bytes
+      exist.)
 
 ## 4. Thread pin measurement (D3)
 

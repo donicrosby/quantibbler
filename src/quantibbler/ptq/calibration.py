@@ -26,6 +26,13 @@ __all__ = ["LayerStatsBook", "LayerStatsEntry", "collect_stats", "robust_diag"]
 # preconditioners stay finite and positive for zero-variance inputs.
 _TINY = float(np.finfo(np.float64).tiny) * 16.0
 
+# Tail gate for the tau=None default policy (qk-divergence-guards D1): the
+# derived q95 ceiling engages only when the raw vector is genuinely
+# heavy-tailed (max exceeds 10x the q95 entry). Block-0-style embedding
+# statistics exceed this by orders of magnitude; healthy concentrated
+# vectors (where clipping measurably degrades the solve) stay untouched.
+_TAU_TAIL_GATE = 10.0
+
 
 class LayerStatsEntry:
     """Raw per-layer statistics captured in Phase 1.
@@ -201,9 +208,16 @@ def collect_stats(
 def robust_diag(d_in_raw, d_out_raw=None, *, tau=None, gamma=0.2):
     """Robust diagonal preconditioners D~_in / D~_out (Eq. 3, [NQ] Step 2-1).
 
-    Entries are clipped to the ceiling ``tau`` **before** shrinkage
-    (assumption A-1: tau is an absolute cap; ``None`` adapts per vector to
-    ``max(D)``), then shrunk toward the clipped mean with coefficient
+    Entries are clipped to the ceiling tau **before** shrinkage
+    (assumption A-1: tau is an absolute cap). An explicit numeric tau is
+    used verbatim. ``None`` derives the cap per vector, tail-gated: the
+    q95 percentile becomes the ceiling ONLY when the vector is heavy-tailed
+    (max > _TAU_TAIL_GATE x q95); otherwise no clipping occurs, because a
+    cap at max(D) is a no-op and clipping a concentrated vector measurably
+    degrades healthy quantization (tiny-gate logit 0.795 -> 1.43; see the
+    qk-divergence-guards change). Block-0-style heavy tails (raw embedding
+    statistics, r137 incident) exceed the gate by orders of magnitude and
+    are clipped. Then shrinkage toward the clipped mean with coefficient
     ``gamma``: ``D <- (1-gamma)*clip(D, tau) + gamma*mean(clip(D, tau))``.
     A tiny positive floor keeps zero-variance statistics finite and
     positive. Returns a ``(d_in, d_out)`` tuple; with ``d_out_raw=None`` the
@@ -219,7 +233,11 @@ def robust_diag(d_in_raw, d_out_raw=None, *, tau=None, gamma=0.2):
             raise ValueError(f"raw statistics must be 1-D, got shape {vec.shape}")
         np.maximum(vec, _TINY, out=vec)
         if tau is not None:
-            vec = np.minimum(vec, float(tau))
+            cap = float(tau)
+        else:
+            q95 = float(np.percentile(vec, 95))
+            cap = q95 if float(vec.max()) > _TAU_TAIL_GATE * q95 else float("inf")
+        vec = np.minimum(vec, cap)
         mean = vec.mean()
         shrunk = (1.0 - gamma) * vec + gamma * mean
         # The shrinkage is a convex combination, so it cannot exceed the
