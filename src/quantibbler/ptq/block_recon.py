@@ -548,8 +548,20 @@ def reconstruct_block(
         d_in_t, d_out_t = robust_diag(entry.d_in_raw, entry.d_out_raw, tau=cfg.tau, gamma=cfg.gamma)
         w_tilde = (d_out_t[:, None] * w) * d_in_t[None, :]
         w_tilde = w_tilde.astype(dt)
-        res = lb_admm(w_tilde, cfg)
-        bal = magnitude_balance(res.P_u, res.P_v, d_out_t, d_in_t, target=w)
+        if cfg.solver == "svd":
+            # Ablation-measured path (v8 post-mortem): the truncated-SVD
+            # warm start itself, fed through the identical balance+polish.
+            # Lands within ~0.003 cos of the full ADMM run on production
+            # layers while skipping 66-83 s/layer of iterations at rank
+            # 512. Gate + polish + all downstream stages unchanged.
+            u_svd, s_svd, vt_svd = np.linalg.svd(w_tilde, full_matrices=False)
+            r = min(cfg.rank, len(s_svd))
+            p_u = np.ascontiguousarray(u_svd[:, :r] * np.sqrt(s_svd[:r]))
+            p_v = np.ascontiguousarray(vt_svd[:r, :].T * np.sqrt(s_svd[:r]))
+        else:
+            res = lb_admm(w_tilde, cfg)
+            p_u, p_v = res.P_u, res.P_v
+        bal = magnitude_balance(p_u, p_v, d_out_t, d_in_t, target=w)
         # Post-balance divergence gate (qk-divergence-guards): a diverged
         # layer must abort here, before it poisons this block's refinement
         # and every later block's calibration inputs.
@@ -597,7 +609,6 @@ def reconstruct_block(
             fac.s1.copy_(torch.from_numpy(s1_np))
             fac.s2.copy_(torch.from_numpy(s2_np))
         facs[name] = fac
-    del res, bal
     _note_block_progress(0, f"{name_prefix or 'block'}/lb_admm")
     if recorder is not None:
         recorder("lb_admm")

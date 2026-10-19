@@ -280,6 +280,7 @@ def quantized_config(args: argparse.Namespace) -> PTQConfig:
         compute_dtype="float64",
         scale_dtype=args.scale_dtype,
         admm_max_iter=args.max_admm_iter,
+        solver=args.solver,
         stage_pre=StageHyper(1e-4, 4, 0),
         stage_latent=StageHyper(2e-3, 4, 3),
         stage_global=StageHyper(1e-3, 4, 4),
@@ -527,6 +528,13 @@ def main() -> int:
     )
     parser.add_argument("--eval-seqs", type=int, default=5, help="5 batches of 8 = 40 eval rows")
     parser.add_argument("--max-admm-iter", type=int, default=400)
+    parser.add_argument(
+        "--solver",
+        choices=("admm", "svd"),
+        default="admm",
+        help="warm-start source: 400-iter LB-ADMM or plain truncated SVD "
+        "(ablation: within 0.003 cos, orders faster at high rank)",
+    )
     parser.add_argument(
         "--scale-dtype",
         choices=("float16", "float32"),

@@ -13,6 +13,7 @@ anything else raises.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 import numpy as np
 
@@ -101,6 +102,11 @@ class PTQConfig:
     divergence_band_factor: float = 10000.0
     polish_rounds: int = 4
     admm_max_iter: int = 400
+    # SVD path (v8 post-mortem ablation): plain truncated SVD warm start
+    # through the same balance+polish lands within 0.003 cos of the full
+    # 400-iteration LB-ADMM (measured on production layers) while ADMM
+    # spends 66-83 s/layer at rank 512. Off = SVD init, balance, polish.
+    solver: Literal["admm", "svd"] = "admm"
     rho_start: float = 1e-2
     rho_end: float = 1e2
     admm_lam: float = 1e-6

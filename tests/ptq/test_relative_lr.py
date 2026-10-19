@@ -69,6 +69,20 @@ def test_scn_ste_relative_lr_preserves_scale_classes():
     )
 
 
+def test_scn_e2e_gate_svd_solver_path():
+    """The solver='svd' path must pass the full e2e gate: the ablation
+    branch (truncated SVD -> balance -> polish) flows through capture,
+    STE/KD, export, reload and the corruption bounds identically."""
+    import dataclasses
+
+    from quantibbler.ptq.e2e import gate_config, run_e2e_gate
+
+    cfg = dataclasses.replace(gate_config(), solver="svd")
+    result = run_e2e_gate(cfg=cfg)
+    assert result["bits_identical"], result
+    assert float(result["logit_delta"]) < 1.0, result
+
+
 def test_scn_polish_gamma_rebalance_is_product_invariant():
     """The exit rebalance must leave diag(s1)Ub Vb^T diag(s2) unchanged
     (to f64 round-off) while collapsing the median-magnitude split."""
