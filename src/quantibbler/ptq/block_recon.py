@@ -478,13 +478,31 @@ def reconstruct_block(
         )
         u0 = torch.from_numpy(np.ascontiguousarray(bal.U))
         v0 = torch.from_numpy(np.ascontiguousarray(bal.V))
+        # STE-boundary scale fold: TuneLatentSTE's Adam lr is ABSOLUTE
+        # ([NQ] App. C), while balanced latents sit at whatever scale the
+        # preconditioned solve left them (~1e-4 on production statistics;
+        # Eq. 8 scales absorb the magnitude, so the latents themselves stay
+        # tiny). An lr=2e-3 step on a 1e-4 latent is a ~20x perturbation
+        # per step — it bulldozes the sign pattern past random instead of
+        # refining it (exported layers measured cos BELOW the random-sign
+        # floor). Folding the latents' global scale into s1 is an EXACT
+        # refold of the layer function Wq = diag(s1) sign(U) sign(V)^T
+        # diag(s2) (up to global sign, which the scales re-absorb), and
+        # puts the latents in the O(1) class the lr was calibrated in.
+        latent_scale = float(np.mean(np.abs(bal.U)))
+        if np.isfinite(latent_scale) and latent_scale > 0.0:
+            u0 = u0 / latent_scale
+            bal_s1 = np.asarray(bal.s1, dtype=np.float64) * latent_scale
+        else:
+            bal_s1 = np.asarray(bal.s1, dtype=np.float64)
+        s1_np = np.ascontiguousarray(bal_s1)
         bias0 = original_bias[name]
         fac = FactorizedLinear(
             u0, v0, bias0 if bias0 is not None else torch.zeros(linear.weight.shape[0])
         )
-        # Scales initialized from Eq. 8.
+        # Scales initialized from Eq. 8 (with the latent scale folded in).
         with torch.no_grad():
-            fac.s1.copy_(torch.from_numpy(np.ascontiguousarray(bal.s1)))
+            fac.s1.copy_(torch.from_numpy(s1_np))
             fac.s2.copy_(torch.from_numpy(np.ascontiguousarray(bal.s2)))
         facs[name] = fac
     del res, bal

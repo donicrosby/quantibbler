@@ -232,6 +232,22 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
     if r > min(dout, din):
         raise ValueError(f"rank r={r} exceeds min(dout, din)={min(dout, din)}")
 
+    # Scale normalization: the rho schedule and epsilon are ABSOLUTE
+    # constants (A-2/A-3), so the solve must happen in the O(1) scale
+    # class they were calibrated in. Robust preconditioning on real
+    # calibration statistics can crush ||W~||_F to ~1e-4 (r137: s1~2e-4,
+    # s2~0.3), where the consensus term dominates the data term by ~1e8
+    # and the solve "converges" to mush in a handful of iterations
+    # (measured: 4/400 iterations, binary cos 0.02 — every production
+    # artifact ever exported had cos ~0.001 per layer). Solving on
+    # W~/||W~||_F and rescaling the factors on exit is exactly
+    # scale-equivariant; fixture-scale targets (||W~||~O(1)) are no-ops.
+    target_scale = float(np.linalg.norm(w))
+    if not (np.isfinite(target_scale) and target_scale > 0.0):
+        target_scale = 1.0  # degenerate all-zero target: keep legacy behavior
+    if target_scale != 1.0:
+        w = w / target_scale
+
     trace = ADMMTrace()
     u = np.zeros((dout, r), dtype=dt)
     v = np.zeros((din, r), dtype=dt)
@@ -292,10 +308,10 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
         prev_res = trace.residuals[-1] if trace.residuals else prev_res
 
     return ADMMResult(
-        U=u,
-        V=v,
-        P_u=u + lu,
-        P_v=v + lv,
+        U=u * target_scale,
+        V=v * target_scale,
+        P_u=(u + lu) * target_scale,
+        P_v=(v + lv) * target_scale,
         n_iter=len(trace.residuals),
         converged=converged,
         trace=trace,

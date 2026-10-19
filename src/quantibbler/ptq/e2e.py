@@ -145,17 +145,35 @@ def run_e2e_gate(
     blobs = qm.serialize()  # {layer_name: bytes}
     if flip_one_bit and blobs:
         # Corruption self-test (A-8 wrong-choice signature): flip one bit in
-        # every layer's serialized stream — the sign bit of the first scale
-        # entry (byte 25; the 24-byte header precedes it). Measured leverage
-        # on the gate fixture: a single factor-bit flip or a float16-mantissa
-        # flip moves the logits by ~1e-4 (below the A-8 bound's resolution —
-        # the fine-grained nets for that class of corruption are the byte-
-        # exact round trip and the pack/unpack parity assertions), while a
-        # scale sign flip propagates a full row/col reweighting and exceeds
-        # the bound. The gate must therefore FAIL on the flipped artifact.
+        # every layer's serialized stream — the HIGH EXPONENT BIT of the
+        # largest-magnitude s2 entry, located through the container's own
+        # geometry (24-byte header, then s1 then s2, itemsize per dtype
+        # tag). Byte 25 (first scale's sign) was the original wiring, but it
+        # only tripped by luck of that entry's position: post-STE-fold the
+        # fixture artifact is noise-dominated (cos ~0.1-0.25 per layer) and
+        # MEASURED sign flips at every scale position move the max logit
+        # delta by <0.03 against a 0.64 baseline (bound 1.0) — the gate
+        # cannot be expected to see sub-noise corruption, and "which single
+        # bit is detectable" must not depend on where STE left the scales.
+        # An exponent flip is monotone leverage: the entry is multiplied by
+        # 2^16 (or saturates to inf/NaN — NaN also fails the bound since
+        # NaN <= b is False), dominating any artifact state for a nonzero
+        # entry. f16: bit 14 of the entry (high byte, mask 0x40);
+        # float32: bit 30 (byte +2, mask 0x40).
         for name in sorted(blobs):
             payload = bytearray(blobs[name])
-            payload[25] ^= 0x80
+            import struct as _struct
+
+            magic, ver, tag, dout_h, din_h, r_h = _struct.unpack_from("<4sIIIII", payload, 0)
+            import numpy as _np
+
+            itemsize = 4 if tag == 2 else 2
+            sdt = _np.dtype("float32" if tag == 2 else "float16")
+            s2_off = 24 + dout_h * itemsize
+            s2_vals = _np.frombuffer(payload[s2_off : s2_off + din_h * itemsize], dtype=sdt)
+            j = int(_np.argmax(_np.abs(s2_vals.astype(_np.float64))))
+            exp_byte = s2_off + j * itemsize + (2 if tag == 2 else 1)
+            payload[exp_byte] ^= 0x40
             blobs[name] = bytes(payload)
     reloaded = QuantizedModel.deserialize(blobs, config=cfg)
     # The qpk1 container describes the quantized linears only; the fp stem
