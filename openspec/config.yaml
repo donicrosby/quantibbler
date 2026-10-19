@@ -73,7 +73,10 @@ context: |
 
   - The only authoritative references are the papers pinned in docs/papers/.
     Cite them by paper key and section: [LB] = littlebit-2506.13771v5,
-    [NQ] = nanoquant-2602.06694v3, [LB2] = littlebit2-2603.00042v2.
+    [NQ] = nanoquant-2602.06694v3, [LB2] = littlebit2-2603.00042v2,
+    [FA] = flashattention-2205.14135v2 (tiled exact attention, pinned
+    2026-10-18), [SA] = sageattention-2410.02367v9 (INT8 attention,
+    pinned 2026-10-18).
   - The shared weight representation is W ~= diag(s1) @ (Ub @ Vb^T) @ diag(s2)
     with binary factors Ub in {-1,+1}^(dout x r), Vb in {-1,+1}^(din x r)
     and full-precision scale vectors s1, s2 ([NQ] Sec 3.1; [LB] W_hat_pri
