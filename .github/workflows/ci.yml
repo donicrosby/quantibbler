@@ -1,0 +1,302 @@
+# The repo's first independent referee: six jobs on every pull request and every
+# push to main, plus one manual seed job.
+#
+# Why the shapes below are what they are:
+#   * `pull_request` + `push: [main]`, never `pull_request_target` — the workflow
+#     executes only content already at the head it runs on, so it adds no
+#     PR-content execution surface, and this repo's direct-push landing practice
+#     still gets refereed.
+#   * No secrets, anywhere, and `permissions: contents: read` — the PR-run attack
+#     surface is secret-free by construction, not by discipline.
+#   * Every third-party action is pinned by full commit SHA, resolved against the
+#     pinned repo's head when this workflow was authored (see the per-line
+#     comments for repo + release provenance). Never a tag, never a branch.
+#   * `defaults.run.shell` puts every shell step under `bash -euo pipefail`
+#     structurally — a step cannot forget it — so a green filtered tail can never
+#     mask a red gate.
+#   * Every command body below has been executed locally in the sandbox and its
+#     real output recorded in openspec/changes/qk-ci-referee/tasks.md. The YAML
+#     contains no command that has never been run.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+env:
+  UV_VERSION: "0.12.5"
+  OPENSPEC_VERSION: "1.14.3"
+  HF_HUB_VERSION: "2.2.0"
+  # The seeded weights cache. Pinned to the checkpoint repo + revision and the
+  # dataset repo + revision the abort leg's tooling asserts
+  # (tools/ci/abort_leg.py::PINNED_REVISIONS — a test pins the two together).
+  # A revision bump = a new key suffix, verified by the seed job before it saves.
+  HF_CACHE_KEY: hf-abort-leg-qwen3-0.6b-c1899de289a04d12100db370d81485cdf75e47ca-wikitext-b08601e04326c79dfdd32d625aee71d232d685c3-v1
+
+jobs:
+  lean-python:
+    name: lean python (dependency floor, torch proven absent)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # astral-sh/setup-uv v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      # lean_python_interpreter_built_without_extras: a fresh venv from the
+      # shipped dependency floor — not a hand-pruned environment, not a synced
+      # one with extras. Deliberately NOT `--locked` and not `uv sync`: this leg
+      # floats on purpose, because "does the shipped floor still work" is its
+      # signal. Do not "fix" it into determinism.
+      - name: Build the lean interpreter (uv venv + pip install -e . pytest, no extras)
+        run: |
+          rm -rf .venv-lean
+          uv venv --python 3.12 .venv-lean
+          VIRTUAL_ENV="$PWD/.venv-lean" uv pip install -e . pytest
+      # lean_python_asserts_absence_before_skips: absence is proven in THIS
+      # interpreter before any count is parsed. A torch-synced run reporting
+      # "lean" numbers is the failure mode this step exists to make impossible.
+      - name: Prove torch/transformers/tokenizers are absent before believing any count
+        run: |
+          if .venv-lean/bin/python -c "import torch, transformers, tokenizers"; then
+            echo "::error::this 'lean' interpreter can import torch/transformers/tokenizers - every count below would be a false lean"
+            exit 1
+          fi
+          echo "absence proven: torch, transformers and tokenizers are not importable here"
+      # Tier skips are documented values, not ignorable noise: the lean tier's
+      # legitimate skip count is asserted exactly (16 = the kernels Rust leg,
+      # which needs the maturin extension built by a different extra).
+      - name: pytest (lean tier) and the skip-count assertion
+        run: |
+          if .venv-lean/bin/python -m pytest --color=no -q -rs > pytest-lean.log 2>&1; then rc=0; else rc=$?; fi
+          cat pytest-lean.log
+          .venv-lean/bin/python tools/ci/pytest_summary.py \
+            --log pytest-lean.log --pytest-rc "$rc" --expect-skipped 16
+
+  full-python:
+    name: full python (torch + hf + kernels, zero skips)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # astral-sh/setup-uv v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - name: Sync the explicit extras (never a bare uv sync, never unlocked)
+        run: uv sync --extra torch --extra hf --extra kernels --locked
+      # This is the job that refuses every pre-extras "green suite": a skipped
+      # ptq tier is a hole, and the summary line is parsed, not eyeballed.
+      - name: pytest (full suite) and the zero-skip assertion
+        run: |
+          if uv run --no-sync pytest --color=no -q -rs > pytest-full.log 2>&1; then rc=0; else rc=$?; fi
+          cat pytest-full.log
+          uv run --no-sync python tools/ci/pytest_summary.py \
+            --log pytest-full.log --pytest-rc "$rc" --expect-skipped 0
+
+  rust-kernels:
+    name: rust kernels (test, clippy -D warnings, fmt, maturin build)
+    runs-on: ubuntu-latest
+    env:
+      MANIFEST: crates/quantibbler-kernels/Cargo.toml
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout v7.0.1
+      # dtolnay/rust-toolchain publishes no release tags; the moving `v1` tag was
+      # resolved to this commit when the workflow was authored. The toolchain
+      # version is the one every rust gate below was rehearsed with (the crate's
+      # MSRV is documented separately in AGENTS.md / openspec config).
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # dtolnay/rust-toolchain v1
+        with:
+          toolchain: 1.98.1
+          components: clippy, rustfmt
+      - name: cargo test
+        run: cargo test --manifest-path "$MANIFEST" --all-targets --locked
+      - name: cargo clippy -D warnings
+        run: cargo clippy --manifest-path "$MANIFEST" --all-targets --locked -- -D warnings
+      - name: cargo fmt --check
+        run: cargo fmt --manifest-path "$MANIFEST" --all -- --check
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # astral-sh/setup-uv v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: maturin build (the wheel the Python face ships from)
+        run: uv run --locked maturin build --manifest-path "$MANIFEST"
+
+  openspec:
+    name: openspec (every active change, strict, one id per invocation)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout v7.0.1
+      - name: node and npx are present
+        run: |
+          node --version
+          npx --version
+      # One id per invocation, never a two-argument or silent-skip form. The CLI
+      # version is pinned to the semantics this repo's config.yaml was authored
+      # against, and a failed install fails the job instead of validating
+      # nothing. An empty glob is a failure, not a green: a referee that checks
+      # zero changes has proved nothing.
+      - name: validate every active change dir strictly
+        run: |
+          validated=0
+          for dir in openspec/changes/*/; do
+            id="$(basename "$dir")"
+            if [ "$id" = "archive" ]; then
+              continue
+            fi
+            echo "== openspec validate $id --strict"
+            npx --yes "@fission-ai/openspec@${OPENSPEC_VERSION}" validate "$id" --strict
+            validated=$((validated + 1))
+          done
+          if [ "$validated" -eq 0 ]; then
+            echo "::error::no active openspec change was validated - the glob matched nothing"
+            exit 1
+          fi
+          echo "validated $validated active change(s) strictly"
+
+  driver-smoke:
+    name: driver smoke (plumbing only, offline tiny fixture)
+    runs-on: ubuntu-latest
+    env:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # astral-sh/setup-uv v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - name: Sync the extras the driver needs (torch + hf, locked)
+        run: uv sync --extra torch --extra hf --locked
+      # Plumbing-only by measurement: the random-init fixture's next-token
+      # distribution is already uniform (rank-1 quantized ratio 1.0000006; a
+      # zeroed o_proj moves its PPL by 3 ppm), so this job proves the gate's code
+      # path executes end-to-end and that the report and the exit code agree. It
+      # makes no detection and no abort-path claim - those are the abort leg's.
+      - name: driver smoke on the tiny offline fixture
+        run: |
+          uv run --no-sync python tools/ci/driver_smoke.py --out "$RUNNER_TEMP/smoke-out"
+
+  abort-leg:
+    name: abort leg (real checkpoint, weights cached, offline)
+    runs-on: ubuntu-latest
+    env:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # astral-sh/setup-uv v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - name: Sync the extras the driver needs (torch + hf, locked)
+        run: uv sync --extra torch --extra hf --locked
+      # fail-on-cache-miss: a cold cache fails the job. Never a silent live
+      # download - that would make the leg network-dependent and let a miss pass
+      # quietly, which is the disease this repo just burned.
+      - name: Restore the seeded weights cache (fail closed on a miss)
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # actions/cache v6.1.0
+        with:
+          path: hf-cache
+          key: ${{ env.HF_CACHE_KEY }}
+          fail-on-cache-miss: true
+      # The recorded abort command, executed offline, with the abort asserted
+      # from the real process: abort before block 3, minutes not tens of minutes,
+      # status failed + probe_abort fields + the trajectory so far, nonzero exit.
+      - name: run the recorded abort command and assert the abort
+        run: |
+          uv run --no-sync python tools/ci/abort_leg.py \
+            --cache "$PWD/hf-cache" --out "$RUNNER_TEMP/abort-out"
+
+  seed-weights:
+    name: seed the weights cache (manual, the one network-allowed job)
+    # workflow_dispatch only: a dispatch run executes the workflow file at the
+    # default branch's head, so no pull-request content can reach this job, and
+    # only a user with write access can trigger it. This is the single place in
+    # this workflow where fetching weights is allowed; every other job is
+    # offline, and the abort leg fails closed rather than downloading.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # astral-sh/setup-uv v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      # Idempotency gate: a dispatch of an already-seeded key is a GREEN no-op
+      # instead of a red "cache already exists" at the save step (re-warming is a
+      # routine operation — orchestrator task 9 may run it more than once before
+      # the first green). lookup-only reads the cache index without downloading.
+      - name: Is this key already seeded?
+        id: seeded
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # actions/cache v6.1.0
+        with:
+          path: hf-cache
+          key: ${{ env.HF_CACHE_KEY }}
+          lookup-only: true
+      - name: Fetch the pinned snapshots (live network here and only here)
+        if: steps.seeded.outputs.cache-hit != 'true'
+        run: |
+          uvx --from "huggingface-hub==${HF_HUB_VERSION}" hf download Qwen/Qwen3-0.6B \
+            --revision c1899de289a04d12100db370d81485cdf75e47ca --cache-dir "$PWD/hf-cache"
+          uvx --from "huggingface-hub==${HF_HUB_VERSION}" hf download Salesforce/wikitext \
+            --revision b08601e04326c79dfdd32d625aee71d232d685c3 \
+            --repo-type dataset --include "wikitext-2-raw-v1/*" --cache-dir "$PWD/hf-cache"
+          du -sh hf-cache
+          # The fetch is pinned to the same revisions the cache key names, so this
+          # loop is VERIFICATION, not detection: a miss means an upstream
+          # force-push or a fetch that lost its pin, and the recovery is bumping
+          # the pins and the key suffix together.
+          #
+          # It also restores the branch ref. A revision-pinned fetch writes
+          # snapshots/<sha>/ but NO refs/, and the driver resolves
+          # `--model Qwen/Qwen3-0.6B` offline THROUGH refs/main — measured: the
+          # revision-pinned cache alone would leave the abort leg unable to resolve
+          # the repo id. refs/main holds the bare 40-char sha, no newline, exactly
+          # as a branch fetch writes it.
+          for pair in \
+            "models--Qwen--Qwen3-0.6B:c1899de289a04d12100db370d81485cdf75e47ca" \
+            "datasets--Salesforce--wikitext:b08601e04326c79dfdd32d625aee71d232d685c3"; do
+            repo_dir="${pair%%:*}"
+            revision="${pair##*:}"
+            snapshot="hf-cache/$repo_dir/snapshots/$revision"
+            if [ ! -d "$snapshot" ]; then
+              echo "::error::the pinned fetch produced no $snapshot - upstream force-pushed this revision, or the fetch lost its pin; bump the pins and the key suffix together"
+              exit 1
+            fi
+            mkdir -p "hf-cache/$repo_dir/refs"
+            printf '%s' "$revision" > "hf-cache/$repo_dir/refs/main"
+            echo "seeded $snapshot (refs/main -> $revision)"
+          done
+      - name: Already seeded at this key
+        if: steps.seeded.outputs.cache-hit == 'true'
+        run: |
+          echo "already seeded at $HF_CACHE_KEY - nothing to fetch, nothing to save"
+          echo "re-warm (after cache eviction) means: bump the key suffix and the pinned revisions together"
+      - name: Save the weights cache
+        if: steps.seeded.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # actions/cache v6.1.0
+        with:
+          path: hf-cache
+          key: ${{ env.HF_CACHE_KEY }}

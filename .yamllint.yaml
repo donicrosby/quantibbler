@@ -1,0 +1,12 @@
+# yamllint configuration for this repo's YAML.
+#
+# The CI workflow is the only YAML the project owns that a tool must parse at
+# authoring time (`openspec/` is Markdown, `Cargo.toml`/`pyproject.toml` are TOML),
+# so this config exists to make `yamllint .github/workflows/ci.yml` a clean,
+# repeatable check: prose comments and long `run:` lines are deliberate here, and
+# the default 80-column ceiling would otherwise bury real findings in warnings.
+extends: relaxed
+
+rules:
+  line-length:
+    max: 200
