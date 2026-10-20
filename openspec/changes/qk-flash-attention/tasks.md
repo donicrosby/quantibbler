@@ -183,11 +183,44 @@ gate suite.
       and `ci.yml` moved `b637a0601e3b` → `8cfb8511f5e3` with the fresh transfer
       hashes recorded in the active `qk-ci-referee` change's tasks. The pair is
       CI-enforced, not merely green locally.
-- [ ] 2.3 Third-face cross-check: run the cubek `cpu-reference` feature
+- [x] 2.3 Third-face cross-check: run the cubek `cpu-reference` feature
       against our NumPy reference on the fixture battery (both CPU, exact
       f64-class comparison where the reference allows) — independent
       implementations agreeing is the strongest available guard against a
       shared misreading of the conventions; record deltas.
+      — **LANDED, with the budget reformulated exactly as pre-registered.**
+      `cargo test -p quantibbler-kernels --features cubek-cpu-reference
+      --test cubek_cpu_reference_parity --offline` → **3 passed, 0 failed**,
+      with **9/9 fixture cases executing on CPU** (the old single-clause budget
+      reddened at case #0 and stopped the battery there, so cases #1-#8 had
+      never run). The budget shape is now the two-part rule this change already
+      accepted for the Python and device faces, LOCAL to this file: clause 1
+      `max|a-e| <= 1e-5 * max(|a|,|e|)`, clause 2 per-element `<= 1e-5` within
+      `BAND = 1e-1` of the row max. **`RTOL` is unchanged — the shape changed,
+      not the number** — and the unbanded per-element statistic is still printed
+      as a RECORDED DELTA instead of being dropped. Measured margins: worst
+      clause 1 **2.004e-07** (50x under), worst clause 2 **3.941e-06** (2.5x
+      under). Branch selection, the per-case table for BOTH faces, the
+      element-level localization, and the citation defect on the
+      pre-registration's `atol + rtol·|ref|` citation (no such rule was ever
+      written: the rule text occurs once in the openspec corpus, in the sentence
+      citing it, and `atol` is a tolerance formalism nowhere in the repo — the
+      other `atol` tokens are numpy `allclose(atol=…)` call sites in `tests/ptq`)
+      are recorded in design.md, "2.3 witness budget — control result and
+      landing"; @planner ruled to keep the landed gate and fix the citation.
+      *Proof-of-power row landed as a mandatory component* (sec-eng): one
+      injected O(1) defect of the device battery's family — GQA mapping
+      replaced by modulo, pushed through the REAL reference — misses BOTH
+      clauses by **7.6e+05x** the budget, with the healthy leg asserted first so
+      the row cannot pass against a broken baseline. The shared GPU budget
+      (`gpu_attention_parity.rs`, sha256 `315b7cdd25b2…`, byte-identical) and
+      the clamp-divergence tripwire are both untouched; one defect class per
+      budget.
+      *Two further defects fixed in the same file:* `expand_heads` was
+      batch-blind (case #5, the first batch=2 case ever reached, failed the
+      length assert `160 != 80`), and the power row's first draft targeted a
+      fixture with one kv head, where the injected mapping is a no-op — its own
+      assert caught that before it could pass vacuously.
 - [ ] 2.4 Re-sync the PyO3 face (`uv sync --reinstall-package
       quantibbler-kernels`) and confirm the CHANGED behavior (new symbol
       computes, not just imports).

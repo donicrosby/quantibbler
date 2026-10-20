@@ -1410,6 +1410,7 @@ dependencies = [
  "cubecl-common",
  "cubek-matmul",
  "cubek-std",
+ "cubek-test-utils",
  "half",
  "serde",
 ]
@@ -1437,6 +1438,21 @@ dependencies = [
  "cubecl",
  "cubecl-common",
  "cubek-tile",
+]
+
+[[package]]
+name = "cubek-test-utils"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2cd459f7b738a0be21e3097554b0e28f042b010f57c5a426308826c1165ae90f"
+dependencies = [
+ "bytemuck",
+ "cubecl",
+ "cubecl-common",
+ "cubek-tile",
+ "half",
+ "rand 0.10.3",
+ "serde",
 ]
 
 [[package]]
@@ -3817,6 +3833,7 @@ version = "0.1.0"
 dependencies = [
  "cubecl",
  "cubek-attention",
+ "cubek-test-utils",
  "nalgebra",
  "numpy",
  "pyo3",

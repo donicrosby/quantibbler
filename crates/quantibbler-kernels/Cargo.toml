@@ -14,6 +14,16 @@ crate-type = ["cdylib", "rlib"]
 extension-module = ["pyo3/extension-module"]
 gpu = ["dep:cubecl", "dep:cubek-attention"]
 fast-cpu = ["dep:wide", "dep:rayon"]
+# Third parity face (change qk-flash-attention task 2.3): cubek's OWN naive
+# CPU reference implementation, run against our NumPy reference on the shared
+# fixture battery — two independent implementations agreeing is the strongest
+# available guard against a shared misreading of the conventions. It is a
+# separate OPT-IN feature (not `gpu`) on purpose: the reference path needs no
+# device, and keeping it off the default build keeps cubecl's test/CPU support
+# crates out of the shipped graph entirely. `cubek-test-utils` rides as an
+# optional dependency with it (its `HostData` is the reference's data carrier),
+# so nothing extra is built or locked unless this face is explicitly asked for.
+cubek-cpu-reference = ["dep:cubecl-ref", "cubek-attention/cpu-reference", "dep:cubek-test-utils"]
 default = []
 
 [dependencies]
@@ -27,6 +37,22 @@ cubecl = { version = "0.11.0", features = ["hip"], optional = true }
 # its cuda/wgpu/metal backends) out of our HIP-only build; `std` is what the
 # launcher actually needs.
 cubek-attention = { version = "0.3.0", default-features = false, features = ["std"], optional = true }
+# Only reachable through the opt-in `cubek-cpu-reference` feature (task 2.3):
+# cubek's CPU reference hands results back in this crate's `HostData`. Optional
+# on purpose — a default build must not pay for it.
+cubek-test-utils = { version = "0.3.0", optional = true, default-features = false, features = ["std"] }
+# The third parity face's own cubecl edge: same crate and version as the `gpu`
+# face's, but WITHOUT the `hip` feature our gpu line declares — so the face
+# compiles with no ROCm toolchain. Cargo unifies both edges onto one cubecl, so
+# `gpu` still gets its HIP backend while `cubek-cpu-reference` alone resolves
+# hip-free: measured with `cargo tree -p quantibbler-kernels --features
+# cubek-cpu-reference` — cubecl-core/runtime/ir/std and cubecl-wgpu present,
+# cubecl-hip and hip-sys absent. What does NOT go away is wgpu: cubecl 0.11's
+# manifest defines `test-runtime = ["wgpu"]` and `cubek-test-utils` requires
+# test-runtime, so every consumer of the test utilities carries cubecl's wgpu
+# backend. That one is portable software with no hardware or SDK requirement,
+# unlike the HIP toolchain this edge exists to avoid.
+cubecl-ref = { package = "cubecl", version = "0.11.0", default-features = false, optional = true }
 wide = { version = "0.7", optional = true }
 rayon = { version = "1.10", optional = true }
 

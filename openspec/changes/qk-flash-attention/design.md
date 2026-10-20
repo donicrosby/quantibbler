@@ -253,3 +253,216 @@ note — the specs' parity gates do not care which substrate computes.
   mechanism), never a tolerance change — nobody "fixes" run-to-run drift by
   loosening the 1e-5 budget; the budget is the parity contract and stands
   independent of determinism.
+
+## 2.3 source-read findings (2026-10-27 — status: source-read, measured
+  deltas land with the build result)
+
+- **Three conventions agree with ours, verified against the source before
+  trusting the face:** scale is `1/sqrt(head_dim)` (not `val_dim`);
+  causality is `j + seq_q > i + seq_kv`, which reduces exactly to our
+  `j > i` at equal lengths; K/V are indexed by the *query* head count,
+  so the GQA layout is the same consecutive-group mapping our reference
+  documents (`head h` reads kv head `h / group`).
+- **One pinned divergence, by design on their side:** cubek's
+  cpu-reference clamps the output denominator (`l > eps ? l : eps`), so
+  a fully-masked row returns **0.0** with `lse = −inf`, while our
+  executable specification computes the dense `0/0` and yields **NaN**
+  position-for-position (task 1.4's contract). The two implementations
+  agree on `lse` and diverge by construction on the row values. A
+  dedicated test pins BOTH sides explicitly — cubek 0.0 + lse −inf on
+  one side, locally evaluated dense 0/0 NaN on the other — so a future
+  cubek release moving either side reds the test. **Response rule
+  (bug-hunter, endorsed):** a red from upstream is answered with a
+  deliberate re-pin recording the convention change — never a loosened
+  assert. Over-strict failure direction, now applied to a third
+  party's source instead of ours.
+- **The third face is a true CPU witness:** the reference routine takes
+  `HostData` and an `AttentionProblem`, needs no client and no device,
+  and is the only face that can run without gfx1151. It ships behind
+  the new opt-in `cubek-cpu-reference` feature (cubek-test-utils as an
+  optional dep; nothing built or shipped by default). The purity pair
+  reads per-package `cargo tree` graphs that name none of this — and
+  the one hazardous route (the server enabling the kernels crate's
+  opt-in feature) already reds the negative half's crate-name
+  backstop, so no guard extension is needed (bug-hunter, measured on
+  the working tree).
+- **Resolved (2026-10-27, owner: sec-eng) — the third face RUNS in CI,
+  hip-free, under a pinned invocation.** Coder closed the gate inside
+  the opt-in feature: the face resolves its own `cubecl-ref` edge
+  (same crate and version, minus `hip`), measured — `cargo tree -p
+  quantibbler-kernels --features cubek-cpu-reference` carries no
+  `cubecl-hip`/`hip-sys`, and `gpu` still unifies onto HIP via Cargo's
+  edge unification, so the shipped config is untouched. Stated
+  residual, not overclaimed: wgpu does NOT go away — cubecl 0.11's
+  `test-runtime = ["wgpu"]` and cubek-test-utils requires it — but
+  wgpu is portable software with no SDK requirement, and the reference
+  never launches it; the manifest comment and test header say exactly
+  that instead of the wrong-by-one-word "pure CPU." The load-bearing
+  condition (bug-hunter, measured): the flag shape IS the invariant —
+  `-F cubek-cpu-reference` alone gives the hip-free graph, while
+  `-F gpu,cubek-cpu-reference` unifies features across both edges and
+  puts hip back (2 refs). Ruling shape: (1) own CI step, own flag —
+  `cargo test --locked -p quantibbler-kernels --features
+  cubek-cpu-reference --test cubek_cpu_reference_parity` — never
+  bundled, never `--all-features`; (2) the flag text pinned in the
+  referee test like the `-p` package names, battery rows rejecting
+  `--all-features` and any gpu-bundled form on this gate; (3)
+  rehearsed locally with real output before the YAML gains a line;
+  (4) own scenario delta against `qk-ci-referee`, queued AFTER 2.3
+  lands with measured numbers — a CI wiring change, not a rider on the
+  parity landing. Witness residual stated plainly: it catches OUR
+  misreadings and cubek's convention drift, not a bug cubek's two
+  faces share — cross-check, not oracle.
+
+## Pre-registered decision rule: the witness parity budget (2026-10-27,
+  decided BEFORE the control experiment lands)
+
+The 2.3 parity miss (fixture #0: `inf_norm_rel 1.146e-5` vs the 1e-5
+budget, ~3 ulp of the f32 v-scale accumulator amplified by the
+output-vs-accumulator scale) has exactly two branches, and the
+spec consequence of each is fixed now, not after the data:
+
+- **Branch A — our own f32 scalar face CLEARS 1e-5 on the same
+  fixture:** cubek's naive CPU reference is the genuinely looser
+  implementation. Consequence: a recorded delta (measured looseness,
+  row-structure evidence from the element-wise diff), and a LOCAL
+  witness tolerance reformulated in the change's accepted two-part
+  gate form, scoped to the CPU-witness test file ONLY.
+  The shared GPU budget is untouched (it measured 9.0e-08 — 13× under
+  — and is a different problem class).
+- **Branch B — our f32 scalar face ALSO misses on the same fixture:**
+  the inf-norm-relative-to-output-norm formulation is mis-built for a
+  cross-implementation f32-vs-f64 comparison. Consequence: the SAME
+  local reformulation in the two-part gate form, with the
+  mis-formulation
+  itself recorded as the defect — still scoped to the witness file,
+  still never the shared GPU budget.
+
+Invariant of both branches, pinned ahead of time: the clamp-divergence
+tripwire is an independent claim and stays untouched — a budget
+reformulation must never be narrated as touching what the tripwire
+guards. One defect class per budget; independent claims stay
+independently pinned. **Proof-of-power row (sec-eng, 2026-10-27,
+accepted): whichever branch lands, the reformulated LOCAL witness
+budget ships with a cheap power test — inject one O(1) defect (same
+mutation family as the GPU battery) and assert it still misses the new
+budget by orders of magnitude.** Bug-hunter's rule pins the widening's
+*scope*; this pins its *cost* — a widened tolerance that could quietly
+swallow an O(1) convention defect would leave the witness green and
+useless, and that is proven in one test, not argued. "Third face
+agrees" remains unclaimed until one branch is measured.
+
+**Adjudication and ruling (2026-10-27, after the control):** the
+selector turned out under-determined — both branch tests held on the
+same measured number (our face's unbanded 3.001e-06 both "clears 1e-5"
+and "lands in the 1e-6..1e-5 band") — so the substance was decided by
+the battery-wide control: the unbanded clause is unusable for ANY
+correct f32 face (our own face over by up to 32.6× on 4/9 cases),
+which is Branch B's defect, while cubek's looseness (0.5–6.0×,
+sub-ulp at the accumulator scale) is Branch A's reading — true but far
+too small to be the red, recorded as a delta, not the defect. The
+landed budget is the change's two-part gate LOCAL to the witness test
+file, RTOL unchanged — shape changed, not the number. **Citation
+defect, owned and ruled:** this section originally cited "the
+design's own `atol + rtol·|ref|` rule" — no such rule was ever written
+(the rule text occurs once in the openspec corpus, in the citing
+sentence; `atol` exists in the repo only as numpy `allclose` call
+sites in tests/ptq, never as a tolerance formalism; sec-eng echoed the
+phantom in the proof-of-power addendum without grepping). Ruling:
+keep the landed two-part gate — one tolerance formalism across all
+three faces beats introducing a second mid-change — and fix the
+citation text, not the code. Lesson extended to citations: a rule you
+can't grep doesn't exist, no matter which lane said it.
+
+## 2.3 witness budget — control result and landing (2026-10-27, measured;
+branch selector adjudicated)
+
+**Control (real output, `uv run python /opt/data/tmp/control_f32_scalar_face.py`).**
+Our own f32 attention face — the same algorithm in f32, normalizing at the end —
+against the recorded f64 oracle on fixture #0, read by the witness statistic:
+**inf-norm 1.759e-07, banded 7.206e-07, unbanded per-element 3.001e-06**
+(identical at tile block 64/8/1; 5.11e-06 / 5.46e-06 at block 2/4). cubek's
+reference on the same case: **1.759e-07 / 7.206e-07 / 1.146e-05**. Clause 1 and
+clause 2 are *identical to the digit* for both faces; the unbanded per-element
+statistic is the only one that separates them.
+
+**The pinned selector is under-determined on this fixture, and the measurement
+says so.** Branch A's written test is "our own f32 scalar face CLEARS 1e-5" —
+3.0e-06 clears. Branch B's (bug-hunter) is "lands in the 1e-6..1e-5 band" —
+3.0e-06 is in the band. Both threshold conditions hold on the same number, so
+fixture #0 cannot select between the two recorded defect narrations. The
+battery-wide control decides the substance instead — all 9 cases, both faces,
+`/opt/data/tmp/control_all_cases.py`:
+
+| case | ours banded | cubek banded | ours unbanded | cubek unbanded | ratio |
+|------|-------------|--------------|---------------|----------------|-------|
+| 0 | 7.206e-07 | 7.206e-07 | 3.001e-06 | 1.146e-05 | 3.8x |
+| 1 | 3.522e-07 | 2.953e-07 | 5.958e-07 | 2.953e-07 | 0.5x |
+| 2 | 1.552e-06 | 1.334e-06 | 3.263e-04 | 2.126e-04 | 0.7x |
+| 3 | 6.415e-07 | 5.514e-07 | 5.812e-06 | 5.006e-06 | 0.9x |
+| 4 | 2.279e-06 | 3.941e-06 | 6.236e-06 | 1.386e-05 | 2.2x |
+| 5 | 1.512e-06 | 7.684e-07 | 2.078e-05 | 3.144e-05 | 1.5x |
+| 6 | 6.988e-07 | 1.259e-06 | 1.742e-04 | 1.042e-03 | 6.0x |
+| 7 | 1.047e-06 | 1.047e-06 | 2.553e-06 | 1.295e-06 | 0.5x |
+| 8 | 7.455e-07 | 1.569e-06 | 2.129e-04 | 8.376e-04 | 3.9x |
+
+- **The unbanded per-element clause is not a usable budget for ANY correct f32
+face.** Our own face reads up to **3.263e-04** (case #2) — 33x over 1e-5 —
+and cubek up to 1.042e-03 (104x); four of the nine cases put *our own* face
+over by 2.1x, 17.4x, 21.3x and 32.6x (cases #5, #6, #8, #2). That is Branch
+B's substance ("mis-built for cross-implementation f32-vs-f64"), established
+by a control that never touches cubek: the clause
+reads softmax cancellation, not either implementation.
+- **cubek is genuinely, modestly looser — a recorded delta, not the defect.**
+Unbanded ratio runs 0.5x-6.0x, cubek looser on five cases and tighter on four;
+banded worst case 3.941e-06 (cubek) vs 2.279e-06 (ours), 1.7x. Every clause-1
+value on both faces is <= 2.0e-07. Branch A's reading is true but far too
+small to be the red: the red was the clause, not the face.
+- **Element-level localization (fixture #0 dump):** the same element is worst
+for both faces — flat 38 = row 9 col 2, |e| = 3.549e-03, which is 0.5% of its
+row max (6.818e-01). Ours is 1.065e-08 from the oracle there = 0.089
+ulp(1.0f32); cubek 4.069e-08 = 0.341 ulp. Both **sub-ulp at the accumulator
+scale**, so neither implementation is wrong there. Bug-hunter's amplification
+story is what the numbers show and his falsifiable prediction held exactly.
+
+**Landed — the branch-invariant consequence, as pre-registered:**
+- The witness budget is now the two-part rule this change already accepted and
+measured for the Python and device faces, LOCAL to
+`crates/quantibbler-kernels/tests/cubek_cpu_reference_parity.rs`: clause 1
+`max|a-e| <= 1e-5 * max(|a|,|e|)`; clause 2 per-element `<= 1e-5` restricted to
+entries within `BAND = 1e-1` of the row max. **`RTOL` is unchanged — the shape
+changed, not the number.** The unbanded statistic is still computed and printed
+as a RECORDED DELTA rather than dropped.
+- Measured margins across all nine cases under the landed budget: worst clause 1
+**2.004e-07** (50x under), worst clause 2 **3.941e-06** (2.5x under).
+- **The shared GPU budget is untouched** (`gpu_attention_parity.rs` sha256
+`315b7cdd25b2…`, byte-identical after the change) and the clamp-divergence
+tripwire is untouched: one defect class per budget, and no budget
+reformulation is narrated as touching what the tripwire guards.
+- **Proof-of-power row (sec-eng, mandatory):**
+`the_witness_budget_still_rejects_an_o1_convention_defect` injects one O(1)
+defect of the device battery's family — the consecutive-group GQA mapping
+replaced by modulo (`head h reads kv h % 2`, not `h / 4`) — into the recorded
+layout of fixture #2 and pushes it through the REAL reference. Both clauses
+reject it: inf-norm **1.453e+00**, banded **7.626e+00** = **7.6e+05x** the
+budget. The healthy leg (recorded layout, same call) asserts 1.479e-07 /
+1.334e-06 first, so the row cannot pass by measuring a broken baseline.
+- **Two further defects the reformulation exposed, both in this file.**
+`expand_heads` ignored `batch`, so the length assert failed on case #5
+(`160 != 80`) — the first batch=2 case ever reached, unreachable before
+because the old single clause reddened at case #0 and stopped the battery
+there. Fixed batch-major. Separately, the power row's first draft aimed its
+GQA defect at fixture #1, which has one kv head, where the mapping is a no-op;
+the row's own assert caught that before it could pass vacuously.
+- **Citation defect (raised here, adjudicated by @planner above, resolved):** the
+pre-registration cited "the design's own `atol + rtol·|ref|` rule". No such rule
+was ever written: the rule *text* occurs exactly once in the openspec corpus,
+in the sentence citing it, and `atol` is nowhere in the repo a tolerance
+formalism — the only other `atol` tokens are numpy `allclose(atol=…)` call
+sites in `tests/ptq`, which are API arguments, not a rule. (Stated precisely
+because the first draft of this bullet said "occurs exactly once in the repo",
+which was wrong the moment it was written — those call sites were on my screen.)
+**Ruling: keep the landed two-part gate** — one tolerance formalism across all
+three faces — and fix the citation, not the code. If the literal
+`atol + rtol·|ref|` form is ever wanted it needs pinned constants with their own
+rationale, and the swap is one function.
