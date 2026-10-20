@@ -822,6 +822,15 @@ def reconstruct_model(
         # (frozen binaries already written back by reconstruct_block).
         with torch.no_grad():
             x_running = block(x_running)
+        # Observer hook (qk-fail-fast-loop): the live host model is now exactly
+        # the quantized prefix of ``len(results)`` blocks — the same object the
+        # driver measures at the end. ``depth`` counts quantized blocks 1-based.
+        # An unset probe is a single ``is not None`` test: no overhead, no
+        # control-flow change. A raising probe propagates unchanged, so no
+        # later block is captured or solved.
+        probe = cfg.progress_probe
+        if probe is not None:
+            probe(model, len(results), name)
     return results
 
 

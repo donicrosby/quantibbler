@@ -53,6 +53,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 # Fail closed on network before transformers/HF get a chance to phone home,
 # and keep the (multi-GB) KD teacher-logit cache off tmpfs — /tmp is a
@@ -83,12 +84,16 @@ from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from quantibbler.ptq.api import QuantizedModel, quantize_model
-from quantibbler.ptq.config import PTQConfig, StageHyper
+from quantibbler.ptq.config import PrefixProbeAbort, PTQConfig, StageHyper
 from quantibbler.qk_report import (
     COLLAPSE_LINE,
     FAILED,
+    MIN_PROBE_DEPTH,
     OK_LINE,
+    abort_report,
     dump_report,
+    probe_aborts,
+    probe_ratio,
     provenance,
     verdict,
 )
@@ -273,10 +278,28 @@ def tokenize_chunks(
     return [picked[i * BATCH : (i + 1) * BATCH] for i in range(n_chunks)]
 
 
-def quantized_config(args: argparse.Namespace) -> PTQConfig:
+def _positive_int(text: str) -> int:
+    """argparse type for the probe knobs: a non-positive value is a parse error.
+
+    Rejected at parsing, not clamped downstream: a silently-accepted
+    ``--probe-interval 0`` would disable the very probe the run asked for,
+    and the operator would read the absence of probe lines as "healthy".
+    """
+    value = int(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {text!r}")
+    return value
+
+
+def quantized_config(
+    args: argparse.Namespace,
+    progress_probe: Any = None,
+) -> PTQConfig:
     """PTQConfig for real models: gate-shaped stages (TuneFP off — the fp
     checkpoint needs no polish; STE + global scale KD at the gate's measured
-    lr), paper-style solver knobs, caller-selected rank.
+    lr), paper-style solver knobs, caller-selected rank, and the per-block
+    progress probe when the caller wired one in (None = no probe, the
+    pipeline path is unchanged).
 
     scale_dtype follows --scale-dtype (default float32): v5/v6 proved the
     hard-coded float16 overflows late-block s2 (>65,504 -> inf, 54/196
@@ -295,6 +318,7 @@ def quantized_config(args: argparse.Namespace) -> PTQConfig:
         stage_latent=StageHyper(2e-3, 4, 3),
         stage_global=StageHyper(1e-3, 4, 4),
         verbose=True,
+        progress_probe=progress_probe,
     )
 
 
@@ -537,6 +561,20 @@ def main() -> int:
         help="16 batches of 8 sequences = 128 calibration rows",
     )
     parser.add_argument("--eval-seqs", type=int, default=5, help="5 batches of 8 = 40 eval rows")
+    parser.add_argument(
+        "--probe-interval",
+        type=_positive_int,
+        default=1,
+        help="run the per-block progress probe every N blocks from depth 2 "
+        "(default 1 = every block boundary); non-positive is a parse error",
+    )
+    parser.add_argument(
+        "--probe-batches",
+        type=_positive_int,
+        default=2,
+        help="eval batches in the probe slice, taken as the head of the "
+        "held-out set (default 2); non-positive is a parse error",
+    )
     parser.add_argument("--max-admm-iter", type=int, default=400)
     parser.add_argument(
         "--solver",
@@ -605,93 +643,209 @@ def main() -> int:
     ppl_base = perplexity_from_logits(lambda b: model(b), held_out)
     print(f"      ppl_baseline = {ppl_base:.4f}", flush=True)
 
+    # --- per-block progress probe (qk-fail-fast-loop) -------------------
+    # The run dies in minutes instead of after the full block sweep. The fp
+    # baseline is measured ONCE, here, before quantization: the head slice of
+    # the SAME held-out batches the end-of-run gate uses, in the same order,
+    # under the same seed discipline — never a separately generated dataset.
+    # Every depth's ratio therefore divides by the identical pedestal, so the
+    # only difference between the quantized prefix and its baseline is
+    # quantization damage.
+    probe_slice = held_out[: args.probe_batches]
+    fp_probe_ppl = perplexity_from_logits(lambda b: model(b), probe_slice)
+    print(
+        f"      probe: {len(probe_slice)}-batch slice of the held-out eval, "
+        f"fp prefix baseline = {fp_probe_ppl:.4f}",
+        flush=True,
+    )
+    probe_history: list[dict] = []
+
+    def _probe(host_model: Any, depth: int, name: str) -> None:  # noqa: ANN001
+        """Boundary check: measure the live prefix, record it, abort on collapse.
+
+        Called by the pipeline after each block's write-back. ``--probe-interval``
+        lives here, not in the pipeline: the pipeline contract stays "one call
+        per processed block" with no interval knowledge. The abort threshold is
+        the shared derived ``COLLAPSE_LINE`` via ``probe_aborts`` — there is no
+        argument by which this call site could re-pin it.
+        """
+        if depth >= MIN_PROBE_DEPTH and not (depth - MIN_PROBE_DEPTH) % args.probe_interval:
+            prefix_ppl = perplexity_from_logits(lambda b: host_model(b), probe_slice)
+            ratio = probe_ratio(prefix_ppl, fp_probe_ppl)
+            probe_history.append(
+                {
+                    "block": name,
+                    "depth": depth,
+                    "prefix_ppl": prefix_ppl,
+                    "fp_prefix_ppl": fp_probe_ppl,
+                    "ratio": ratio,
+                }
+            )
+            print(
+                f"      probe depth {depth:>2} ({name}): prefix_ppl={prefix_ppl:.4f} "
+                f"fp={fp_probe_ppl:.4f} ratio={ratio!r} line={COLLAPSE_LINE}",
+                flush=True,
+            )
+            if probe_aborts(depth, prefix_ppl, fp_probe_ppl):
+                raise PrefixProbeAbort(
+                    block=name,
+                    depth=depth,
+                    prefix_ppl=prefix_ppl,
+                    fp_prefix_ppl=fp_probe_ppl,
+                    ratio=ratio,
+                )
+
     _stage("[4/6] PTQ: bf16 model, per-layer float64 solver (block recon + scale KD)")
     _bread("entering quantize_model: block recon first, then KD scale calibration")
     solver_t = time.time()
-    qm = quantize_model(
-        model,
-        calib,
-        quantized_config(args),
-        checkpoint_dir=None if args.no_checkpoints else args.checkpoint_dir,
-    )
-    _bread(f"quantize_model returned: {len(qm.layers)} layers")
-    print(f"      solver wall: {time.time() - solver_t:.0f}s", flush=True)
-
-    print("[5/6] quantized perplexity (checkpoint-native dtype, artifact written back)")
-    host = model  # quantize_model wrote the artifact back into the host
-    ppl_quant = perplexity_from_logits(lambda b: host(b), held_out)
-    bpw = qm.effective_bpw()
-    total_qpk1 = sum(len(b) for b in qm.serialize().values())
-    print(f"      ppl_quant      = {ppl_quant:.4f}")
-    print(f"      effective BPW  = {bpw:.4f}  (qpk1 layer bytes: {total_qpk1:,})", flush=True)
-
+    aborted: PrefixProbeAbort | None = None
+    ppl_ratio: float | None = None
+    # provenance is computed before the pipeline so the abort report can
+    # carry the same identity fields as the completion report: an aborted
+    # run must be as self-describing as a finished one.
     prov = provenance(args.solver, args.scale_dtype)
+    try:
+        qm = quantize_model(
+            model,
+            calib,
+            quantized_config(args, progress_probe=_probe),
+            checkpoint_dir=None if args.no_checkpoints else args.checkpoint_dir,
+        )
+        _bread(f"quantize_model returned: {len(qm.layers)} layers")
+        print(f"      solver wall: {time.time() - solver_t:.0f}s", flush=True)
 
-    print("[6/6] exporting qk-server model directory ->", out_dir, flush=True)
-    embedding_f64 = causal.get_input_embeddings().weight.detach().to(torch.float64).cpu().numpy()
-    # Attention geometry + norm inventory + norm weights straight from the
-    # live model (never hardcoded): the exported artifact must be
-    # self-describing for the server's transformer forward (qk-attention
-    # N-1/N-2/E-2.0). The inventory IS the layout contract — sidecar order
-    # here must match the engine's slot semantics exactly. Head tying is
-    # the MODEL's property, not an export choice (Qwen3 ships untied).
-    tied = bool(getattr(causal.config, "tie_word_embeddings", False))
-    lm_head_f64 = (
-        causal.get_output_embeddings().weight.detach().to(torch.float64).cpu().numpy()
-        if not tied
-        else None
-    )
-    geometry = _export_geometry(causal)
-    inventory = _export_norm_inventory(causal)
-    norm_weights = _export_norm_weights(causal, inventory)
+        print("[5/6] quantized perplexity (checkpoint-native dtype, artifact written back)")
+        host = model  # quantize_model wrote the artifact back into the host
+        ppl_quant = perplexity_from_logits(lambda b: host(b), held_out)
+        bpw = qm.effective_bpw()
+        total_qpk1 = sum(len(b) for b in qm.serialize().values())
+        print(f"      ppl_quant      = {ppl_quant:.4f}")
+        print(f"      effective BPW  = {bpw:.4f}  (qpk1 layer bytes: {total_qpk1:,})", flush=True)
 
-    export_model_directory(
-        out_dir,
-        qm,
-        embedding_f64=embedding_f64,
-        model_id=args.model.replace("/", "-"),
-        eos_token_id=cfg.eos_token_id,
-        bos_token_id=cfg.bos_token_id,
-        tokenizer=tokenizer,
-        config_f64={"dtype_note": prov["dtype_note"]},
-        geometry=geometry,
-        inventory=inventory,
-        norm_weights=norm_weights,
-        lm_head_f64=lm_head_f64,
-        tied=tied,
-    )
-    ppl_ratio = ppl_quant / ppl_base
-    status = verdict(ppl_ratio)
-    report = {
-        "model": args.model,
-        "rank": args.rank,
-        "solver": prov["solver"],
-        "scale_dtype": prov["scale_dtype"],
-        "seq_len": args.seq_len,
-        "calibration_rows": len(calib) * BATCH,
-        "eval_rows": len(held_out) * BATCH,
-        "max_admm_iter": args.max_admm_iter,
-        "seed": args.seed,
-        "ppl_baseline_bf16": ppl_base,
-        "ppl_quant_native": ppl_quant,
-        "ppl_ratio": ppl_ratio,
-        "effective_bpw": bpw,
-        "qpk1_layer_bytes": total_qpk1,
-        "regime": {
-            "baseline_eval": "bfloat16 (checkpoint native; papers' pedestal)",
-            "solver": "float64, per-layer just-in-time (sign margins + parity reference)",
-            "kd_and_ste": "model dtype (the papers' distillation regime)",
-            "artifact": prov["regime_artifact"],
-        },
-        "status": status,
-        "wall_seconds": round(time.time() - t0, 1),
-    }
+        print("[6/6] exporting qk-server model directory ->", out_dir, flush=True)
+        embedding_f64 = (
+            causal.get_input_embeddings().weight.detach().to(torch.float64).cpu().numpy()
+        )
+        # Attention geometry + norm inventory + norm weights straight from the
+        # live model (never hardcoded): the exported artifact must be
+        # self-describing for the server's transformer forward (qk-attention
+        # N-1/N-2/E-2.0). The inventory IS the layout contract — sidecar order
+        # here must match the engine's slot semantics exactly. Head tying is
+        # the MODEL's property, not an export choice (Qwen3 ships untied).
+        tied = bool(getattr(causal.config, "tie_word_embeddings", False))
+        lm_head_f64 = (
+            causal.get_output_embeddings().weight.detach().to(torch.float64).cpu().numpy()
+            if not tied
+            else None
+        )
+        geometry = _export_geometry(causal)
+        inventory = _export_norm_inventory(causal)
+        norm_weights = _export_norm_weights(causal, inventory)
+
+        export_model_directory(
+            out_dir,
+            qm,
+            embedding_f64=embedding_f64,
+            model_id=args.model.replace("/", "-"),
+            eos_token_id=cfg.eos_token_id,
+            bos_token_id=cfg.bos_token_id,
+            tokenizer=tokenizer,
+            config_f64={"dtype_note": prov["dtype_note"]},
+            geometry=geometry,
+            inventory=inventory,
+            norm_weights=norm_weights,
+            lm_head_f64=lm_head_f64,
+            tied=tied,
+        )
+        ppl_ratio = ppl_quant / ppl_base
+        status = verdict(ppl_ratio)
+        report = {
+            "model": args.model,
+            "rank": args.rank,
+            "solver": prov["solver"],
+            "scale_dtype": prov["scale_dtype"],
+            "seq_len": args.seq_len,
+            "calibration_rows": len(calib) * BATCH,
+            "eval_rows": len(held_out) * BATCH,
+            "max_admm_iter": args.max_admm_iter,
+            "seed": args.seed,
+            "ppl_baseline_bf16": ppl_base,
+            "ppl_quant_native": ppl_quant,
+            "ppl_ratio": ppl_ratio,
+            "effective_bpw": bpw,
+            "qpk1_layer_bytes": total_qpk1,
+            "regime": {
+                "baseline_eval": "bfloat16 (checkpoint native; papers' pedestal)",
+                "solver": "float64, per-layer just-in-time (sign margins + parity reference)",
+                "kd_and_ste": "model dtype (the papers' distillation regime)",
+                "artifact": prov["regime_artifact"],
+            },
+            # The probe trajectory, recorded through the same dump_report path
+            # as every other report value: on a run that survives, this IS the
+            # probe's calibration data (where a healthy depth profile sits
+            # relative to the abort line) instead of an unauditable near-miss.
+            "probe": {
+                "interval": args.probe_interval,
+                "batches": args.probe_batches,
+                "fp_prefix_ppl": fp_probe_ppl,
+                "history": probe_history,
+            },
+            "probe_abort": None,  # no abort: the key exists on both paths
+            "artifact_exported": True,
+            "status": status,
+            "wall_seconds": round(time.time() - t0, 1),
+        }
+
+    except PrefixProbeAbort as exc:
+        aborted = exc
+        print(
+            f"\n      PROBE ABORT at depth {exc.depth} ({exc.block}): "
+            f"prefix_ppl={exc.prefix_ppl!r} fp_prefix_ppl={exc.fp_prefix_ppl!r} "
+            f"ratio={exc.ratio!r} line={exc.line}",
+            flush=True,
+        )
+        # Built by qk_report.abort_report — the catch→report→status logic lives
+        # in a torch-free module so it has lean suite coverage instead of
+        # resting on one manual real-model run. The builder emits the same key
+        # set as the completion report (unmeasured end-of-run numerics as null,
+        # artifact_exported false, status failed), so strict consumers never
+        # KeyError on either shape.
+        report = abort_report(
+            exc,
+            {
+                "model": args.model,
+                "rank": args.rank,
+                "solver": prov["solver"],
+                "scale_dtype": prov["scale_dtype"],
+                "seq_len": args.seq_len,
+                "calibration_rows": len(calib) * BATCH,
+                "eval_rows": len(held_out) * BATCH,
+                "max_admm_iter": args.max_admm_iter,
+                "seed": args.seed,
+                "ppl_baseline_bf16": ppl_base,
+                "regime": {
+                    "baseline_eval": "bfloat16 (checkpoint native; papers' pedestal)",
+                    "solver": "float64, per-layer just-in-time (sign margins + parity reference)",
+                    "kd_and_ste": "model dtype (the papers' distillation regime)",
+                    "artifact": prov["regime_artifact"],
+                },
+                "probe": {
+                    "interval": args.probe_interval,
+                    "batches": args.probe_batches,
+                    "fp_prefix_ppl": fp_probe_ppl,
+                },
+                "wall_seconds": round(time.time() - t0, 1),
+            },
+            probe_history,
+        )
     payload, faithful = dump_report(report)
-    if not faithful:
-        # The report could not be serialized as measured (an unrecognized
-        # value type reached the encoder). The durable trace now says failed,
-        # so the process verdict must say failed too — a report and an exit
-        # code that disagree is exactly the drift this gate exists to stop.
+    if not faithful or aborted is not None:
+        # Two routes to a failed process, and both must fail: the report could
+        # not be serialized as measured (an unrecognized value type reached the
+        # encoder), or the progress probe aborted the run before the end-of-run
+        # gate produced a verdict. A report and an exit code that disagree is
+        # exactly the drift this gate exists to stop; the abort report was
+        # written with status FAILED, so the two agree by construction.
         status = FAILED
     (out_dir / "quantize_report.json").write_text(payload)
     print(payload)
@@ -700,10 +854,15 @@ def main() -> int:
         f"(ppl_ratio={ppl_ratio!r}; ok <= {OK_LINE} < degraded <= "
         f"{COLLAPSE_LINE} < failed)"
     )
-    print("\nserver acquisition check (linear-stack engine: load only, no generation):")
-    print(f"  cargo run --release -p quantibbler-server -- serve --model-dir {out_dir}")
-    # Fail closed: the artifact and report above are written either way, so a
-    # failed run leaves a forensically complete artifact and a nonzero exit.
+    if aborted is None:
+        print("\nserver acquisition check (linear-stack engine: load only, no generation):")
+        print(f"  cargo run --release -p quantibbler-server -- serve --model-dir {out_dir}")
+    else:
+        print("\nno artifact exported: the probe aborted the run, so there is")
+        print("nothing to serve — the report above is the whole forensic trace.")
+    # Fail closed: on a completed run the artifact and report above are written
+    # either way, so a failed run leaves a forensically complete artifact and a
+    # nonzero exit; on an aborted run the report alone is the forensic trace.
     return verdict_exit_code(status)
 
 

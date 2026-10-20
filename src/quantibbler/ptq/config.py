@@ -13,14 +13,52 @@ anything else raises.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 
-__all__ = ["PTQConfig", "StageHyper"]
+from ..qk_report import COLLAPSE_LINE
+
+__all__ = ["PTQConfig", "StageHyper", "PrefixProbeAbort"]
 
 _COMPUTE_DTYPES = ("float64", "float32")
 _SCALE_DTYPES = ("float16", "float32")
+
+
+class PrefixProbeAbort(RuntimeError):
+    """Raised by a ``progress_probe`` to halt the pipeline mid-run.
+
+    Carries the evidence the run report needs (change ``qk-fail-fast-loop``):
+    the aborting block's module name and 1-based depth, the quantized
+    prefix's perplexity, the fp-prefix baseline at the SAME depth, and the
+    ratio between them.
+
+    ``line`` is the derived ``qk_report.COLLAPSE_LINE`` and is NOT a
+    constructor parameter — a per-run threshold override is the
+    green-washing escape hatch the probe family of changes exists to forbid,
+    so there is deliberately no argument by which it can be re-pinned.
+    """
+
+    def __init__(
+        self,
+        *,
+        block: str,
+        depth: int,
+        prefix_ppl: Any,
+        fp_prefix_ppl: Any,
+        ratio: Any,
+    ) -> None:
+        self.block = block
+        self.depth = depth
+        self.prefix_ppl = prefix_ppl
+        self.fp_prefix_ppl = fp_prefix_ppl
+        self.ratio = ratio
+        self.line = COLLAPSE_LINE
+        super().__init__(
+            f"prefix probe aborted at block {block!r} (depth {depth}): "
+            f"prefix perplexity {prefix_ppl!r} vs fp prefix {fp_prefix_ppl!r} "
+            f"is ratio {ratio!r}, over the collapse line {COLLAPSE_LINE}"
+        )
 
 
 @dataclass(frozen=True)
@@ -88,6 +126,11 @@ class PTQConfig:
         stage_latent: TuneLatentSTE hyperparameters ([NQ] App. C).
         stage_global: TuneScalesKD hyperparameters ([NQ] App. C).
         cosine_schedule: cosine lr schedule per stage ([NQ] App. C).
+        progress_probe: observer hook (change qk-fail-fast-loop): called after
+            each block is written back into the host as ``(model, depth,
+            name)``; may raise ``PrefixProbeAbort`` to halt the run. Default
+            ``None`` (unset probe changes nothing); excluded from the
+            checkpoint fingerprint.
         verbose: progress flag; no callback protocol in v0.1 (design section
             6).
     """
@@ -115,6 +158,15 @@ class PTQConfig:
     stage_latent: StageHyper = field(default_factory=lambda: StageHyper(1e-5, 1, 8))
     stage_global: StageHyper = field(default_factory=lambda: StageHyper(1e-6, 1, 8))
     cosine_schedule: bool = True
+    # Observer hook (change qk-fail-fast-loop): called by the sequential
+    # block reconstruction after each block is written back into the host
+    # model, as ``probe(model, depth, name)`` with the live host, the 1-based
+    # count of quantized blocks now live, and the block's module name. May
+    # raise ``PrefixProbeAbort`` to halt the run. Default ``None``: an unset
+    # probe changes nothing. Excluded from the checkpoint fingerprint — an
+    # observer is not solver state (compare=False keeps it out of equality
+    # too).
+    progress_probe: Any = field(default=None, compare=False, repr=False)
     verbose: bool = False
 
     @property
@@ -156,3 +208,7 @@ class PTQConfig:
             raise ValueError(f"admm_epsilon must be positive, got {self.admm_epsilon}")
         if self.temperature <= 0.0:
             raise ValueError(f"temperature must be positive, got {self.temperature}")
+        if self.progress_probe is not None and not callable(self.progress_probe):
+            raise TypeError(
+                f"progress_probe must be callable or None, got {type(self.progress_probe).__name__}"
+            )

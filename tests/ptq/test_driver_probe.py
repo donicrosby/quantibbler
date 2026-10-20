@@ -1,0 +1,246 @@
+"""qk-fail-fast-loop: the driver-side probe, executed rather than asserted.
+
+The lean tier pins the driver's *shape* (`_driver_wiring_findings` + the
+poison battery in `tests/test_qk_report.py`) and the probe's decision maths
+(`tests/test_qk_report.py::test_probe_*`). This tier pins the *runtime*: the
+parser's knobs, the help surface, and one real driver run — the actual
+`tools/quantize_hf_model.py` as the user invokes it, on a locally-built tiny
+Qwen3 with a locally-built tokenizer and a synthetic parquet corpus, fully
+offline (no HF hub, no network, no cache dependency).
+
+What that run proves: the probe is invoked once per block boundary on the
+live host model, the fp pedestal is measured once on the head of the same
+held-out batches and reused at every depth, the per-depth trajectory lands in
+`quantize_report.json` through `dump_report`, and the process exit code agrees
+with the report's status.
+
+What it cannot prove, stated plainly so nobody reads it as more: the fixture
+model is random-init, so its next-token distribution is near-uniform and the
+prefix ratio sits at ~1.0 no matter how much of the model has been quantized.
+This smoke covers the *plumbing*; the *detection* threshold is covered by the
+lean comparator tests (`probe_aborts` over the shared `COLLAPSE_LINE`), and a
+runtime collapse needs a model whose predictions are sharp enough to be
+damaged — see the fixture notes in the change's design.md.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+import torch
+from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
+
+from quantibbler.qk_report import FAILED, MIN_PROBE_DEPTH, exit_code, verdict
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DRIVER = REPO_ROOT / "tools" / "quantize_hf_model.py"
+
+VOCAB = 512
+SEQ_LEN = 32
+BATCH = 8
+BLOCKS = 3  # tiny Qwen3 depth; the probe starts at depth 2, so 2 boundaries
+DRIVER_TIMEOUT = 900
+
+
+def _reject_constant(name: str):  # noqa: ANN202
+    raise ValueError(f"non-finite constant {name!r} reached the report")
+
+
+@pytest.fixture(scope="module")
+def offline_corpus(tmp_path_factory):  # noqa: ANN001, ANN201
+    """A parquet corpus in the hub layout the driver globs, built locally."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    root = tmp_path_factory.mktemp("hf-cache")
+    shard_dir = (
+        root / "datasets--Salesforce--wikitext" / "snapshots" / "fixture" / "wikitext-2-raw-v1"
+    )
+    shard_dir.mkdir(parents=True)
+    sentence = "the quick brown fox jumps over the lazy dog . "
+    lines = [sentence * 30 for _ in range(20)]
+    for split in ("train", "test"):
+        pq.write_table(pa.table({"text": lines}), shard_dir / f"{split}-00000-of-00001.parquet")
+    return root
+
+
+@pytest.fixture(scope="module")
+def tiny_model(tmp_path_factory):  # noqa: ANN001, ANN201
+    """A tiny Qwen3 (3 blocks) plus a byte-level BPE tokenizer, both local.
+
+    Random init is enough for the plumbing this smoke covers; it is also
+    exactly why the ratios here sit at ~1.0 (see the module docstring).
+    """
+    from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
+
+    directory = tmp_path_factory.mktemp("tiny-qwen3")
+    text = ["the quick brown fox jumps over the lazy dog ."] * 200
+    tokenizer = Tokenizer(models.BPE(unk_token="<|endoftext|>"))
+    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    tokenizer.decoder = decoders.ByteLevel()
+    tokenizer.train_from_iterator(
+        text, trainers.BpeTrainer(vocab_size=VOCAB, special_tokens=["<|endoftext|>"])
+    )
+    tokenizer.save(str(directory / "tokenizer.json"))
+    fast = PreTrainedTokenizerFast(
+        tokenizer_file=str(directory / "tokenizer.json"), eos_token="<|endoftext|>"
+    )
+
+    torch.manual_seed(0)
+    config = Qwen3Config(
+        vocab_size=VOCAB,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=BLOCKS,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        max_position_embeddings=256,
+        tie_word_embeddings=False,
+        rope_theta=1_000_000.0,
+        eos_token_id=fast.eos_token_id,
+        bos_token_id=fast.eos_token_id,
+    )
+    model = Qwen3ForCausalLM(config)
+    with torch.no_grad():
+        for param in model.parameters():
+            param.copy_(torch.randn_like(param) * 0.02)
+    model.save_pretrained(directory)
+    fast.save_pretrained(directory)
+    return directory
+
+
+def _run_driver(
+    corpus_root: Path,
+    model_dir: Path,
+    out_dir: Path,
+    extra: list[str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Invoke the real driver the way the user's command line invokes it."""
+    env = dict(os.environ)
+    env["HF_HUB_CACHE"] = str(corpus_root)
+    env["QUANTIBBLER_BREADCRUMBS"] = str(out_dir / "breadcrumbs.log")
+    cmd = [
+        sys.executable,
+        str(DRIVER),
+        "--model",
+        str(model_dir),
+        "--rank",
+        "4",
+        "--solver",
+        "svd",
+        "--max-admm-iter",
+        "2",
+        "--seq-len",
+        str(SEQ_LEN),
+        "--calibration-seqs",
+        "1",
+        "--eval-seqs",
+        "2",
+        "--probe-batches",
+        "1",
+        "--out",
+        str(out_dir),
+        "--checkpoint-dir",
+        str(out_dir / "checkpoints"),
+        *(extra or []),
+    ]
+    return subprocess.run(
+        cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=DRIVER_TIMEOUT
+    )
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--probe-interval", "0"),
+        ("--probe-interval", "-2"),
+        ("--probe-batches", "0"),
+    ],
+)
+def test_probe_knobs_reject_non_positive_values_at_parse_time(flag, value, tmp_path):  # noqa: ANN001
+    """`probe_knob_defaults_and_validation`, runtime half: exit 2, not a clamp.
+
+    Parsing happens before the model is touched, so this needs no fixture —
+    and that is the point: a bad knob can never be silently absorbed as
+    "the probe just did not run".
+    """
+    proc = subprocess.run(
+        [sys.executable, str(DRIVER), flag, value, "--out", str(tmp_path / "out")],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert proc.returncode == 2, (proc.returncode, proc.stdout[-2000:], proc.stderr[-2000:])
+    assert "expected a positive integer" in proc.stderr, proc.stderr[-2000:]
+
+
+def test_driver_help_exposes_the_two_knobs_and_no_threshold_flag():
+    """The knobs are documented; the abort line is not a flag at all."""
+    proc = subprocess.run(
+        [sys.executable, str(DRIVER), "--help"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "--probe-interval" in proc.stdout
+    assert "--probe-batches" in proc.stdout
+    for banned in ("probe-line", "probe-threshold", "abort-line", "collapse-line", "probe-limit"):
+        assert banned not in proc.stdout, f"{banned} is a threshold override in disguise"
+
+
+def test_driver_run_records_the_probe_trajectory_and_agrees_with_its_exit_code(
+    offline_corpus,
+    tiny_model,
+    tmp_path,  # noqa: ANN001
+):
+    """The end-to-end contract: history written, status parseable, exit code
+    equal to the report's verdict, provenance equal to the invoked args."""
+    out_dir = tmp_path / "artifact"
+    proc = _run_driver(offline_corpus, tiny_model, out_dir)
+    report_path = out_dir / "quantize_report.json"
+    assert report_path.is_file(), proc.stdout[-4000:] + proc.stderr[-2000:]
+    payload = report_path.read_text()
+
+    # Strict parse: JSON that carries NaN/Infinity is not a report we accept.
+    report = json.loads(payload, parse_constant=_reject_constant)
+    assert report["probe_abort"] is None, "the healthy fixture must not abort"
+    status = report["status"]
+    assert status in ("ok", "degraded", "failed")
+    assert proc.returncode == exit_code(status), (status, proc.returncode)
+    assert proc.returncode == 0, report  # this fixture is the healthy leg
+    assert report["artifact_exported"] is True  # one shape, both paths
+    assert report["ppl_quant_native"] is not None
+
+    # Provenance is the invoked arguments, not a literal.
+    assert report["solver"] == "svd"
+    assert report["scale_dtype"] == "float32"
+    assert report["rank"] == 4
+    assert report["seq_len"] == SEQ_LEN
+
+    probe = report["probe"]
+    assert probe["interval"] == 1
+    assert probe["batches"] == 1
+    assert report["eval_rows"] == 2 * BATCH  # the slice is a strict subset
+    assert math.isfinite(probe["fp_prefix_ppl"]) and probe["fp_prefix_ppl"] > 0
+
+    history = probe["history"]
+    assert [entry["depth"] for entry in history] == [2, 3]
+    assert [entry["block"] for entry in history] == ["layers.1", "layers.2"]
+    assert len(history) == BLOCKS - MIN_PROBE_DEPTH + 1
+    for entry in history:
+        # One pedestal, every depth: the baseline is the fp model on the same
+        # slice, not a per-depth re-draw (fp_prefix_baselines_same_depth).
+        assert entry["fp_prefix_ppl"] == probe["fp_prefix_ppl"]
+        assert math.isfinite(entry["prefix_ppl"]) and entry["prefix_ppl"] > 0
+        assert entry["ratio"] == pytest.approx(entry["prefix_ppl"] / entry["fp_prefix_ppl"])
+        assert verdict(entry["ratio"]) != FAILED

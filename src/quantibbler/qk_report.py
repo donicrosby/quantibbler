@@ -43,6 +43,7 @@ import numpy as np
 __all__ = [
     "COLLAPSE_LINE",
     "OK_LINE",
+    "MIN_PROBE_DEPTH",
     "FAILED",
     "DEGRADED",
     "OK",
@@ -50,6 +51,9 @@ __all__ = [
     "exit_code",
     "json_safe",
     "dump_report",
+    "probe_ratio",
+    "probe_aborts",
+    "abort_report",
     "provenance",
 ]
 
@@ -151,6 +155,120 @@ def dump_report(report: dict) -> tuple[str, bool]:
             "report_error": f"{type(exc).__name__}: {exc}",
         }
         return json.dumps(fallback, indent=2, allow_nan=False) + "\n", False
+
+
+def _as_finite_float(value: Any) -> float | None:
+    """Coerce to a finite Python float, or ``None`` if that is not possible."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+#: Prefix probes begin no earlier than this depth. Block-0-alone prefixes are
+#: the noisiest, and block-0 damage surfaces amplified at depth >= 2 anyway
+#: (the forensics' compounding pattern).
+MIN_PROBE_DEPTH = 2
+
+
+def probe_ratio(prefix_ppl: Any, fp_prefix_ppl: Any) -> float | None:
+    """Quantized-prefix / fp-prefix ratio at the SAME depth.
+
+    Dividing by the fp prefix at the same depth is the whole trick: it divides
+    out the depth-dependent PPL floor, so the ratio isolates the damage
+    quantization inflicted rather than the fact that a 2-block prefix predicts
+    worse than a 28-block one.
+
+    ``None`` when either side is missing, non-finite, or the fp baseline is
+    zero. A perplexity of zero is impossible and a non-finite one is a
+    numerics defect, so neither is a ratio — it is a defective measurement,
+    and the caller fails closed on it.
+    """
+    prefix = _as_finite_float(prefix_ppl)
+    baseline = _as_finite_float(fp_prefix_ppl)
+    if prefix is None or baseline is None or baseline == 0.0:
+        return None
+    return prefix / baseline
+
+
+def probe_aborts(depth: int, prefix_ppl: Any, fp_prefix_ppl: Any) -> bool:
+    """Whether the progress probe must halt the run at this block boundary.
+
+    Runs the SAME comparator as the end-of-run gate — ``verdict()`` over the
+    shared ``COLLAPSE_LINE`` — with the missing/non-finite check first, so
+    "collapsed" means the same thing at depth 3 as at depth 28 and there is
+    no second copy of the line to drift.
+
+    Kill-only by construction: it returns ``True`` only for the gate's
+    ``failed`` verdict. A probe can never report success. A 2-batch prefix
+    supports *death* (every dead run measured 20x+ past the line, far outside
+    slice noise) but it can never support *success* — a lucky prefix ratio
+    below ``OK_LINE`` on a model that is degraded deeper is exactly the case
+    this asymmetry forbids acting on. ``ok`` and ``degraded`` come only from
+    the full held-out measurement.
+
+    A defective measurement (missing, non-finite, or a zero baseline) fails
+    closed: a false positive costs a re-run, a false negative costs the
+    hour-plus run this probe exists to kill.
+    """
+    if depth is None or depth < MIN_PROBE_DEPTH:
+        return False
+    ratio = probe_ratio(prefix_ppl, fp_prefix_ppl)
+    if ratio is None:
+        return True
+    return verdict(ratio) == FAILED
+
+
+#: End-of-run numerics that do not exist when the probe aborted the run before
+#: the end-of-run gate measured anything. On an abort report they are written as
+#: JSON ``null`` — never omitted, never invented — so both report paths carry an
+#: identical key set and a strict consumer cannot KeyError on either shape.
+_ABORT_UNMEASURED = ("ppl_quant_native", "ppl_ratio", "effective_bpw", "qpk1_layer_bytes")
+
+
+def abort_report(exc: Any, identity_fields: dict, history: list) -> dict:
+    """The report for a probe-aborted run — built without torch, weights, or IO.
+
+    This is the catch→report→status construction, kept here (not inline in the
+    torch-importing driver) so it has repeatable suite coverage in a lean
+    environment. The caller writes the result through ``dump_report`` on the
+    same path as every other report, so the abort report is sanitized and
+    strict-parse-clean exactly like a completion report.
+
+    ``exc`` is duck-typed on purpose: the abort exception lives in
+    ``quantibbler.ptq.config``, which imports this module for ``COLLAPSE_LINE``,
+    so importing it back would be a cycle. Its attributes are read directly,
+    with no ``getattr`` defaults, so a wrong object fails loudly rather than
+    producing a report full of nulls.
+
+    ``identity_fields`` is everything the driver knows at the moment of the
+    abort — model identity, regime, the ``probe`` block without its history,
+    wall time. ``history`` is the probe trajectory so far: an aborted run keeps
+    it, because the trajectory that ended in a collapse is the autopsy nobody
+    otherwise has. The unmeasured end-of-run numerics are forced to ``None``
+    and the status to ``FAILED`` here rather than at the call site, so "an
+    aborted run is never reported healthy" is structural instead of copied by
+    hand — a caller that smuggles ``status`` or ``artifact_exported`` into the
+    identity fields cannot overwrite either one.
+    """
+    report = dict(identity_fields)
+    probe = dict(report.get("probe") or {})
+    probe["history"] = [dict(entry) for entry in history]
+    report["probe"] = probe
+    report["probe_abort"] = {
+        "block": exc.block,
+        "depth": exc.depth,
+        "prefix_ppl": exc.prefix_ppl,
+        "fp_prefix_ppl": exc.fp_prefix_ppl,
+        "ratio": exc.ratio,
+        "line": exc.line,
+    }
+    report["artifact_exported"] = False
+    report["status"] = FAILED
+    for key in _ABORT_UNMEASURED:
+        report[key] = None
+    return report
 
 
 def provenance(solver: str, scale_dtype: str) -> dict:

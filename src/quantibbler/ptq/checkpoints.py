@@ -38,11 +38,23 @@ import quantibbler
 
 _FINGERPRINT_NAME = "fingerprint.json"
 
+# Observer-only config fields, excluded from the fingerprint: a probe observes
+# the solver, it does not steer it, so a resume created without a probe may be
+# relaunched WITH one without tripping stale-state protection (and vice
+# versa). Recorded as an explicit consequence in qk-fail-fast-loop's design.md.
+_FINGERPRINT_EXCLUDED = ("progress_probe",)
+
 
 def config_fingerprint(cfg) -> str:
-    """Stable sha256 over the complete PTQConfig + code identity."""
+    """Stable sha256 over the complete PTQConfig + code identity.
+
+    ``progress_probe`` is blanked before hashing (see
+    ``_FINGERPRINT_EXCLUDED``): a callable is code-state, not solver-state,
+    and ``dataclasses.asdict`` would otherwise try to serialize a function.
+    """
+    overrides = {name: None for name in _FINGERPRINT_EXCLUDED if hasattr(cfg, name)}
     payload = {
-        "config": dataclasses.asdict(cfg),
+        "config": dataclasses.asdict(dataclasses.replace(cfg, **overrides)),
         "quantibbler_version": getattr(quantibbler, "__version__", "unknown"),
     }
     try:
