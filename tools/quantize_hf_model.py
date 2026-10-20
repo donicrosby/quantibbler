@@ -567,6 +567,15 @@ def main() -> int:
     parser.add_argument("--rank", type=int, default=8)
     parser.add_argument("--seq-len", type=int, default=512)
     parser.add_argument(
+        "--tune-seq-len",
+        type=_positive_int,
+        default=None,
+        help="per-block reconstruction window length: the tune stage's "
+        "memory bound. Unset means --seq-len (the pre-flag behavior). "
+        "--seq-len stays the EVALUATION geometry, so this never changes "
+        "what the reported perplexity is measured over",
+    )
+    parser.add_argument(
         "--calibration-seqs",
         type=int,
         default=16,
@@ -650,6 +659,27 @@ def main() -> int:
         args.seed + 1,
     )
     print(f"      calib {len(calib)} batches, eval {len(held_out)} batches")
+
+    # --- independent tune geometry (qk-nq-recreation-bar) ----------------
+    # `--seq-len` is the EVALUATION protocol (WT2 at 2048 for the bar) and
+    # `--tune-seq-len` bounds the per-block reconstruction windows. The
+    # windows are SLICED from the same calibration rows rather than
+    # re-tokenized at the shorter length: sampling 512-token rows would
+    # silently drop three quarters of [NQ]'s 128 x 2048 calibration tokens,
+    # which changes the method, not just the memory budget. Slicing bounds
+    # the retained N^2 attention node - the thing that actually died at seq
+    # 2048 - and keeps every calibration token. `calibration_rows` is
+    # counted BEFORE the slice because it counts sequences, and slicing
+    # adds none.
+    tune_seq_len = args.tune_seq_len or args.seq_len
+    calibration_sequences = len(calib) * BATCH
+    if tune_seq_len != args.seq_len:
+        calib = [window for batch in calib for window in batch.split(tune_seq_len, dim=1)]
+        print(
+            f"      tune geometry: eval --seq-len {args.seq_len} kept; "
+            f"calib sliced to {len(calib)} windows of {tune_seq_len}",
+            flush=True,
+        )
 
     print("[3/6] bf16 baseline perplexity (paper-regime pedestal)", flush=True)
     ppl_base = perplexity_from_logits(lambda b: model(b), held_out)
@@ -777,7 +807,8 @@ def main() -> int:
             "solver": prov["solver"],
             "scale_dtype": prov["scale_dtype"],
             "seq_len": args.seq_len,
-            "calibration_rows": len(calib) * BATCH,
+            "tune_seq_len": tune_seq_len,
+            "calibration_rows": calibration_sequences,
             "eval_rows": len(held_out) * BATCH,
             "max_admm_iter": args.max_admm_iter,
             "seed": args.seed,
@@ -830,7 +861,8 @@ def main() -> int:
                 "solver": prov["solver"],
                 "scale_dtype": prov["scale_dtype"],
                 "seq_len": args.seq_len,
-                "calibration_rows": len(calib) * BATCH,
+                "tune_seq_len": tune_seq_len,
+                "calibration_rows": calibration_sequences,
                 "eval_rows": len(held_out) * BATCH,
                 "max_admm_iter": args.max_admm_iter,
                 "seed": args.seed,

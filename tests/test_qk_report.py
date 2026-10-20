@@ -1178,14 +1178,22 @@ def test_abort_report_contract_matches_the_production_abort_type():
     assert declared <= set(vars(_abort_exc()))
 
 
-#: The identity fields the driver hands the builder on a real abort (values from
-#: the recorded Qwen3-0.6B abort run).
-_ABORT_IDENTITY = {
+#: The identity fields the driver hands the builder on a real abort. The VALUES
+#: are the recorded Qwen3-0.6B abort run; the KEYS are NOT written here — they
+#: come from the driver's abort payload literal via `_abort_payload_keys()`, so a
+#: field added to the driver's abort path cannot be silently left out of the
+#: fixture that mirrors it. This is the same structural move
+#: `_completion_report_keys()` makes for the completion literal. The value table
+#: stays hand-pinned on purpose: the four unmeasured nulls and the
+#: status/artifact_exported/probe_abort contract belong to `abort_report`
+#: (asserted below), not to this mirror of the driver's inputs.
+_ABORT_IDENTITY_VALUES: dict[str, object] = {
     "model": "Qwen/Qwen3-0.6B",
     "rank": 1,
     "solver": "svd",
     "scale_dtype": "float32",
     "seq_len": 64,
+    "tune_seq_len": 64,
     "calibration_rows": 8,
     "eval_rows": 16,
     "max_admm_iter": 1,
@@ -1195,6 +1203,48 @@ _ABORT_IDENTITY = {
     "probe": {"interval": 1, "batches": 1, "fp_prefix_ppl": 83.08454639156159},
     "wall_seconds": 69.6,
 }
+
+
+def _abort_payload_keys(src: str | None = None) -> set[str]:
+    """The keys the driver's abort payload literal declares, from source.
+
+    `main()` hands `abort_report(...)` a dict literal; those keys are the
+    identity fields a real abort carries. Deriving them here is what makes the
+    fixture structural: the completion and abort report shapes are compared as
+    key sets, so the set standing in for the abort path must be read from the
+    driver's payload rather than remembered beside it. `src` is overridable so a
+    test can mutate the source and watch the derivation move (non-vacuity).
+    """
+    text = _DRIVER_SRC if src is None else src
+    main = [
+        node
+        for node in ast.parse(text).body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    ][0]
+    for node in ast.walk(main):
+        if (
+            isinstance(node, ast.Call)
+            and getattr(node.func, "id", None) == "abort_report"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Dict)
+        ):
+            return {key.value for key in node.args[1].keys if isinstance(key, ast.Constant)}
+    raise AssertionError("the abort payload dict literal is missing from main()")
+
+
+def _abort_identity() -> dict[str, object]:
+    """The abort fixture: driver-derived KEYS over hand-pinned VALUES."""
+    keys = _abort_payload_keys()
+    missing = keys - set(_ABORT_IDENTITY_VALUES)
+    extra = set(_ABORT_IDENTITY_VALUES) - keys
+    assert not missing and not extra, (
+        "the abort fixture values no longer cover the driver's abort payload "
+        f"keys: missing {sorted(missing)}, extra {sorted(extra)}"
+    )
+    return {key: _ABORT_IDENTITY_VALUES[key] for key in sorted(keys)}
+
+
+_ABORT_IDENTITY = _abort_identity()
 _ABORT_HISTORY = [
     {
         "block": "layers.1",
@@ -1272,6 +1322,38 @@ def test_abort_report_has_the_completion_reports_key_set():
     )
     assert "artifact_exported" in completion_keys
     assert {"probe_abort", "probe"} <= completion_keys
+
+
+def test_abort_fixture_keys_are_derived_from_the_driver_not_remembered():
+    """The abort fixture's key set is READ from the driver's abort payload.
+
+    The completion literal is already pinned by derivation
+    (`_completion_report_keys()`); the abort fixture used to mirror it by hand,
+    so a key added to the driver's abort payload reddened the guard only until
+    someone remembered to edit the literal too. The derivation closes that gap.
+    Non-vacuity: a field added to the driver's payload grows the derived set — a
+    fixture that merely agreed on a frozen list could not do this.
+    """
+    keys = _abort_payload_keys()
+    assert set(_ABORT_IDENTITY) == keys
+    # The field this cycle added arrives through the derivation, not a hand edit.
+    assert "tune_seq_len" in keys
+    # The unmeasured nulls belong to `abort_report`, not to the driver's payload:
+    # they are the contract asserted elsewhere in this file, not inputs.
+    assert "ppl_quant_native" not in keys
+    # A payload that gains a field yields a fixture that gains it. The tail is
+    # unique to the abort literal (16-space keys, 12-space `},`); the completion
+    # literal closes at 8 spaces and must not match.
+    tail = '"wall_seconds": round(time.time() - t0, 1),\n            },'
+    assert _DRIVER_SRC.count(tail) == 1, "the abort payload literal moved; re-anchor"
+    mutated = _DRIVER_SRC.replace(
+        tail,
+        '"wall_seconds": round(time.time() - t0, 1),\n'
+        '                "bogus_probe_field": 1,\n            },',
+        1,
+    )
+    assert mutated != _DRIVER_SRC
+    assert "bogus_probe_field" in _abort_payload_keys(mutated)
 
 
 def test_abort_report_dumps_strict_and_writes_non_finite_as_null():

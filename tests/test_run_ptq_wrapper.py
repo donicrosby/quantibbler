@@ -16,7 +16,17 @@ import subprocess
 
 _REPO = pathlib.Path(__file__).resolve().parents[1]
 _SCRIPT = _REPO / "tools" / "run-ptq-container.sh"
-_KNOBS = ("MODEL", "OUT", "RANK", "SOLVER", "SEQ_LEN", "CALIBRATION_SEQS", "EVAL_SEQS", "DRY_RUN")
+_KNOBS = (
+    "MODEL",
+    "OUT",
+    "RANK",
+    "SOLVER",
+    "SEQ_LEN",
+    "TUNE_SEQ_LEN",
+    "CALIBRATION_SEQS",
+    "EVAL_SEQS",
+    "DRY_RUN",
+)
 
 
 def _launch(**env: str) -> subprocess.CompletedProcess:
@@ -66,7 +76,27 @@ def test_env_knobs_reach_the_command_line():
     assert "'/tmp/nq-run:/out'" in completed.stdout
 
 
-def test_dry_run_announces_nothing_it_need_not_and_the_two_advisories_it_must():
+def test_tune_knob_is_passthrough_and_never_wrapper_chosen():
+    """`TUNE_SEQ_LEN` (qk-nq-recreation-bar): set -> on the command line; absent.
+
+    Unset must mean UNSET, not "whatever the wrapper likes": the driver's own
+    default (tuning windows == `--seq-len`) is the pre-flag behavior, and a
+    wrapper that always passed a number would be choosing the tuning geometry -
+    the same silent decision this script exists to stop making.
+    """
+    unset = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048")
+    assert unset.returncode == 0, unset.stderr
+    assert "'--tune-seq-len'" not in unset.stdout
+    assert "tune_seq_len=unset" in unset.stdout
+
+    split = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048", TUNE_SEQ_LEN="512")
+    assert split.returncode == 0, split.stderr
+    assert "'--tune-seq-len' '512'" in split.stdout
+    assert "'--seq-len' '2048'" in split.stdout  # eval geometry untouched
+    assert "tune_seq_len=512" in split.stdout
+
+
+def test_dry_run_announces_nothing_it_need_not_and_the_advisories_it_must():
     """The advisories are the difference between a diagnostic and a claim."""
     default = _launch()
     assert default.returncode == 0
@@ -74,10 +104,19 @@ def test_dry_run_announces_nothing_it_need_not_and_the_two_advisories_it_must():
     assert "SEQ_LEN=512 is a diagnostic geometry" in default.stderr
     assert "rank=8 solver=admm seq_len=512" in default.stdout
 
-    protocol = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048")
-    assert protocol.returncode == 0
-    assert "note:" not in protocol.stderr, protocol.stderr
-    assert "rank=512 solver=svd seq_len=2048" in protocol.stdout
+    # The claimable split run: eval geometry and tune window both chosen -> silent.
+    split = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048", TUNE_SEQ_LEN="512")
+    assert split.returncode == 0
+    assert "note:" not in split.stderr, split.stderr
+    assert "rank=512 solver=svd seq_len=2048" in split.stdout
+
+    # The OOM-shaped launch is ANNOUNCED, not refused: seq 2048 with the tune
+    # window left unset is the geometry that died at the ceiling, so the wrapper
+    # says so and still starts the run (returncode 0, launch line printed).
+    oom = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048")
+    assert oom.returncode == 0, oom.stderr
+    assert "SEQ_LEN=2048 with TUNE_SEQ_LEN unset" in oom.stderr
+    assert "rank=512 solver=svd seq_len=2048" in oom.stdout
 
 
 def test_wrapper_never_truncates_the_breadcrumb_trail():

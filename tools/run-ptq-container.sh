@@ -11,7 +11,7 @@
 #   /tmp/ptq = real-disk scratch (KD teacher-logit memmap lands here, 20GB class)
 #
 # Knobs, all env — positional arguments are REFUSED, not ignored:
-#   MODEL OUT RANK SOLVER SEQ_LEN CALIBRATION_SEQS EVAL_SEQS DRY_RUN
+#   MODEL OUT RANK SOLVER SEQ_LEN TUNE_SEQ_LEN CALIBRATION_SEQS EVAL_SEQS DRY_RUN
 #
 # Two defaults are traps worth knowing before you launch: SOLVER defaults to
 # `admm` (the measured ablation showed the ADMM stage earns nothing here —
@@ -22,11 +22,21 @@
 # protocol values — the eval geometry belongs to the recreation-bar spec; the
 # wrapper's job is to stop being the thing that decides it silently.
 #
+# TUNE_SEQ_LEN is passthrough and optional: empty means UNSET, which is how the
+# driver learns to use `--seq-len` for the tuning windows too. The wrapper never
+# supplies a window length of its own - picking one would be the same silent
+# decision this script exists to stop making.
+#
 # Canonical launches:
 #   RANK=512 SOLVER=svd OUT=<fresh dir> sh tools/run-ptq-container.sh
 #     -> r512 diagnostic: recorded alongside, never a bar claim
 #   RANK=512 SOLVER=svd SEQ_LEN=2048 OUT=<fresh dir> sh tools/run-ptq-container.sh
 #     -> NQ-protocol geometry, the line with a landing site
+#   RANK=512 SOLVER=svd SEQ_LEN=2048 TUNE_SEQ_LEN=512 OUT=<fresh dir> \
+#     sh tools/run-ptq-container.sh
+#     -> the same eval protocol with tune windows bounded to 512 tokens: the
+#        geometry whose tune stage fits the 32g ceiling (the unset-window 2048
+#        run is the one that died with a memcg OOM at step [4/6])
 #   Prefix either with DRY_RUN=1 to print the exact docker command line instead
 #   of running it (no RAM spent, container name left free).
 set -eu
@@ -41,6 +51,9 @@ RANK="${RANK:-8}"
 SOLVER_GIVEN="${SOLVER:-}"
 SOLVER="${SOLVER:-admm}"
 SEQ_LEN="${SEQ_LEN:-512}"
+# Deliberately NOT defaulted to anything: an empty value must reach the driver
+# as "unset" so the driver's own default (tune == --seq-len) applies.
+TUNE_SEQ_LEN="${TUNE_SEQ_LEN:-}"
 CALIBRATION_SEQS="${CALIBRATION_SEQS:-16}"
 EVAL_SEQS="${EVAL_SEQS:-5}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -51,23 +64,34 @@ DRY_RUN="${DRY_RUN:-0}"
 # something other than what was asked for.
 if [ "$#" -ne 0 ]; then
   echo "run-ptq-container.sh takes no arguments; use the env knobs:" >&2
-  echo "  MODEL OUT RANK SOLVER SEQ_LEN CALIBRATION_SEQS EVAL_SEQS DRY_RUN" >&2
+  echo "  MODEL OUT RANK SOLVER SEQ_LEN TUNE_SEQ_LEN CALIBRATION_SEQS EVAL_SEQS DRY_RUN" >&2
   echo "  got: $*" >&2
   exit 2
 fi
 
-# Say which run this is, before it runs. Neither advisory judges the choice —
-# they exist so a bare launch cannot quietly be mistaken for the claimable one.
-# An exported-but-empty SOLVER falls through to the default and gets the warning
-# too, because `${SOLVER:-admm}` cannot tell those two cases apart afterwards.
+# Say which run this is, before it runs. None of these advisories judges the
+# choice — they exist so a bare launch cannot quietly be mistaken for the
+# claimable one. An exported-but-empty SOLVER falls through to the default and
+# gets the warning too, because `${SOLVER:-admm}` cannot tell those two cases
+# apart afterwards.
 if [ -z "$SOLVER_GIVEN" ]; then
   echo "note: SOLVER unset -> admm (the ablation's no-gain path); production is SOLVER=svd" >&2
 fi
 if [ "$SEQ_LEN" != "2048" ]; then
   echo "note: SEQ_LEN=$SEQ_LEN is a diagnostic geometry, not the NQ protocol (2048)" >&2
 fi
+# The OOM-shaped launch, announced and not refused: seq 2048 with the tune window
+# left unset runs the tune stage at 2048 too — the geometry whose N^2 attention
+# node died with a memcg OOM at this container's 32g ceiling (step [4/6]).
+# TUNE_SEQ_LEN bounds the tune windows while `--seq-len` stays the eval geometry,
+# which is what turns that OOM into a number. Said before the run, not instead of
+# it: a deliberate unsplit 2048 run is still allowed to start.
+if [ "$SEQ_LEN" = "2048" ] && [ -z "$TUNE_SEQ_LEN" ]; then
+  echo "note: SEQ_LEN=2048 with TUNE_SEQ_LEN unset runs the tune stage at 2048 too - the geometry that died with a memcg OOM at the 32g ceiling; set TUNE_SEQ_LEN=512 to bound the tune windows" >&2
+fi
 echo "run-ptq-container: model=$MODEL rank=$RANK solver=$SOLVER seq_len=$SEQ_LEN" \
-  "calibration_seqs=$CALIBRATION_SEQS eval_seqs=$EVAL_SEQS out=$OUT"
+  "tune_seq_len=${TUNE_SEQ_LEN:-unset} calibration_seqs=$CALIBRATION_SEQS" \
+  "eval_seqs=$EVAL_SEQS out=$OUT"
 
 set -- docker run --rm \
   --name quantibbler-ptq-run \
@@ -93,6 +117,13 @@ set -- docker run --rm \
     --checkpoint-dir /out/checkpoints \
     --out /out
 
+# The split knob is appended only when it was set. Passing it unconditionally
+# would make the wrapper the author of the tuning geometry - and an empty
+# `--tune-seq-len` is not a value the driver accepts.
+if [ -n "$TUNE_SEQ_LEN" ]; then
+  set -- "$@" --tune-seq-len "$TUNE_SEQ_LEN"
+fi
+
 # DRY_RUN=1 prints the exact command line (copy-pasteable) and stops: the launch
 # is checkable without spending 32g of host RAM and without stealing the
 # container name a real run needs.
@@ -108,8 +139,8 @@ mkdir -p /opt/data/tmp "$(dirname "$OUT")"
 # killed run leaves behind: `: >` destroyed it on every launch, including the
 # one that died (`tail` from the *failed* run is the useful line, not the new
 # run's first sample).
-printf '=== run %s rank=%s solver=%s seq_len=%s out=%s ===\n' \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RANK" "$SOLVER" "$SEQ_LEN" "$OUT" \
+printf '=== run %s rank=%s solver=%s seq_len=%s tune_seq_len=%s out=%s ===\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-unset}" "$OUT" \
   >> /opt/data/tmp/quantibbler-breadcrumbs.log
 
 exec "$@"
