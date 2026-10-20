@@ -1400,6 +1400,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "cubek-attention"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59de6a0bc52b43f0caf42fecb53644d2e8b0661431fb124f07d2fa4de0d0924f"
+dependencies = [
+ "bytemuck",
+ "cubecl",
+ "cubecl-common",
+ "cubek-matmul",
+ "cubek-std",
+ "half",
+ "serde",
+]
+
+[[package]]
+name = "cubek-matmul"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59816f7d5baf51ca06f417899ee194d46d76f633541907c94091163b4ade20ff"
+dependencies = [
+ "bytemuck",
+ "cubecl",
+ "cubecl-common",
+ "cubek-std",
+ "half",
+ "serde",
+]
+
+[[package]]
+name = "cubek-std"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1310b866b1de8244f9cd4ca758501519cf73be2fc34e9a05a57118c692eb022f"
+dependencies = [
+ "cubecl",
+ "cubecl-common",
+ "cubek-tile",
+]
+
+[[package]]
+name = "cubek-tile"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "525ff79bf6d8aad6e14b3b9555d03bfec9c9b72ba33d8caf13da0c4ee8e47d73"
+dependencies = [
+ "bytemuck",
+ "cubecl",
+ "cubecl-common",
+ "half",
+ "serde",
+]
+
+[[package]]
 name = "cudarc"
 version = "0.19.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3763,6 +3816,7 @@ name = "quantibbler-kernels"
 version = "0.1.0"
 dependencies = [
  "cubecl",
+ "cubek-attention",
  "nalgebra",
  "numpy",
  "pyo3",
@@ -4625,7 +4679,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
  "windows-sys 0.61.2",
@@ -5169,7 +5223,7 @@ version = "2.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 dependencies = [
- "rand 0.9.5",
+ "rand 0.10.3",
 ]
 
 [[package]]

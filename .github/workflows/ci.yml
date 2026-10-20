@@ -124,9 +124,18 @@ jobs:
           toolchain: 1.98.1
           components: clippy, rustfmt
       - name: cargo test
-        run: cargo test --manifest-path "$MANIFEST" --all-targets --locked
+        # Package selection is explicit rather than `--manifest-path`-scoped:
+        # `crates/quantibbler-server` carries the two purity guards
+        # (`binary_purity.rs`: no libpython in the served binary;
+        # `cubek_purity.rs`: cubek-attention reachable under `gpu`,
+        # `cpu-reference` never enabled), and a manifest-path selection of the
+        # kernels crate alone never executes them — a guard nothing runs is
+        # decoration. Measured: a deliberately failing test in
+        # `crates/quantibbler-server/tests/cubek_purity.rs` is invisible to the
+        # manifest-path form and red (rc=101) under this one.
+        run: cargo test --locked -p quantibbler-kernels -p quantibbler-server --all-targets
       - name: cargo clippy -D warnings
-        run: cargo clippy --manifest-path "$MANIFEST" --all-targets --locked -- -D warnings
+        run: cargo clippy --locked -p quantibbler-kernels -p quantibbler-server --all-targets -- -D warnings
       - name: cargo fmt --check
         run: cargo fmt --manifest-path "$MANIFEST" --all -- --check
       - name: Install uv

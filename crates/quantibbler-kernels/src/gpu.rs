@@ -78,15 +78,32 @@ pub struct GpuContext {
 }
 
 impl GpuContext {
+    /// Probe a specific device index and initialize the CubeCL client.
+    /// `init()` is `init_at(0)`. Fail-closed: every failure path returns
+    /// [`KernelError`] with [`GPU_INIT_HINT`] embedded, so an unavailable
+    /// device can never be mistaken for a working one.
+    pub fn init_at(device_index: usize) -> Result<Self, KernelError> {
+        let device = cubecl::Device::rocm(device_index).map_err(|e| {
+            KernelError(format!(
+                "{GPU_INIT_HINT}; device probe failed at index {device_index}: {e:?}"
+            ))
+        })?;
+        Ok(Self {
+            client: device.client(),
+        })
+    }
+
     /// Probe for the HIP device and initialize the CubeCL client.
     /// Fail-closed: every failure path returns [`KernelError`] with
     /// [`GPU_INIT_HINT`] embedded.
     pub fn init() -> Result<Self, KernelError> {
-        let device = cubecl::Device::rocm(0)
-            .map_err(|e| KernelError(format!("{GPU_INIT_HINT}; device probe failed: {e:?}")))?;
-        Ok(Self {
-            client: device.client(),
-        })
+        Self::init_at(0)
+    }
+
+    /// The live CubeCL client (crate-internal: the attention face in
+    /// `gpu_attention` shares this context).
+    pub(crate) fn client(&self) -> &Client {
+        &self.client
     }
 
     /// `unpack(packed) @ vec` on the device — same contract as

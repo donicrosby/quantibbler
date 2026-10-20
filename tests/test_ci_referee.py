@@ -557,3 +557,131 @@ def test_workflow_never_resolves_dependencies_unlocked():
     lean = _job_block(text, "lean-python")
     assert "uv pip install -e . pytest" in lean
     assert "--locked" not in lean, "the lean leg floats on the dependency floor by design"
+
+
+def _rust_gate_lines(text: str) -> dict[str, str]:
+    """The rust job's `cargo test|clippy|fmt` run lines, keyed by gate.
+
+    Comments are dropped first: the job body explains why the server crate is in
+    scope, and an explanation must not be readable as an executed command.
+    """
+    block = _job_block(_uncommented(text), "rust-kernels")
+    gates: dict[str, str] = {}
+    for line in block.splitlines():
+        stripped = line.strip()
+        for gate in ("cargo test", "cargo clippy", "cargo fmt"):
+            if stripped.startswith(f"run: {gate}"):
+                gates[gate] = stripped
+    return gates
+
+
+def _package_selection_findings(text: str) -> list[str]:
+    """What is wrong with the rust job's package selection (empty = correct).
+
+    `crates/quantibbler-server` carries the two purity guards —
+    `binary_purity.rs` (no libpython in the served binary) and `cubek_purity.rs`
+    (cubek-attention reachable under `gpu`, `cpu-reference` never enabled). A
+    `--manifest-path` selection of the kernels crate executes neither, so both
+    guards were decoration: the gates must select the packages by name.
+    """
+    findings: list[str] = []
+    gates = _rust_gate_lines(text)
+    for gate in ("cargo test", "cargo clippy"):
+        line = gates.get(gate)
+        if line is None:
+            findings.append(f"{gate}: gate missing from the rust job")
+            continue
+        for package in ("quantibbler-kernels", "quantibbler-server"):
+            if f"-p {package}" not in line:
+                findings.append(f"{gate} does not select -p {package}: {line}")
+        # Selection can also be narrowed while keeping the name in the text:
+        # `--manifest-path <kernels>` ignores the rest of the workspace, and
+        # `--exclude quantibbler-server` keeps the literal name alive.
+        for narrowing in ("--manifest-path", "--exclude"):
+            if narrowing in line:
+                findings.append(f"{gate} narrows its selection with {narrowing}: {line}")
+    fmt = gates.get("cargo fmt", "")
+    if "--all" not in fmt or "--check" not in fmt:
+        findings.append(f"cargo fmt is not a workspace-wide --check: {fmt}")
+    return findings
+
+
+def test_rust_job_executes_the_crates_carrying_the_purity_guards():
+    """A guard that exists but no job runs is decoration.
+
+    Measured before this pin existed: a deliberately failing test appended to
+    `crates/quantibbler-server/tests/cubek_purity.rs` was **invisible** to the
+    old `--manifest-path`-scoped job (0 mentions in its output) and red (rc=101,
+    `test result: FAILED`) under the current selection.
+    """
+    findings = _package_selection_findings(WORKFLOW.read_text())
+    assert findings == [], findings
+
+
+def _revert_test_gate_to_manifest_path(text: str) -> str:
+    return text.replace(
+        "run: cargo test --locked -p quantibbler-kernels -p quantibbler-server --all-targets",
+        "run: cargo test --locked --manifest-path"
+        ' "crates/quantibbler-kernels/Cargo.toml" --all-targets',
+        1,
+    )
+
+
+def _drop_server_from_the_test_gate(text: str) -> str:
+    return text.replace(
+        "run: cargo test --locked -p quantibbler-kernels -p quantibbler-server --all-targets",
+        "run: cargo test --locked -p quantibbler-kernels --all-targets",
+        1,
+    )
+
+
+def _drop_server_from_the_clippy_gate(text: str) -> str:
+    return text.replace(
+        "run: cargo clippy --locked -p quantibbler-kernels -p quantibbler-server "
+        "--all-targets -- -D warnings",
+        "run: cargo clippy --locked -p quantibbler-kernels --all-targets -- -D warnings",
+        1,
+    )
+
+
+def _exclude_server_while_naming_it(text: str) -> str:
+    """The lexical dodge: the package name stays in the line, excluded anyway."""
+    return text.replace(
+        "run: cargo test --locked -p quantibbler-kernels -p quantibbler-server --all-targets",
+        "run: cargo test --locked --workspace --exclude quantibbler-server --all-targets",
+        1,
+    )
+
+
+def _drop_workspace_fmt_check(text: str) -> str:
+    return text.replace(
+        'cargo fmt --manifest-path "$MANIFEST" --all -- --check', "cargo fmt --check", 1
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(_revert_test_gate_to_manifest_path, id="test-gate-reverted-to-manifest-path"),
+        pytest.param(_drop_server_from_the_test_gate, id="server-dropped-from-the-test-gate"),
+        pytest.param(_drop_server_from_the_clippy_gate, id="server-dropped-from-the-clippy-gate"),
+        pytest.param(_exclude_server_while_naming_it, id="server-excluded-while-still-named"),
+        pytest.param(_drop_workspace_fmt_check, id="fmt-no-longer-workspace-wide"),
+    ],
+)
+def test_rust_job_selection_pin_rejects_every_bypass(mutate):  # noqa: ANN001
+    """Each mutation narrows the selection while staying plausible YAML.
+
+    The first four keep the string `quantibbler-server` alive in the workflow
+    (the clippy line, or an `--exclude` argument), so a naive substring check
+    passes them all — the pin must read the gate lines themselves.
+    """
+    text = WORKFLOW.read_text()
+    mutated = mutate(text)
+    assert mutated != text, "the mutation is a no-op: the workflow drifted out from under it"
+    assert "quantibbler-server" in mutated, (
+        "the mutation must keep the package name alive to be a bypass"
+    )
+    assert _package_selection_findings(mutated) != [], (
+        "the pin accepted a mutation that narrows the selection"
+    )

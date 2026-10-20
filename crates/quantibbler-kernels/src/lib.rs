@@ -14,6 +14,9 @@ pub mod core;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 
+#[cfg(feature = "gpu")]
+pub mod gpu_attention;
+
 #[cfg(feature = "fast-cpu")]
 pub mod fast;
 

@@ -79,3 +79,17 @@ Every workflow shell step SHALL run under `bash -euo pipefail`; every third-part
 
 - **WHEN** the workflow is audited
 - **THEN** every `uses:` line names an immutable full-SHA reference, and no `pull_request_target` trigger exists
+
+### Requirement: CI SHALL execute every crate that carries a purity guard
+
+The rust job SHALL select its gate packages explicitly instead of scoping to the kernels manifest, so `crates/quantibbler-server` — which carries the no-libpython and cubek-purity guards — is executed rather than merely present; the referee SHALL pin that selection.
+
+#### Scenario: rust_job_executes_the_server_purity_guards
+
+- **WHEN** the rust job runs its test and clippy gates
+- **THEN** both name `-p quantibbler-kernels` and `-p quantibbler-server`, because a `--manifest-path` selection of the kernels crate alone never executes `crates/quantibbler-server/tests/binary_purity.rs` (no libpython in the served binary) or `cubek_purity.rs` (cubek-attention reachable under `gpu`, `cpu-reference` never enabled) — a guard that exists but no job runs is decoration, and the cubek adoption would otherwise ship on arrival with its purity pair unenforced
+
+#### Scenario: referee_pins_the_job_selection
+
+- **WHEN** the workflow is audited
+- **THEN** a pin asserts both package names appear in the rust job's test and clippy lines and that neither gate uses `--manifest-path`, so a quiet revert to kernels-only reds the referee instead of silently re-opening the local-only gap

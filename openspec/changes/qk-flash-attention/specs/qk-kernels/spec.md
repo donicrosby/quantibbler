@@ -16,7 +16,15 @@ n_heads/n_kv_heads grouping).
 - **WHEN** the tiled reference runs the fixture battery (seq ∈ {8, 10, 64},
   d ∈ {4, 128}, head counts (2,1) and (8,2), optional mask) against the
   direct formula softmax(QKᵀ/√d + mask)·V computed in float64,
-- **THEN** every output agrees with relative error ≤ 1e-12, including ragged
+- **THEN** outputs agree with the direct formula under a two-part gate:
+  infinity-norm relative error ≤ 1e-12 over the whole row, AND
+  per-element relative error ≤ 1e-12 restricted to entries within 1e-2
+  of their row maximum (per-element relative error is undefined near
+  softmax cancellation — an exactly-correct entry of magnitude 1e-4
+  under a row norm O(1) reads as ~1e-11 relative through no fault of
+  the implementation; the restricted clause keeps per-element
+  stringency where it is meaningful, and the inf-norm clause covers
+  the whole row), including ragged
   lengths where seq is not a multiple of the block size.
 
 #### Scenario: Causal mask semantics
@@ -24,6 +32,24 @@ n_heads/n_kv_heads grouping).
 - **WHEN** the reference runs with causal masking on,
 - **THEN** tokens at positions j > i contribute exactly zero to output row i
   (verified against a −inf-masked dense formula), for every fixture shape.
+
+#### Scenario: Combined causal and additive mask
+
+- **WHEN** the reference runs with causal masking on AND an additive mask
+  that suppresses allowed (lower-triangle) positions,
+- **THEN** both constraints apply together — the additive mask takes
+  effect on top of causal blocking, never silently disabling either —
+  verified against the dense formula carrying the same combined
+  −inf masking.
+
+#### Scenario: Fully-masked row yields the dense NaN pattern
+
+- **WHEN** a fixture masks every score in one row (row max −inf, ℓ = 0),
+- **THEN** that row's output is NaN in exactly the positions the dense
+  `0/0` formula produces them (position-for-position `isnan` match),
+  with no invented fallback value — asserted by a dedicated
+  NaN-pattern check, NOT routed through the finite-output roundoff
+  gate.
 
 ### Requirement: CubeCL tiled attention GPU face (exact, f32)
 

@@ -12,7 +12,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 extension-module = ["pyo3/extension-module"]
-gpu = ["dep:cubecl"]
+gpu = ["dep:cubecl", "dep:cubek-attention"]
 fast-cpu = ["dep:wide", "dep:rayon"]
 default = []
 
@@ -21,6 +21,12 @@ pyo3 = { version = "0.30", features = ["abi3-py311"] }
 numpy = "0.30"
 nalgebra = "0.34.2"
 cubecl = { version = "0.11.0", features = ["hip"], optional = true }
+# The adopted attention substrate (change qk-flash-attention, design.md
+# "Substrate decision 2026-10-19"): cubek-attention 0.3.0 on the same
+# cubecl 0.11 line. `default-features = false` keeps `cubecl/default` (and
+# its cuda/wgpu/metal backends) out of our HIP-only build; `std` is what the
+# launcher actually needs.
+cubek-attention = { version = "0.3.0", default-features = false, features = ["std"], optional = true }
 wide = { version = "0.7", optional = true }
 rayon = { version = "1.10", optional = true }
 

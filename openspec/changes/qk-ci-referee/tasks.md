@@ -273,3 +273,60 @@ default `$PWD/.venv` / `.venv-lean` and nothing else changes.
   tools/ci/pytest_summary.py tools/ci/report_checks.py tools/ci/driver_smoke.py
   tools/ci/abort_leg.py tests/test_ci_referee.py` is empty against the hashes
   above.
+
+### Rust-job scope fix: the purity guards now have a job that runs them (coder, 2026-10-27)
+
+- **Finding (my own defect, surfaced while landing the cubek purity pair):** the
+  rust job was `--manifest-path`-scoped to the kernels crate, so
+  `crates/quantibbler-server`'s test targets never executed in CI —
+  `binary_purity.rs` had been local-only since the server landed, and the new
+  `cubek_purity.rs` pair would have shipped unenforced. Measured rather than
+  argued: a deliberately failing test appended to `cubek_purity.rs` was
+  **invisible** to the old form (0 mentions in its output) and red
+  (`test result: FAILED`, rc=101) under the new one.
+- **Fix:** `cargo test` and `cargo clippy` now select explicitly — `--locked -p
+  quantibbler-kernels -p quantibbler-server --all-targets` — instead of
+  `--manifest-path "$MANIFEST"`. `cargo fmt` keeps `--all`: measured that the
+  manifest-path form *already* covered every member (a deliberately poisoned
+  server file was flagged by it), so fmt's scope was never the gap; what the pin
+  asserts there is workspace-wide `--all --check`. `MANIFEST` remains for the
+  maturin build, where it is the correct argument.
+- **Spec delta:** new `qk-ci` requirement "CI SHALL execute every crate that
+  carries a purity guard" with two scenarios — the job executes the server's
+  guards, and the referee pins the selection.
+- **Pins (`tests/test_ci_referee.py`, +126):**
+  `test_rust_job_executes_the_crates_carrying_the_purity_guards` reads the rust
+  job's gate lines (comments dropped first, so the job's own explanatory comment
+  cannot satisfy a check) and requires both `-p` packages in test and clippy,
+  rejects `--manifest-path`/`--exclude` on those gates, and requires fmt to be
+  workspace-wide. Five-row bypass battery, each rejected and each asserted
+  non-no-op: revert-to-manifest-path, drop-server-from-test,
+  drop-server-from-clippy, `--workspace --exclude quantibbler-server` (the
+  lexical dodge that keeps the name alive), fmt-no-longer-workspace-wide.
+- **Demonstrated on the real workflow, not only in the battery:** with `ci.yml`
+  reverted in place to the pre-fix gate lines (the name still appears twice in
+  the file, so a substring check passes), the pin **fails** naming both narrowed
+  gates while `'quantibbler-server' in text` still evaluates True; then restored
+  byte-identical — `8cfb8511f5e3` before and after — with the pin green again.
+- **Rehearsed job bodies (offline, i.e. the cache-present case):**
+  `cargo test --locked -p quantibbler-kernels -p quantibbler-server --all-targets`
+  → **150 passed / 0 failed**, with `binary_purity.rs` (12 passed) and
+  `cubek_purity.rs` (2 passed) both executing; `cargo clippy … -D warnings` rc=0;
+  `cargo fmt --all --check` rc=0.
+- **Existing pins checked, not assumed:** `test_workflow_never_resolves_dependencies_unlocked`
+  still finds exactly two `cargo (test|clippy)` run lines with `--locked` in
+  both; no pin asserts `--manifest-path` presence; the `rust-kernels` job key is
+  unchanged, so `_job_block` still resolves it.
+- **Gates at this record:** `tests/test_ci_referee.py` **52 passed** (46 + the
+  positive pin + 5 battery rows); full suite **434 passed**; lean tier
+  **352 passed / 16 skipped** (`skip discipline holds`); pre-commit RC=0;
+  yamllint RC=0; `validate qk-ci-referee --strict` RC=0.
+- **Fresh transfer hashes for this cycle** (the earlier seven-file transfer
+  verified against `5e7e4e2` is closed and undisturbed; these are its
+  successors, not a violation of it): `.github/workflows/ci.yml`
+  `8cfb8511f5e3`, `tests/test_ci_referee.py` `718d1709327c`,
+  `openspec/changes/qk-ci-referee/specs/qk-ci/spec.md` `88361731fee7`.
+  `tools/ci/*` and `.yamllint.yaml` are **untouched** by this cycle.
+- **Honesty boundary:** unchanged — the `uses:` steps (cache lookup/restore/save)
+  still execute only on a runner; every shell body they gate is rehearsed here,
+  the new gate bodies included.
