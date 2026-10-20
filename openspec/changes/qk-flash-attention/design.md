@@ -1,5 +1,49 @@
 # qk-flash-attention — Design
 
+## User directive (2026-10-20): consume CubeK for the attention kernels
+
+User: "we'd want to use CubeK for the attention kernels." Recorded as a
+binding design steer for this change (and qk-sage-attention): consume
+tracel-ai/cubek's `cubek-attention` crate (variants `mma` / `unit` /
+`multi-rows`) rather than hand-rolling the CubeCL tiled attention face.
+The spec's fail-closed construction and double-gated hardware-test
+requirements stay — they constrain the wrapper regardless of kernel
+provenance. Verified 2026-10-20 (crates.io + repo): `cubek-attention`
+v0.2.0 exists (~217K downloads, MIT OR Apache-2.0, active), and its
+`cpu-reference` feature is exactly the third parity face this change
+already names. Status 2026-10-20 (coder registry probe + sec-eng
+provenance audit): version alignment is RESOLVED — `cubek-attention`
+0.3.0 is published (2026-10-06, not yanked) with normal dependencies
+`cubecl ^0.11.0` / `cubecl-common ^0.11.0`, exactly this repo's pin; a
+scratch lockfile probe shows exactly one cubecl 0.11.0 in the graph
+(the 0.2.0 dual-major hazard does not exist on this route); 0.3.0
+declares no rust-version, so no MSRV change. Provenance: all four cubek
+crates ship from tracel-ai/cubek — the same publisher as cubecl itself —
+zero new publishers in the graph. Adapter invariants the re-spec MUST
+carry: (1) the forward face has a HIDDEN softmax scale 1/sqrt(head_dim)
+(partition_attention.rs:75) — the adapter must NOT pre-scale Q; the
+proposal's pre-scale item is superseded and the no-pre-scale invariant
+goes in the delta, not task-time discovery; (2) the GQA gap is confirmed
+(single num_heads derived from query.shape[1]) — the adapter expands K/V
+to Q's head count at the 2x KV traffic cost the perf probe must beat;
+(3) `cpu-reference` ships inside cubek-test-utils — the shipped server
+never enables it. Executable instrument, per the binary-purity lesson
+(a link-based test cannot see a feature flag): a SIBLING test file next
+to binary_purity.rs reads the RESOLVED graph (`cargo tree -p
+quantibbler-server -e normal,build --locked`), package-scoped — never
+workspace-wide, never `--all-features` (the kernels crate's own test
+build legitimately carries cubek-attention/cpu-reference as the third
+parity face, and resolver-2 keeps dev-dependency features out of the
+server graph) — and asserts a POSITIVE+NEGATIVE pair: cubek-attention
+IS reachable from quantibbler-kernels under `-F gpu`, and
+cubek-test-utils is NOT reachable from quantibbler-server. The pair is
+self-guarding: dropping the dep or moving it out from under the `gpu`
+feature reds the positive half instead of the negative rotting into
+decoration. The tripwire lands in the SAME commit as the cubek
+adoption — a negative-only assertion today is vacuously green; (4) the commit introducing cubek-attention carries the
+regenerated Cargo.lock in the SAME commit — the --locked referee gates
+make a split landing red.
+
 ## Method provenance (rule: every claim cited)
 
 - Tiling + online softmax + rescaling identity: [FA] §3.1, Algorithm 1 —

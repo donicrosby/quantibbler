@@ -56,7 +56,8 @@ N×N score matrix. [FA] Theorem 2 bounds the IO win.
 
 ## Impact
 
-- Specs: qk-kernels +2 requirements (tiled reference, CubeCL kernel),
+- Specs: qk-kernels +4 requirements (tiled reference, CubeCL kernel,
+  fail-closed construction, double-gated hardware tests),
   qk-server +2 requirements (attention face dispatch, serving parity).
 - Code: `crates/quantibbler-kernels/src/gpu_attention.rs` (+tests),
   `src/quantibbler/kernels/attention_tiled.py` (reference), engine wiring.

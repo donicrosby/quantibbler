@@ -1,5 +1,18 @@
 # qk-sage-attention — Design
 
+## User directive (2026-10-20): consume CubeK for the attention kernels
+
+Same binding steer as qk-flash-attention (full record there). Version
+alignment RESOLVED: cubek-attention 0.3.0 on the registry (cubecl
+^0.11.0, our exact pin; no rust-version; same tracel-ai publisher) —
+no git rev, no MSRV change. The hidden-scale, GQA-expansion,
+cpu-reference purity-test, and same-commit Cargo.lock invariants from
+the flash record apply here unchanged. Sage-specific: the score path
+isolates its softmax construction to one seam
+(partition_attention.rs:75), so the γ(K)-mean-shift has one place to
+live — whether it is pluggable without a custom stage is deferred to
+when this change opens, not guessed now.
+
 ## Method provenance (rule: every claim cited)
 
 - γ(K) = K − mean(K) and the shift-invariance exactness argument: [SA]

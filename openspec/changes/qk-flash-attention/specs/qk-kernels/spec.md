@@ -27,22 +27,24 @@ n_heads/n_kv_heads grouping).
 
 ### Requirement: CubeCL tiled attention GPU face (exact, f32)
 
-The kernels crate (`gpu` feature) SHALL provide an f32 GPU attention face
-with no N×N global-memory materialization, on the adopted `cubek-attention`
-substrate (registry evidence and contract-gap adapters recorded in
-design.md), with causal masking enabled. The face MUST use the fail-closed
-construction pattern (typed error with the validated staging hint), and
-hardware tests MUST be double-gated (QUANTIBBLER_GPU_TESTS=1 + feature).
-The independent cubek `cpu-reference` implementation is a THIRD face in
-the parity matrix.
+The kernels crate (`gpu` feature) SHALL provide an f32 GPU attention face on
+the adopted `cubek-attention` substrate (registry evidence and contract-gap
+adapters recorded in design.md), with causal masking enabled and no N×N
+score-matrix materialization in global memory. The independent cubek
+`cpu-reference` implementation SHALL be a third face in the parity matrix.
 
 #### Scenario: GPU parity within the reassociation budget
 
-- **WHEN** hardware tests run on a real device (both gate states verified:
-  unset = clean skips, set = executed),
+- **WHEN** hardware tests run on a real device,
 - **THEN** the GPU face matches the NumPy reference (widened from f32) with
   relative error ≤ 1e-5 on the full fixture battery, including ragged
   tails and the masked positions.
+
+### Requirement: Fail-closed construction of the GPU face
+
+Construction of the GPU face SHALL fail closed: with no usable HIP device it
+returns a typed error carrying the validated staging hint, never a silent
+wrong-compute path.
 
 #### Scenario: Fail-closed construction without hardware
 
@@ -50,3 +52,15 @@ the parity matrix.
 - **THEN** construction returns a typed error embedding the staging recipe
   (never a silent wrong-compute path), and the CPU reference face remains
   the only active implementation.
+
+### Requirement: Double-gated hardware tests
+
+Hardware tests for the face SHALL be double-gated: they execute only when
+`QUANTIBBLER_GPU_TESTS=1` is set AND the `gpu` feature is enabled.
+
+#### Scenario: Both gate states are verified
+
+- **WHEN** the hardware suite runs with the gate unset, and separately with
+  `QUANTIBBLER_GPU_TESTS=1` set,
+- **THEN** the unset state produces clean skips and the set state executes
+  the parity battery.
