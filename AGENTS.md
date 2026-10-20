@@ -61,6 +61,18 @@ Every implementation change runs, before landing:
 
 Install the hook once per clone: `uv run pre-commit install`.
 
+## Run launch protocol
+
+Every container run launch (PTQ runs, GPU probes, benchmarks) is
+announced in the team room BEFORE firing — the exact launch line or the
+wrapper's `DRY_RUN` output — never after. Unannounced launches leave
+unattributable corpses in the forensic trail: on 2026-10-27 a second
+seq-2048-class tune attempt from an unknown session on this host died
+at the 32g cap (kernel-provable: container `2d2d4b6df1e0`, 33,480,724 kB,
+15:56:27Z) and its launcher is unestablishable post-mortem (`--rm`,
+no journal, events not persisted). One launch, one announcement, one
+name.
+
 ## Method sources
 
 Methods are implemented from the pinned papers in `docs/papers/`; cite the
