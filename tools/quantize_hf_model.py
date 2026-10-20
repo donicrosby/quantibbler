@@ -46,7 +46,6 @@ Usage (from the repo root):
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import random
 import struct
@@ -85,6 +84,17 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from quantibbler.ptq.api import QuantizedModel, quantize_model
 from quantibbler.ptq.config import PTQConfig, StageHyper
+from quantibbler.qk_report import (
+    COLLAPSE_LINE,
+    FAILED,
+    OK_LINE,
+    dump_report,
+    provenance,
+    verdict,
+)
+from quantibbler.qk_report import (
+    exit_code as verdict_exit_code,
+)
 
 
 def _wikitext_cache_root() -> Path:
@@ -615,6 +625,8 @@ def main() -> int:
     print(f"      ppl_quant      = {ppl_quant:.4f}")
     print(f"      effective BPW  = {bpw:.4f}  (qpk1 layer bytes: {total_qpk1:,})", flush=True)
 
+    prov = provenance(args.solver, args.scale_dtype)
+
     print("[6/6] exporting qk-server model directory ->", out_dir, flush=True)
     embedding_f64 = causal.get_input_embeddings().weight.detach().to(torch.float64).cpu().numpy()
     # Attention geometry + norm inventory + norm weights straight from the
@@ -641,16 +653,20 @@ def main() -> int:
         eos_token_id=cfg.eos_token_id,
         bos_token_id=cfg.bos_token_id,
         tokenizer=tokenizer,
-        config_f64={"dtype_note": "solver float64 / scales fp16 / artifact qpk1"},
+        config_f64={"dtype_note": prov["dtype_note"]},
         geometry=geometry,
         inventory=inventory,
         norm_weights=norm_weights,
         lm_head_f64=lm_head_f64,
         tied=tied,
     )
+    ppl_ratio = ppl_quant / ppl_base
+    status = verdict(ppl_ratio)
     report = {
         "model": args.model,
         "rank": args.rank,
+        "solver": prov["solver"],
+        "scale_dtype": prov["scale_dtype"],
         "seq_len": args.seq_len,
         "calibration_rows": len(calib) * BATCH,
         "eval_rows": len(held_out) * BATCH,
@@ -658,22 +674,37 @@ def main() -> int:
         "seed": args.seed,
         "ppl_baseline_bf16": ppl_base,
         "ppl_quant_native": ppl_quant,
-        "ppl_ratio": ppl_quant / ppl_base,
+        "ppl_ratio": ppl_ratio,
         "effective_bpw": bpw,
         "qpk1_layer_bytes": total_qpk1,
         "regime": {
             "baseline_eval": "bfloat16 (checkpoint native; papers' pedestal)",
             "solver": "float64, per-layer just-in-time (sign margins + parity reference)",
             "kd_and_ste": "model dtype (the papers' distillation regime)",
-            "artifact": "qpk1: +-1 bitplanes + float16 scales",
+            "artifact": prov["regime_artifact"],
         },
+        "status": status,
         "wall_seconds": round(time.time() - t0, 1),
     }
-    (out_dir / "quantize_report.json").write_text(json.dumps(report, indent=2) + "\n")
-    print(json.dumps(report, indent=2))
+    payload, faithful = dump_report(report)
+    if not faithful:
+        # The report could not be serialized as measured (an unrecognized
+        # value type reached the encoder). The durable trace now says failed,
+        # so the process verdict must say failed too — a report and an exit
+        # code that disagree is exactly the drift this gate exists to stop.
+        status = FAILED
+    (out_dir / "quantize_report.json").write_text(payload)
+    print(payload)
+    print(
+        f"\nE2E quality verdict: {status.upper()}  "
+        f"(ppl_ratio={ppl_ratio!r}; ok <= {OK_LINE} < degraded <= "
+        f"{COLLAPSE_LINE} < failed)"
+    )
     print("\nserver acquisition check (linear-stack engine: load only, no generation):")
     print(f"  cargo run --release -p quantibbler-server -- serve --model-dir {out_dir}")
-    return 0
+    # Fail closed: the artifact and report above are written either way, so a
+    # failed run leaves a forensically complete artifact and a nonzero exit.
+    return verdict_exit_code(status)
 
 
 if __name__ == "__main__":
