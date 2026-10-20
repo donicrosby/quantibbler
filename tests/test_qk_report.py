@@ -626,6 +626,100 @@ def test_report_driver_is_wired_to_the_gate():
     assert "provenance(args.solver, args.scale_dtype)" in src
 
 
+def _scratch_dir_findings(src: str) -> list[str]:
+    """Findings for a scratch-dir default that cannot survive a foreign host.
+
+    The default is load-bearing: `scale_calib` hands `QUANTIBBLER_KD_TMPDIR` to
+    `tempfile.TemporaryDirectory`, which does NOT create parents, so a default
+    naming a directory that only exists on one machine is a guaranteed crash
+    everywhere else.
+    """
+    try:
+        tree = ast.parse(src)
+    except SyntaxError as exc:  # pragma: no cover - a broken driver is a bigger finding
+        return [f"unparseable driver source: {exc}"]
+    # `_SANDBOX_SCRATCH = Path("/opt/data/tmp")` — the literal may live in a
+    # module-level constant instead of inline in the default.
+    path_constants = {
+        node.targets[0].id: node.value.args[0].value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "Path"
+        and node.value.args
+        and isinstance(node.value.args[0], ast.Constant)
+        and isinstance(node.value.args[0].value, str)
+    }
+    defaults = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "setdefault"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "QUANTIBBLER_KD_TMPDIR"
+    ]
+    if len(defaults) != 1:
+        return [f"expected exactly one QUANTIBBLER_KD_TMPDIR default, found {len(defaults)}"]
+    expression = defaults[0].args[1]
+    default = ast.unparse(expression)
+    referenced = {node.id for node in ast.walk(expression) if isinstance(node, ast.Name)}
+    sandbox = "/opt/data/tmp"
+    findings = []
+    if "tempfile.gettempdir()" not in default:
+        findings.append(f"no platform-scratch fallback in the default: {default}")
+    if "is_dir()" not in default:
+        findings.append(f"the sandbox path is not existence-probed: {default}")
+    if sandbox not in default and not any(path_constants.get(n) == sandbox for n in referenced):
+        findings.append(f"the sandbox scratch preference is gone: {default}")
+    return findings
+
+
+def test_driver_scratch_dir_default_is_not_a_sandbox_only_path():
+    """The KD scratch default must survive a host where `/opt/data/tmp` is absent.
+
+    It was a bare `/opt/data/tmp` — a path that exists in this sandbox and on no
+    CI runner — and that is what turned the first full-python CI run red while
+    every sandbox rehearsal stayed green (206/0): the run died at KD calibration
+    with `FileNotFoundError` from `tempfile.TemporaryDirectory`. The default is
+    now an existence-probed sandbox preference with a platform-scratch fallback.
+    """
+    findings = _scratch_dir_findings(_DRIVER.read_text())
+    assert findings == [], findings
+
+
+@pytest.mark.parametrize(
+    ("sandbox_only_source", "expected"),
+    [
+        (
+            'import os\nos.environ.setdefault("QUANTIBBLER_KD_TMPDIR", "/opt/data/tmp")\n',
+            "no platform-scratch fallback",
+        ),
+        (
+            'import os\nos.environ.setdefault("QUANTIBBLER_KD_TMPDIR", str(_SANDBOX_SCRATCH))\n',
+            "not existence-probed",
+        ),
+        (
+            'import os\nos.environ.setdefault("QUANTIBBLER_KD_TMPDIR", tempfile.gettempdir())\n',
+            "sandbox scratch preference is gone",
+        ),
+        (
+            "import os\n"
+            'os.environ.setdefault("QUANTIBBLER_KD_TMPDIR", gettempdir())\n'
+            'os.environ.setdefault("QUANTIBBLER_KD_TMPDIR", "/opt/data/tmp")\n',
+            "exactly one",
+        ),
+    ],
+)
+def test_scratch_dir_pin_rejects_every_sandbox_only_shape(sandbox_only_source, expected):  # noqa: ANN001
+    findings = _scratch_dir_findings(sandbox_only_source)
+    assert any(expected in finding for finding in findings), (expected, findings)
+
+
 def test_driver_probe_knobs_are_parser_owned_and_threshold_free():
     """`probe_knob_defaults_and_validation` + `probe_threshold_not_overrideable`,
     in the lean tier: the two specced knobs are argparse-owned with the specced

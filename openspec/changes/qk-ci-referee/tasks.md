@@ -163,6 +163,58 @@ default `$PWD/.venv` / `.venv-lean` and nothing else changes.
   executed locally. That is the one thing in this file that cannot be rehearsed
   here, and it is stated rather than implied.
 
+### First run on main (run `39444761866`): one real red, root-caused and fixed
+
+- **Verdict shape:** openspec ✅, lean-python ✅ (torch proven absent), driver-smoke
+  ✅, rust-kernels ✅, **full-python ❌**, abort-leg ❌ *by design* (cache miss —
+  fail-closed doing its job; cleared by one `workflow_dispatch` seed run).
+- **Root cause, measured rather than guessed:** the driver defaulted
+  `QUANTIBBLER_KD_TMPDIR` to the **sandbox path** `/opt/data/tmp` (deliberate here:
+  real disk, where `/tmp` is a small tmpfs). `scale_calib` hands that value to
+  `tempfile.TemporaryDirectory`, which creates its leaf but **not its parents** —
+  so on a runner, where `/opt/data` does not exist, the run dies. Reproduced by
+  making the sandbox environment match a runner:
+  `QUANTIBBLER_KD_TMPDIR=/nonexistent/ci-runner/dir` →
+  `FileNotFoundError: [Errno 2] No such file or directory:
+  '/nonexistent/ci-runner/dir/quantibbler-kd-7gtqpwsm'` raised from
+  `scale_calib.py:139`, taking the ptq driver test down with it (pre-fix: **1
+  failed** in that file, **15 failed** across the ptq tier; post-fix: 66 pass in
+  both that shape and with the variable unset). This is precisely why every
+  sandbox rehearsal was green: `/opt/data/tmp` exists here and on no runner.
+- **Why the smoke leg stayed green on the same run:** `tools/ci/driver_smoke.py`
+  sets `QUANTIBBLER_KD_TMPDIR` explicitly — its docstring documents this exact
+  trap. The leg that went red is the one that runs the driver through pytest,
+  which inherited the default.
+- **Fix, three layers, minimal:**
+  1. **Driver:** the sandbox scratch preference is now existence-probed with a
+     platform-scratch fallback (`str(_SANDBOX_SCRATCH) if
+     _SANDBOX_SCRATCH.is_dir() else tempfile.gettempdir()`), and breadcrumbs
+     follow the resolved directory instead of a second hardcoded sandbox path.
+  2. **`scale_calib._kd_scratch_dir()`:** a nominated scratch directory is
+     created (`mkdir(parents=True, exist_ok=True)`) so a set-but-missing override
+     cannot reach tempfile as a missing parent — the same defect class, at the
+     point of use rather than only at the default.
+  3. **Test:** the ptq driver test owns its KD directory
+     (`env["QUANTIBBLER_KD_TMPDIR"] = <tmp>/kd-tmp`) instead of inheriting the
+     host's scratch location.
+- **Pins so this class cannot return:**
+  `test_driver_scratch_dir_default_is_not_a_sandbox_only_path` (shape: exactly one
+  default, existence probe present, fallback present, sandbox preference named —
+  plus 4 rejected shapes: bare literal, no probe, no fallback, two defaults) and
+  `test_kd_scratch_dir_creates_a_nominated_path_that_does_not_exist` /
+  `..._defers_to_the_platform_default_when_unset`.
+- **Gates after the fix:** lean **131 passed/16 skipped** (`skip discipline
+  holds`); full suite **213 passed/0 skipped**; ptq tier **66 passed** both with
+  `QUANTIBBLER_KD_TMPDIR` unset and with a bogus value exported; pre-commit RC=0
+  (one ruff-format rewrite, re-verified after); all active changes strict-valid.
+- **Honesty boundary:** the runner branch is proven by evaluating the shipped
+  default expression with the existence probe forced (sandbox → `/opt/data/tmp`,
+  absent → `/tmp`; both existing directories) and by the environment-matched
+  reproduction above. Hiding `/opt/data/tmp` from a real process in this sandbox
+  was not possible — a tmpfs or bind mount leaves the mount point a directory, and
+  a namespace that removes the path also removes the repo path. The next real run
+  is the end-to-end proof.
+
 ### Bug-hunter sign-off — final re-verify of the SF-1/SF-2 tree (2026-10-20)
 
 - **Clean tree:** `tests/test_ci_referee.py` 46 passed / 0 skipped; lean suite

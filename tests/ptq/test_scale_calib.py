@@ -5,7 +5,7 @@ import torch
 from torch import nn
 
 from quantibbler.ptq.config import PTQConfig
-from quantibbler.ptq.scale_calib import calibrate_scales
+from quantibbler.ptq.scale_calib import _kd_scratch_dir, calibrate_scales
 
 
 class _TinyKDModel(nn.Module):
@@ -197,3 +197,24 @@ def test_scn_kd_trust_region_bounds_movement():
         p2 = np.maximum(np.abs(pre[name][1]), 1e-30)
         assert (st.s1 <= 2.0 * p1 + 1e-30).all() and (st.s1 >= 0.5 * p1 - 1e-30).all(), name
         assert (st.s2 <= 2.0 * p2 + 1e-30).all() and (st.s2 >= 0.5 * p2 - 1e-30).all(), name
+
+
+def test_kd_scratch_dir_creates_a_nominated_path_that_does_not_exist(tmp_path, monkeypatch):  # noqa: ANN001
+    """A set-but-missing override must not reach tempfile as a missing parent.
+
+    `TemporaryDirectory` creates its leaf and not its parents, so the nominated
+    directory is created here — otherwise the failure surfaces as a
+    `FileNotFoundError` from inside tempfile, with no hint of which config
+    setting named the path. Every ptq test that calibrates scales in-process
+    honors the override, so this is what keeps an exported
+    `QUANTIBBLER_KD_TMPDIR` from turning the suite red.
+    """
+    nominated = tmp_path / "deep" / "kd-tmp"
+    monkeypatch.setenv("QUANTIBBLER_KD_TMPDIR", str(nominated))
+    assert _kd_scratch_dir() == str(nominated)
+    assert nominated.is_dir()
+
+
+def test_kd_scratch_dir_defers_to_the_platform_default_when_unset(monkeypatch):  # noqa: ANN001
+    monkeypatch.delenv("QUANTIBBLER_KD_TMPDIR", raising=False)
+    assert _kd_scratch_dir() is None

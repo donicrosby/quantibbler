@@ -17,6 +17,7 @@ overrides for test speed).
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -26,6 +27,23 @@ from .block_recon import QuantizedLayerState
 from .config import PTQConfig
 
 __all__ = ["ScaleCalibResult", "calibrate_scales"]
+
+
+def _kd_scratch_dir() -> str | None:
+    """The nominated KD scratch directory, created if a caller named one.
+
+    ``tempfile.TemporaryDirectory`` creates its own leaf but NOT its parents, so
+    a nominated path that does not exist yet must be made first: otherwise a
+    set-but-missing override — or a default naming a directory that exists on
+    one machine and nowhere else, which is how the first full-python CI run went
+    red — dies with a ``FileNotFoundError`` raised from inside tempfile, far from
+    the configuration that caused it. ``None`` means "use the platform default".
+    """
+    nominated = os.getenv("QUANTIBBLER_KD_TMPDIR")
+    if not nominated:
+        return None
+    Path(nominated).mkdir(parents=True, exist_ok=True)
+    return nominated
 
 
 class ScaleCalibResult:
@@ -136,9 +154,7 @@ def calibrate_scales(
     n_rows = sum(b.shape[0] for b in batches) * rows_per_sample
     cache_dt = np.float64 if probe.dtype == torch.float64 else np.float32
     torch_cache_dt = torch.float64 if probe.dtype == torch.float64 else torch.float32
-    tmp = tempfile.TemporaryDirectory(
-        prefix="quantibbler-kd-", dir=os.getenv("QUANTIBBLER_KD_TMPDIR")
-    )
+    tmp = tempfile.TemporaryDirectory(prefix="quantibbler-kd-", dir=_kd_scratch_dir())
     teacher_mm = np.memmap(
         f"{tmp.name}/teacher_logits.bin",
         dtype=cache_dt,

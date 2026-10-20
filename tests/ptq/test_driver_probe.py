@@ -126,6 +126,14 @@ def _run_driver(
     env = dict(os.environ)
     env["HF_HUB_CACHE"] = str(corpus_root)
     env["QUANTIBBLER_BREADCRUMBS"] = str(out_dir / "breadcrumbs.log")
+    # The KD teacher-logit cache needs a directory that EXISTS
+    # (`tempfile.TemporaryDirectory` does not create parents), and this test must
+    # not inherit the host's scratch dir: the driver's default was the sandbox
+    # path `/opt/data/tmp`, which exists here and on no CI runner — that is what
+    # turned the first full-python run red. Owner the directory, explicitly.
+    kd_tmp = out_dir / "kd-tmp"
+    kd_tmp.mkdir(parents=True, exist_ok=True)
+    env["QUANTIBBLER_KD_TMPDIR"] = str(kd_tmp)
     cmd = [
         sys.executable,
         str(DRIVER),

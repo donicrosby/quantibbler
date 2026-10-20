@@ -50,6 +50,7 @@ import os
 import random
 import struct
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -57,10 +58,18 @@ from typing import Any
 
 # Fail closed on network before transformers/HF get a chance to phone home,
 # and keep the (multi-GB) KD teacher-logit cache off tmpfs — /tmp is a
-# small tmpfs here; /opt/data is real disk.
+# small tmpfs here; /opt/data is real disk. That preference applies ONLY where
+# the directory exists: a default that cannot exist off-sandbox is what turned
+# the first full-python CI run red (a runner has no /opt/data, and
+# `tempfile.TemporaryDirectory` does not create parents), so every other host
+# gets the platform scratch dir instead of a path that is guaranteed missing.
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-os.environ.setdefault("QUANTIBBLER_KD_TMPDIR", "/opt/data/tmp")
+_SANDBOX_SCRATCH = Path("/opt/data/tmp")
+os.environ.setdefault(
+    "QUANTIBBLER_KD_TMPDIR",
+    str(_SANDBOX_SCRATCH) if _SANDBOX_SCRATCH.is_dir() else tempfile.gettempdir(),
+)
 # Bounded native allocations (hundreds of MB drift otherwise) and bounded
 # BLAS/torch thread pools (each thread's stacks and scratch count against
 # the cgroup this sandbox shares).
@@ -509,7 +518,10 @@ def main() -> int:
     # markers to a plain file. Whatever kills us, the tail of this file
     # says WHERE we were and HOW BIG we were.
     breadcrumb_path = Path(
-        os.getenv("QUANTIBBLER_BREADCRUMBS", "/opt/data/tmp/quantibbler-breadcrumbs.log")
+        os.getenv(
+            "QUANTIBBLER_BREADCRUMBS",
+            str(Path(os.environ["QUANTIBBLER_KD_TMPDIR"]) / "quantibbler-breadcrumbs.log"),
+        )
     )
 
     def _bread(note: str) -> None:
