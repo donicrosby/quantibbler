@@ -215,6 +215,40 @@ default `$PWD/.venv` / `.venv-lean` and nothing else changes.
   a namespace that removes the path also removes the repo path. The next real run
   is the end-to-end proof.
 
+### Task-4 drift fix: the scratch-dir pin is structural, not token-grepping (2026-10-20)
+
+@bug-hunter found two one-token drifts that the first version of the pin accepted
+(both reproduced here against the real driver before fixing):
+
+- **A — probe polarity flip.** `str(_SANDBOX_SCRATCH) if not
+  _SANDBOX_SCRATCH.is_dir() else tempfile.gettempdir()` keeps all three tokens
+  (`is_dir()`, `tempfile.gettempdir()`, and the sandbox path via the constant) and
+  inverts the behavior: fine in the sandbox, crash on a runner.
+- **B — nested fallback.** `… else str(Path(tempfile.gettempdir()) /
+  "quantibbler-kd")` keeps all three tokens and reintroduces the identical
+  missing-parent `FileNotFoundError`, because `TemporaryDirectory` creates its leaf
+  and not its parents and `/tmp/quantibbler-kd` exists on no fresh runner.
+- **Reproduction:** with v1 of the pin, both mutations of the *real* driver were
+  **accepted** (empty findings); with the structural pin both are **rejected**, for
+  the right reason each time — "the probe must be the true condition of the branch"
+  and "the fallback must be exactly the platform scratch dir".
+- **Fix (test-only, `tests/test_qk_report.py`, +112/−22):** the default is now
+  pinned by AST shape — it must be an `ast.IfExp` whose `test` is a bare
+  `.is_dir()` call (never wrapped in `UnaryOp(Not)`) and whose `orelse` unparses to
+  exactly `tempfile.gettempdir()`. Path arithmetic on top of the platform scratch
+  dir is rejected by construction: over-strict is the correct failure direction,
+  since a deliberate fallback change must force a deliberate pin revisit.
+- **Battery, 6 rows, all applied to the REAL driver source** (a synthetic snippet
+  would be rejected by the undefined-constant check rather than by the shape under
+  test — that is how A and B survived v1): polarity flip, nested fallback, bare
+  literal, no probe, no fallback, two defaults. Each row also asserts the mutation
+  is not a no-op, and the two token-grep escapes assert the three old tokens are
+  all still present — the battery documents *why* the greps were insufficient.
+- **Gates:** lean **133 passed/16 skipped** (`skip discipline holds`), full suite
+  **215 passed/0 skipped**, pre-commit RC=0 (no rewrites), all active changes
+  strict-valid. Nothing outside `tests/test_qk_report.py` changed, so the seven-file
+  sign-off transfer table is untouched.
+
 ### Bug-hunter sign-off — final re-verify of the SF-1/SF-2 tree (2026-10-20)
 
 - **Clean tree:** `tests/test_ci_referee.py` 46 passed / 0 skipped; lean suite

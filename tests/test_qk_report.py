@@ -626,6 +626,9 @@ def test_report_driver_is_wired_to_the_gate():
     assert "provenance(args.solver, args.scale_dtype)" in src
 
 
+_SCRATCH_DEFAULT = "str(_SANDBOX_SCRATCH) if _SANDBOX_SCRATCH.is_dir() else tempfile.gettempdir()"
+
+
 def _scratch_dir_findings(src: str) -> list[str]:
     """Findings for a scratch-dir default that cannot survive a foreign host.
 
@@ -633,6 +636,16 @@ def _scratch_dir_findings(src: str) -> list[str]:
     `tempfile.TemporaryDirectory`, which does NOT create parents, so a default
     naming a directory that only exists on one machine is a guaranteed crash
     everywhere else.
+
+    The checks are STRUCTURAL, not token greps — an `ast.IfExp` whose condition is
+    a bare `.is_dir()` call (never negated) and whose else-arm is exactly the
+    platform scratch dir — because two natural one-token drifts keep every
+    substring in place while destroying the invariant: `if not …is_dir()` swaps
+    which host crashes, and namespacing the fallback
+    (`Path(gettempdir()) / "quantibbler-kd"`) reintroduces the same missing-parent
+    `FileNotFoundError` because the platform dir is the only thing guaranteed to
+    exist. Over-strict is the correct failure direction: a deliberate fallback
+    change forces a deliberate pin revisit.
     """
     try:
         tree = ast.parse(src)
@@ -670,10 +683,28 @@ def _scratch_dir_findings(src: str) -> list[str]:
     referenced = {node.id for node in ast.walk(expression) if isinstance(node, ast.Name)}
     sandbox = "/opt/data/tmp"
     findings = []
-    if "tempfile.gettempdir()" not in default:
-        findings.append(f"no platform-scratch fallback in the default: {default}")
-    if "is_dir()" not in default:
-        findings.append(f"the sandbox path is not existence-probed: {default}")
+    if isinstance(expression, ast.IfExp):
+        test = expression.test
+        if not (
+            isinstance(test, ast.Call)
+            and isinstance(test.func, ast.Attribute)
+            and test.func.attr == "is_dir"
+        ):
+            findings.append(
+                "the probe must be the true condition of the branch — a bare "
+                f".is_dir() call, never negated or wrapped: {ast.unparse(test)}"
+            )
+        fallback = ast.unparse(expression.orelse)
+        if fallback != "tempfile.gettempdir()":
+            findings.append(
+                "the fallback must be exactly the platform scratch dir, not path "
+                f"arithmetic on it: {fallback}"
+            )
+    else:
+        if "tempfile.gettempdir()" not in default:
+            findings.append(f"no platform-scratch fallback in the default: {default}")
+        if "is_dir()" not in default:
+            findings.append(f"the sandbox path is not existence-probed: {default}")
     if sandbox not in default and not any(path_constants.get(n) == sandbox for n in referenced):
         findings.append(f"the sandbox scratch preference is gone: {default}")
     return findings
@@ -692,31 +723,90 @@ def test_driver_scratch_dir_default_is_not_a_sandbox_only_path():
     assert findings == [], findings
 
 
+def _flip_the_probe(src: str) -> str:
+    """One stray `not`: every token survives, the invariant inverts."""
+    return src.replace(
+        _SCRATCH_DEFAULT,
+        "str(_SANDBOX_SCRATCH) if not _SANDBOX_SCRATCH.is_dir() else tempfile.gettempdir()",
+        1,
+    )
+
+
+def _namespace_the_fallback(src: str) -> str:
+    """One nested path: the platform scratch dir stops being guaranteed to exist."""
+    return src.replace(
+        _SCRATCH_DEFAULT,
+        "str(_SANDBOX_SCRATCH) if _SANDBOX_SCRATCH.is_dir() else "
+        'str(Path(tempfile.gettempdir()) / "quantibbler-kd")',
+        1,
+    )
+
+
+def _a_bare_literal(src: str) -> str:
+    return src.replace(_SCRATCH_DEFAULT, '"/opt/data/tmp"', 1)
+
+
+def _drop_the_probe(src: str) -> str:
+    return src.replace(_SCRATCH_DEFAULT, "str(_SANDBOX_SCRATCH)", 1)
+
+
+def _drop_the_fallback(src: str) -> str:
+    return src.replace(_SCRATCH_DEFAULT, "tempfile.gettempdir()", 1)
+
+
+_DEFAULT_CALL_HEAD = 'os.environ.setdefault(\n    "QUANTIBBLER_KD_TMPDIR",'
+
+
+def _a_second_default(src: str) -> str:
+    return src.replace(
+        _DEFAULT_CALL_HEAD,
+        'os.environ.setdefault("QUANTIBBLER_KD_TMPDIR", tempfile.gettempdir())\n'
+        + _DEFAULT_CALL_HEAD,
+        1,
+    )
+
+
 @pytest.mark.parametrize(
-    ("sandbox_only_source", "expected"),
+    ("mutate", "expected", "escapes_token_grep"),
     [
-        (
-            'import os\nos.environ.setdefault("QUANTIBBLER_KD_TMPDIR", "/opt/data/tmp")\n',
-            "no platform-scratch fallback",
+        pytest.param(
+            _flip_the_probe,
+            "probe must be the true condition of the branch",
+            True,
+            id="probe-polarity-flip",
         ),
-        (
-            'import os\nos.environ.setdefault("QUANTIBBLER_KD_TMPDIR", str(_SANDBOX_SCRATCH))\n',
-            "not existence-probed",
+        pytest.param(
+            _namespace_the_fallback,
+            "fallback must be exactly the platform scratch",
+            True,
+            id="nested-fallback",
         ),
-        (
-            'import os\nos.environ.setdefault("QUANTIBBLER_KD_TMPDIR", tempfile.gettempdir())\n',
-            "sandbox scratch preference is gone",
+        pytest.param(_a_bare_literal, "no platform-scratch fallback", False, id="bare-literal"),
+        pytest.param(_drop_the_probe, "not existence-probed", False, id="no-probe"),
+        pytest.param(
+            _drop_the_fallback, "sandbox scratch preference is gone", False, id="no-fallback"
         ),
-        (
-            "import os\n"
-            'os.environ.setdefault("QUANTIBBLER_KD_TMPDIR", gettempdir())\n'
-            'os.environ.setdefault("QUANTIBBLER_KD_TMPDIR", "/opt/data/tmp")\n',
-            "exactly one",
-        ),
+        pytest.param(_a_second_default, "exactly one", False, id="two-defaults"),
     ],
 )
-def test_scratch_dir_pin_rejects_every_sandbox_only_shape(sandbox_only_source, expected):  # noqa: ANN001
-    findings = _scratch_dir_findings(sandbox_only_source)
+def test_scratch_dir_pin_rejects_every_sandbox_only_shape(mutate, expected, escapes_token_grep):  # noqa: ANN001
+    """Mutations are applied to the REAL driver source, not a synthetic snippet.
+
+    A synthetic snippet would be rejected by the undefined-constant check rather
+    than by the shape it is meant to probe, hiding the very escape it exists to
+    catch — which is how the polarity flip and the nested fallback survived the
+    first version of this pin.
+    """
+    src = _DRIVER.read_text()
+    mutated = mutate(src)
+    assert mutated != src, "the mutation is a no-op: the driver drifted out from under it"
+    if escapes_token_grep:
+        # Precisely the shapes that beat a substring pin: the `is_dir()` token, the
+        # platform-scratch token and the sandbox path are ALL still present, and the
+        # default is still wrong on whichever host the grep happens to run on.
+        for token in ("is_dir()", "tempfile.gettempdir()", "/opt/data/tmp"):
+            assert token in mutated, token
+    findings = _scratch_dir_findings(mutated)
     assert any(expected in finding for finding in findings), (expected, findings)
 
 
