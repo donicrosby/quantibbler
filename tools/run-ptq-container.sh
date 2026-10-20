@@ -9,18 +9,67 @@
 # Mounts:
 #   /work  = repo (ro)          /hf = HF cache (models + wikitext parquet)
 #   /tmp/ptq = real-disk scratch (KD teacher-logit memmap lands here, 20GB class)
+#
+# Knobs, all env — positional arguments are REFUSED, not ignored:
+#   MODEL OUT RANK SOLVER SEQ_LEN CALIBRATION_SEQS EVAL_SEQS DRY_RUN
+#
+# Two defaults are traps worth knowing before you launch: SOLVER defaults to
+# `admm` (the measured ablation showed the ADMM stage earns nothing here —
+# production is `svd`), and SEQ_LEN defaults to 512, a DIAGNOSTIC geometry: the
+# NQ-protocol claim needs 2048, and the two numbers are not interchangeable. The
+# resolved configuration is echoed before launch, and DRY_RUN=1 prints the whole
+# command line instead of running it. These knobs deliberately do not choose
+# protocol values — the eval geometry belongs to the recreation-bar spec; the
+# wrapper's job is to stop being the thing that decides it silently.
+#
+# Canonical launches:
+#   RANK=512 SOLVER=svd OUT=<fresh dir> sh tools/run-ptq-container.sh
+#     -> r512 diagnostic: recorded alongside, never a bar claim
+#   RANK=512 SOLVER=svd SEQ_LEN=2048 OUT=<fresh dir> sh tools/run-ptq-container.sh
+#     -> NQ-protocol geometry, the line with a landing site
+#   Prefix either with DRY_RUN=1 to print the exact docker command line instead
+#   of running it (no RAM spent, container name left free).
 set -eu
 
 REPO=/opt/data/quantibbler
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 OUT="${OUT:-/opt/data/quantibbler/artifacts/qwen3-0.6B-r8}"
 RANK="${RANK:-8}"
+# Whether the operator chose the solver, remembered BEFORE it is defaulted: the
+# advisory below has to distinguish "left unset" from "explicitly svd", and after
+# the assignment both look identical.
+SOLVER_GIVEN="${SOLVER:-}"
 SOLVER="${SOLVER:-admm}"
+SEQ_LEN="${SEQ_LEN:-512}"
+CALIBRATION_SEQS="${CALIBRATION_SEQS:-16}"
+EVAL_SEQS="${EVAL_SEQS:-5}"
+DRY_RUN="${DRY_RUN:-0}"
 
-mkdir -p /opt/data/tmp "$(dirname "$OUT")"
-: > /opt/data/tmp/quantibbler-breadcrumbs.log
+# Refuse arguments instead of ignoring them. This wrapper pins the eval geometry
+# below, so a stray flag — or SEQ_LEN=2048 written in argument position — used to
+# be dropped silently and produced a run that looked healthy while measuring
+# something other than what was asked for.
+if [ "$#" -ne 0 ]; then
+  echo "run-ptq-container.sh takes no arguments; use the env knobs:" >&2
+  echo "  MODEL OUT RANK SOLVER SEQ_LEN CALIBRATION_SEQS EVAL_SEQS DRY_RUN" >&2
+  echo "  got: $*" >&2
+  exit 2
+fi
 
-exec docker run --rm \
+# Say which run this is, before it runs. Neither advisory judges the choice —
+# they exist so a bare launch cannot quietly be mistaken for the claimable one.
+# An exported-but-empty SOLVER falls through to the default and gets the warning
+# too, because `${SOLVER:-admm}` cannot tell those two cases apart afterwards.
+if [ -z "$SOLVER_GIVEN" ]; then
+  echo "note: SOLVER unset -> admm (the ablation's no-gain path); production is SOLVER=svd" >&2
+fi
+if [ "$SEQ_LEN" != "2048" ]; then
+  echo "note: SEQ_LEN=$SEQ_LEN is a diagnostic geometry, not the NQ protocol (2048)" >&2
+fi
+echo "run-ptq-container: model=$MODEL rank=$RANK solver=$SOLVER seq_len=$SEQ_LEN" \
+  "calibration_seqs=$CALIBRATION_SEQS eval_seqs=$EVAL_SEQS out=$OUT"
+
+set -- docker run --rm \
   --name quantibbler-ptq-run \
   --memory 32g --memory-swap 32g \
   --cpus 24 \
@@ -38,8 +87,29 @@ exec docker run --rm \
   quantibbler-ptq:latest \
   python tools/quantize_hf_model.py \
     --model "$MODEL" --rank "$RANK" \
-    --seq-len 512 --calibration-seqs 16 --eval-seqs 5 \
+    --seq-len "$SEQ_LEN" --calibration-seqs "$CALIBRATION_SEQS" --eval-seqs "$EVAL_SEQS" \
     --max-admm-iter 400 \
     --solver "$SOLVER" \
     --checkpoint-dir /out/checkpoints \
     --out /out
+
+# DRY_RUN=1 prints the exact command line (copy-pasteable) and stops: the launch
+# is checkable without spending 32g of host RAM and without stealing the
+# container name a real run needs.
+if [ "$DRY_RUN" != "0" ]; then
+  for arg in "$@"; do printf "'%s' " "$arg"; done
+  echo
+  exit 0
+fi
+
+mkdir -p /opt/data/tmp "$(dirname "$OUT")"
+# Append a run header instead of truncating. This file is the forensic tail a
+# post-mortem reads after a 137, and the previous run's tail is exactly what a
+# killed run leaves behind: `: >` destroyed it on every launch, including the
+# one that died (`tail` from the *failed* run is the useful line, not the new
+# run's first sample).
+printf '=== run %s rank=%s solver=%s seq_len=%s out=%s ===\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RANK" "$SOLVER" "$SEQ_LEN" "$OUT" \
+  >> /opt/data/tmp/quantibbler-breadcrumbs.log
+
+exec "$@"
