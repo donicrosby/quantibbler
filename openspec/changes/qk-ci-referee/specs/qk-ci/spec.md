@@ -93,3 +93,32 @@ The rust job SHALL select its gate packages explicitly instead of scoping to the
 
 - **WHEN** the workflow is audited
 - **THEN** a pin asserts both package names appear in the rust job's test and clippy lines and that neither gate uses `--manifest-path`, so a quiet revert to kernels-only reds the referee instead of silently re-opening the local-only gap
+
+### Requirement: The weights seed SHALL be self-seeding and never skippable
+
+The seed job SHALL run on all three triggers with no job-level event condition, gate only its network steps on `cache-hit != 'true' && github.event_name != 'pull_request'`, keep its lookup-only restore unconditional, and be depended on by the abort leg — so a cold cache self-heals with no human dispatch and no condition-skip can reach the leg.
+
+#### Scenario: seed_job_never_skippable
+
+- **WHEN** the workflow runs on any trigger
+- **THEN** the seed job carries no job-level `if:` — it always executes, so the abort leg's `needs: seed-weights` can never inherit a condition-skip and quietly turn a real run into a green no-run
+
+#### Scenario: network_gated_at_step_level
+
+- **WHEN** the seed job runs
+- **THEN** its lookup-only restore executes unconditionally (a PR run reads the default branch's cache across scope), while its fetch and save steps are gated on exactly `steps.seeded.outputs.cache-hit != 'true' && github.event_name != 'pull_request'` — a PR run can neither fetch nor write a weights cache
+
+#### Scenario: cold_cache_self_heals_on_push
+
+- **WHEN** a push to main runs with an evicted or absent cache
+- **THEN** the seed fetches the pinned snapshots once and saves them, and the abort leg — which waits on it — executes against that fresh cache, with no human dispatch anywhere in the loop
+
+#### Scenario: pr_runs_execute_the_abort_leg
+
+- **WHEN** a pull request runs
+- **THEN** the seed job executes (its lookup hits main's cache across scope, its network steps skip) and the abort leg executes for real rather than being skipped — the leg's own fail-closed restore reads the same cache
+
+#### Scenario: pr_never_fabricates_a_cache
+
+- **WHEN** the cache is evicted and a pull request runs before the next push to main
+- **THEN** the PR's seed cannot fetch (the PR guard blocks network, correctly), its lookup misses, and the abort leg reds fail-closed until the next push re-seeds — recorded as the design working, not as a defect: a PR never fabricates a weights cache

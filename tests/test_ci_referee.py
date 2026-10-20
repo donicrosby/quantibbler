@@ -433,9 +433,157 @@ def test_workflow_smoke_is_plumbing_only_and_the_abort_leg_is_offline_and_fail_c
     assert "cache/restore@" in abort
 
     seed = _job_block(text, "seed-weights")
-    assert "workflow_dispatch" in seed
     assert "hf download" in seed
     assert "cache/save@" in seed
+    assert "lookup-only: true" in seed
+
+
+# ---------------------------------------------------------------------------
+# The self-seeding weights job (qk-ci-referee delta, 2026-10-27)
+#
+# The seed job used to be `workflow_dispatch`-only: the no-PR-content property
+# was bought with a job-level `if`, and the price was that nobody ever ran it —
+# so the abort leg redded fail-closed on every run until a human dispatched a
+# seed. The delta moves that property to STEP level: the job is never
+# skippable, the abort leg `needs:` it, and only the network steps are gated on
+# the event. That is what makes the leg execute for real on every run.
+# ---------------------------------------------------------------------------
+
+_SEED_FETCH_STEP = "Fetch the pinned snapshots (live network here and only here)"
+_SEED_SAVE_STEP = "Save the weights cache"
+_SEED_LOOKUP_STEP = "Is this key already seeded?"
+_SEED_GATE = "steps.seeded.outputs.cache-hit != 'true' && github.event_name != 'pull_request'"
+
+
+def _step_condition(block: str, step_name: str) -> str | None:
+    """The `if:` line of one named step, or None when that step has no `if:`."""
+    lines = block.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != f"- name: {step_name}":
+            continue
+        for following in lines[index + 1 :]:
+            stripped = following.strip()
+            if not stripped or stripped.startswith("- name:"):
+                return None
+            if stripped.startswith("if:"):
+                return stripped
+        return None
+    raise AssertionError(f"step {step_name!r} not found in the seed job")
+
+
+def _seed_shape_findings(text: str) -> list[str]:
+    """Findings for the seed job's never-skippable, step-gated shape.
+
+    Reads the uncommented text, so the job's own prose can never satisfy a
+    check. The four properties are exactly the ones the delta froze: no
+    job-level `if`, an unconditional lookup restore, the literal event+cache
+    gate on both network steps, and the abort leg's `needs: seed-weights`.
+    """
+    findings: list[str] = []
+    seed = _job_block(_uncommented(text), "seed-weights")
+    if re.search(r"^    if:", seed, re.M):
+        findings.append(
+            "the seed job carries a job-level `if:` — a condition-skip there "
+            "propagates through the abort leg's `needs:` and turns a real run "
+            "into a green no-run; the no-PR-content property belongs on the "
+            "fetch/save STEPS, not on the job"
+        )
+    lookup = _step_condition(seed, _SEED_LOOKUP_STEP)
+    if lookup is not None:
+        findings.append(
+            f"the lookup-only restore step is conditional ({lookup!r}) — it must "
+            "run unconditionally on all three triggers, or a PR run loses the "
+            "read-across-scope cache hit it relies on"
+        )
+    for step in (_SEED_FETCH_STEP, _SEED_SAVE_STEP):
+        condition = _step_condition(seed, step)
+        if condition != f"if: {_SEED_GATE}":
+            findings.append(
+                f"the {step!r} step must be gated on exactly {_SEED_GATE!r} "
+                f"(got {condition!r}) — a cache-miss gate alone would let a PR "
+                f"run download weights, and the event guard alone would re-save "
+                f"on every hit"
+            )
+    abort = _job_block(_uncommented(text), "abort-leg")
+    if not re.search(r"^    needs:[ \t]*seed-weights[ \t]*$", abort, re.M):
+        findings.append(
+            "the abort leg does not declare `needs: seed-weights` — without it "
+            "the leg can start before the seed's one download and red fail-closed "
+            "on a cold cache"
+        )
+    return findings
+
+
+def test_seed_job_is_never_skippable_and_the_network_is_gated_at_step_level():
+    """The delta's binding shape, asserted on the real workflow.
+
+    Positive: the trigger set still names `pull_request`, `workflow_dispatch`,
+    and push-to-main. Negative: no job-level condition can skip the seed — and
+    through the leg's `needs:` skip the leg too — because the PR guard lives on
+    the fetch and save steps, where it cannot propagate.
+    """
+    text = _uncommented(WORKFLOW.read_text())
+    findings = _seed_shape_findings(text)
+    assert findings == [], findings
+    for trigger in ("  pull_request:\n", "  workflow_dispatch:\n", "    branches: [main]\n"):
+        assert trigger in text, trigger
+    assert "pull_request_target" not in text
+    # The gate is on the network steps and only there: the lookup restore is
+    # unconditional, so a PR run reads main's cache but never writes one.
+    seed = _job_block(text, "seed-weights")
+    assert _step_condition(seed, _SEED_LOOKUP_STEP) is None
+    assert _step_condition(seed, _SEED_FETCH_STEP) == f"if: {_SEED_GATE}"
+    assert _step_condition(seed, _SEED_SAVE_STEP) == f"if: {_SEED_GATE}"
+
+
+def _reinstate_the_job_level_if(text: str) -> str:
+    """Bypass 1: buy the no-PR property back with a job-level skip."""
+    return text.replace(
+        "  seed-weights:\n",
+        "  seed-weights:\n    if: github.event_name != 'pull_request'\n",
+        1,
+    )
+
+
+def _drop_the_pr_guard_from_the_fetch(text: str) -> str:
+    """Bypass 2: the fetch goes back to cache-miss-only — a PR run downloads."""
+    return text.replace(" && github.event_name != 'pull_request'", "", 1)
+
+
+def _drop_the_needs_from_the_abort_leg(text: str) -> str:
+    """Bypass 3: the leg can start before the seed and red on a cold cache."""
+    return text.replace("    needs: seed-weights\n", "", 1)
+
+
+def _condition_the_lookup_restore(text: str) -> str:
+    """Bypass 4: a PR run loses the cache hit it reads across scope."""
+    return text.replace(
+        f"      - name: {_SEED_LOOKUP_STEP}\n",
+        f"      - name: {_SEED_LOOKUP_STEP}\n        if: github.event_name != 'pull_request'\n",
+        1,
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(_reinstate_the_job_level_if, id="job-level-if-reinstated"),
+        pytest.param(_drop_the_pr_guard_from_the_fetch, id="pr-guard-dropped-from-fetch"),
+        pytest.param(_drop_the_needs_from_the_abort_leg, id="needs-dropped"),
+        pytest.param(_condition_the_lookup_restore, id="lookup-restore-conditional"),
+    ],
+)
+def test_seed_shape_pin_rejects_every_bypass(mutate):  # noqa: ANN001
+    """Bug-hunter's four rows, each applied to the REAL workflow text.
+
+    Each row asserts its own mutation is not a no-op first, so the battery
+    fails loudly if the YAML ever drifts out from under it instead of going
+    quietly green.
+    """
+    text = _uncommented(WORKFLOW.read_text())
+    mutated = mutate(text)
+    assert mutated != text, "the mutation is a no-op: the workflow drifted out from under it"
+    assert _seed_shape_findings(mutated), mutated
 
 
 def test_workflow_cache_key_names_the_revisions_the_abort_tooling_asserts():

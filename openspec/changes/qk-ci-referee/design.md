@@ -173,3 +173,52 @@ it becomes load-bearing the day this public repo takes an outside PR.
   in a follow-up commit, not a pre-landing rider: executing it now would move
   `tests/test_ci_referee.py` off the hash the sign-off transfer table records,
   which is a higher cost than the residual.
+
+## Implementation crystallization — self-seeding weights job (2026-10-27)
+
+**The problem the delta fixes, measured in the first real runs:** the seed job
+was `workflow_dispatch`-only. That bought the no-PR-content property with a
+job-level `if`, and the price was that the job never ran on its own — so on
+every push and every PR the abort leg's fail-closed restore hit a cold cache and
+redded, and the only way out was a human dispatching a seed. A referee that is
+red until someone performs a manual chore is a referee whose reds stop being
+read.
+
+**The binding shape (frozen before implementation, per @planner):** the seed job
+is never skippable — no job-level `if` on any trigger — and the no-PR-content
+property moves to STEP level: the fetch and save steps carry
+`steps.seeded.outputs.cache-hit != 'true' && github.event_name != 'pull_request'`,
+the lookup-only restore runs unconditionally, and the abort leg declares
+`needs: seed-weights`. The `needs:` is the load-bearing half: a job-level
+condition on the seed would propagate a skip into the leg and turn a real run
+into a green no-run, which is exactly the class of silence this referee exists
+to kill.
+
+**Why the PR path works (GitHub's own semantics, checked not assumed):** restore
+is read-across-scope while save is not. A PR run's seed restores from the
+default branch's cache scope (a hit), its fetch/save steps skip on the event
+guard, and the abort leg's own fail-closed restore reads the same cache and
+executes for real. So every PR run executes the leg without ever being able to
+write a weights cache.
+
+**The residual, recorded verbatim so a future red is read correctly.** If the
+cache is evicted (7-day sweep on an idle repo) and a PR runs before the next
+push to main, the PR's seed cannot fetch — the event guard blocks network,
+correctly — its lookup misses, and the abort leg reds fail-closed until the next
+push re-seeds. That is the design working, not a defect: **a PR never fabricates
+a weights cache.** Same doctrine as the first-run red.
+
+**Pins, and the battery that keeps them honest.** `_seed_shape_findings()` reads
+the uncommented workflow and asserts the four properties directly: no `^    if:`
+in the seed job, no `if:` on the lookup step, the exact gate literal on both
+network steps, and `needs: seed-weights` on the abort leg. Four parametrized
+bypass rows — job-level `if` reinstated, PR guard dropped from the fetch,
+`needs` dropped, lookup restore made conditional — are each applied to the REAL
+workflow text, each asserted non-no-op first, and each required to produce a
+finding.
+
+**Honesty boundary.** The `uses:` steps and the runner's trigger/skip semantics
+still execute only on a runner. The four-row battery proves the pins reject the
+mutations in the file; the in-the-wild proof — that a PR run's abort leg
+*executes* rather than skips — is the post-landing `pr-proof-abort-leg` run the
+planner pre-committed, and it is the delta's evidence, not a local rehearsal.

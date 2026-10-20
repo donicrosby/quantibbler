@@ -3,7 +3,7 @@
 - [x] (coder) Author `.github/workflows/ci.yml` per the final spec: SIX jobs (lean-python, full-python, rust-kernels, openspec, driver-smoke, abort-leg) plus a `workflow_dispatch`-only seed job; `bash -euo pipefail` defaults; SHA-pinned actions resolved fresh at landing (never from memory); `permissions: contents: read`; triggers `pull_request` + `push` to `main` (never `pull_request_target`); zero secrets. Lean job = proven recipe (fresh `uv venv` + `pip install -e . pytest`, no extras) with the absence-family assert (`import torch, transformers, tokenizers` must exit 1) BEFORE any skip-count parse; smoke labeled plumbing-only (no detection claim); abort leg restores the seeded cache strictly offline and fails closed on cache miss. Validate the YAML locally (yamllint) before first push.
 - [x] (coder) Skip-count parsing as a helper script shared by both python jobs (parse the pytest summary line) — workflow shell stays thin, parsing testable in-repo.
 - [x] (coder) Rehearse every job's command body locally in the sandbox and record each leg's real output (the lean/full/rust numbers, the smoke's offline run, the abort leg's 26–70 s abort with the recorded command) — CI YAML must not contain a command that has never been executed.
-- [ ] (bug-hunter) Review: every `uses:` line is a full SHA; no `pull_request_target`; no unrestricted `permissions`; full-python extras exactly `torch hf kernels`; openspec loop one-id-per-invocation with `set -e` semantics; lean job's absence-family assert precedes the skip-count parse; smoke asserts `exit_code == verdict_exit_code(status)` on the real report offline and claims nothing beyond plumbing; abort leg is offline-only with fail-closed cache miss; seed job is `workflow_dispatch`-only.
+- [ ] (bug-hunter) Review: every `uses:` line is a full SHA; no `pull_request_target`; no unrestricted `permissions`; full-python extras exactly `torch hf kernels`; openspec loop one-id-per-invocation with `set -e` semantics; lean job's absence-family assert precedes the skip-count parse; smoke asserts `exit_code == verdict_exit_code(status)` on the real report offline and claims nothing beyond plumbing; abort leg is offline-only with fail-closed cache miss; seed job is never-skippable with its network gated at step level (delta 2026-10-27 — see the section below, which supersedes the earlier `workflow_dispatch`-only shape).
 - [ ] (sec-eng) Threat pass: no secret access from PR runs (`secrets: none`), action SHAs match declared upstream heads, smoke/abort jobs cannot become executors (no `pull_request_target`, contents read-only), the seed job's live-network allowance cannot be triggered by PR content.
 - [ ] (orchestrator) `npx --yes @fission-ai/openspec validate qk-ci-referee --strict`; fail-fast already landed (b5712d5), so sequencing is clear; scoped stage + commit (workflow + change dir, one commit); fenced push; watch the first real CI run — the push to main itself triggers the workflow, which is this change's own acceptance test.
 - [ ] (orchestrator + team) Record the first CI run's verdict per job in this tasks file — the repo's first independent referee result — and re-run the seed job if the abort leg's cache needs warming before the first green.
@@ -330,3 +330,49 @@ default `$PWD/.venv` / `.venv-lean` and nothing else changes.
 - **Honesty boundary:** unchanged — the `uses:` steps (cache lookup/restore/save)
   still execute only on a runner; every shell body they gate is rehearsed here,
   the new gate bodies included.
+
+### Self-seeding weights job — the delta (coder, 2026-10-27)
+
+Binding shape frozen by @planner before implementation; @bug-hunter's four-row
+battery specified up front and run against the REAL workflow text.
+
+- [x] (coder) `ci.yml`: the seed job is never skippable (its job-level
+  `if: github.event_name == 'workflow_dispatch'` is gone); the fetch and save
+  steps are gated on the literal `steps.seeded.outputs.cache-hit != 'true' &&
+  github.event_name != 'pull_request'`; the lookup-only restore stays
+  unconditional; `abort-leg` gains `needs: seed-weights` so a condition-skip on
+  the seed can never propagate into the leg.
+- [x] (coder) Pins (`tests/test_ci_referee.py`, +148 lines): the new
+  `_seed_shape_findings()` reads the *uncommented* workflow and asserts the four
+  properties directly — no `^    if:` in the seed job, no `if:` on the lookup
+  step, the exact gate literal on both network steps, and `needs: seed-weights`
+  on the abort leg. The old `assert "workflow_dispatch" in seed` was **moved**,
+  not deleted: the trigger set is now asserted positively
+  (`pull_request` + `workflow_dispatch` + `branches: [main]`) in the new pin, and
+  the negative is the absent job-level condition.
+- [x] (coder) Battery, four rows, each applied to the real workflow text, each
+  asserted non-no-op first, each required to produce a finding: job-level `if`
+  reinstated, PR guard dropped from the fetch, `needs` dropped, lookup restore
+  made conditional. **All four rejected.** `tests/test_ci_referee.py` →
+  **57 passed** (was 52: +1 positive pin, +4 battery rows).
+- [x] (coder) Spec delta: new `qk-ci` requirement "The weights seed SHALL be
+  self-seeding and never skippable" with five scenarios —
+  `seed_job_never_skippable`, `network_gated_at_step_level`,
+  `cold_cache_self_heals_on_push`, `pr_runs_execute_the_abort_leg`,
+  `pr_never_fabricates_a_cache`. The residual is recorded verbatim in design.md
+  ("Implementation crystallization — self-seeding weights job (2026-10-27)").
+- [x] (coder) Local gates at this record: yamllint **RC=0**;
+  `tests/test_ci_referee.py` **57 passed**; full suite **444 passed** (was 439);
+  lean tier **359 passed / 16 skipped**, `skip discipline holds`; pre-commit
+  **RC=0**; `openspec validate qk-ci-referee --strict` valid.
+- **The residual, verbatim (per the freeze):** if the cache is evicted (7-day
+  sweep on an idle repo) and a PR runs before the next push to main, the PR's
+  seed cannot fetch (the event guard blocks network, correctly), its lookup
+  misses, and the abort leg **reds fail-closed** until the next push re-seeds —
+  the design working, not a defect: **a PR never fabricates a weights cache.**
+- **Honesty boundary for this delta:** the `uses:` steps and the runner's
+  trigger/skip semantics execute only on a runner. The four-row battery proves
+  the pins reject the mutations in the file; the in-the-wild proof that a PR
+  run's abort leg *executes* rather than skips is the post-landing
+  `pr-proof-abort-leg` run (planner pre-committed), and that run id is this
+  delta's evidence — not a local rehearsal.
