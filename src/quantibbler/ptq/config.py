@@ -23,6 +23,12 @@ __all__ = ["PTQConfig", "StageHyper", "PrefixProbeAbort"]
 
 _COMPUTE_DTYPES = ("float64", "float32")
 _SCALE_DTYPES = ("float16", "float32")
+# Root-cause ablation knobs (change qk-root-cause-ablation): each isolates ONE
+# constraint so a failing run says which stage lies. Unknown values are
+# validation errors, never silent defaults (D-6).
+_FACTOR_MODES = ("binary", "fp")
+_ABLATIONS = ("none", "untuned-signs")
+_LAYER_SCOPES = ("all", "self_attn", "mlp")
 
 
 class PrefixProbeAbort(RuntimeError):
@@ -158,6 +164,14 @@ class PTQConfig:
     stage_latent: StageHyper = field(default_factory=lambda: StageHyper(1e-5, 1, 8))
     stage_global: StageHyper = field(default_factory=lambda: StageHyper(1e-6, 1, 8))
     cosine_schedule: bool = True
+    # --- root-cause ablation knobs (change qk-root-cause-ablation) ---------
+    # MEASUREMENT knobs, never landing knobs: a run carrying a non-default
+    # value is an ablation, and its verdict is data, not a release candidate.
+    # All three are solver state — they join the checkpoint fingerprint, so a
+    # resumed fp run can never resume as a binary run (D-6).
+    factor_mode: Literal["binary", "fp"] = "binary"
+    ablation: Literal["none", "untuned-signs"] = "none"
+    layer_scope: Literal["all", "self_attn", "mlp"] = "all"
     # Observer hook (change qk-fail-fast-loop): called by the sequential
     # block reconstruction after each block is written back into the host
     # model, as ``probe(model, depth, name)`` with the live host, the 1-based
@@ -211,4 +225,19 @@ class PTQConfig:
         if self.progress_probe is not None and not callable(self.progress_probe):
             raise TypeError(
                 f"progress_probe must be callable or None, got {type(self.progress_probe).__name__}"
+            )
+        if self.factor_mode not in _FACTOR_MODES:
+            raise ValueError(
+                f"factor_mode must be one of {_FACTOR_MODES}, got {self.factor_mode!r}"
+            )
+        if self.ablation not in _ABLATIONS:
+            raise ValueError(f"ablation must be one of {_ABLATIONS}, got {self.ablation!r}")
+        if self.layer_scope not in _LAYER_SCOPES:
+            raise ValueError(
+                f"layer_scope must be one of {_LAYER_SCOPES}, got {self.layer_scope!r}"
+            )
+        if self.factor_mode == "fp" and self.ablation != "none":
+            raise ValueError(
+                "ablation='untuned-signs' is a BINARY ablation (it exports signs of the "
+                f"balance latents); it cannot combine with factor_mode={self.factor_mode!r}"
             )

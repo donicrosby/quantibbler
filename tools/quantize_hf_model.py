@@ -328,6 +328,12 @@ def quantized_config(
         stage_global=StageHyper(1e-3, 4, 4),
         verbose=True,
         progress_probe=progress_probe,
+        # Root-cause ablation knobs (qk-root-cause-ablation): solver state, so
+        # they ride the checkpoint fingerprint and a resumed fp run can never
+        # resume as a binary run.
+        factor_mode=args.factor_mode,
+        ablation=args.ablation,
+        layer_scope=args.layer_scope,
     )
 
 
@@ -605,6 +611,30 @@ def main() -> int:
         "(ablation: within 0.003 cos, orders faster at high rank)",
     )
     parser.add_argument(
+        "--factor-mode",
+        choices=("binary", "fp"),
+        default="binary",
+        help="root-cause ablation: `fp` removes the binary constraint entirely "
+        "(continuous latents; no sign, no STE, no bit-flip polish). This is a "
+        "MEASUREMENT — it packs nothing and never exports an artifact",
+    )
+    parser.add_argument(
+        "--ablation",
+        choices=("none", "untuned-signs"),
+        default="none",
+        help="binary ablation: export sign() of the balance latents with the "
+        "Eq. 8 scale fold and ZERO refinement (no polish, no TuneLatentSTE) — "
+        "it separates 'the bits cannot hold it' from 'the optimizer is not "
+        "finding it'",
+    )
+    parser.add_argument(
+        "--layer-scope",
+        choices=("all", "self_attn", "mlp"),
+        default="all",
+        help="factorize only the linears whose module path contains the named "
+        "component; every other linear stays full precision",
+    )
+    parser.add_argument(
         "--scale-dtype",
         choices=("float16", "float32"),
         default="float32",
@@ -759,46 +789,69 @@ def main() -> int:
         print("[5/6] quantized perplexity (checkpoint-native dtype, artifact written back)")
         host = model  # quantize_model wrote the artifact back into the host
         ppl_quant = perplexity_from_logits(lambda b: host(b), held_out)
-        bpw = qm.effective_bpw()
-        total_qpk1 = sum(len(b) for b in qm.serialize().values())
+        # A measurement has no packed artifact: BPW and qpk1 bytes are null,
+        # never 0 — a consumer must not read "0.0000 bpp" as a compression win.
+        measured_artifact = args.factor_mode != "fp"
+        bpw = qm.effective_bpw() if measured_artifact else None
+        total_qpk1 = sum(len(b) for b in qm.serialize().values()) if measured_artifact else None
         print(f"      ppl_quant      = {ppl_quant:.4f}")
-        print(f"      effective BPW  = {bpw:.4f}  (qpk1 layer bytes: {total_qpk1:,})", flush=True)
+        if measured_artifact:
+            print(
+                f"      effective BPW  = {bpw:.4f}  (qpk1 layer bytes: {total_qpk1:,})",
+                flush=True,
+            )
+        else:
+            print(
+                "      effective BPW  = n/a — factor_mode='fp' is a measurement and packs nothing",
+                flush=True,
+            )
 
-        print("[6/6] exporting qk-server model directory ->", out_dir, flush=True)
-        embedding_f64 = (
-            causal.get_input_embeddings().weight.detach().to(torch.float64).cpu().numpy()
-        )
-        # Attention geometry + norm inventory + norm weights straight from the
-        # live model (never hardcoded): the exported artifact must be
-        # self-describing for the server's transformer forward (qk-attention
-        # N-1/N-2/E-2.0). The inventory IS the layout contract — sidecar order
-        # here must match the engine's slot semantics exactly. Head tying is
-        # the MODEL's property, not an export choice (Qwen3 ships untied).
-        tied = bool(getattr(causal.config, "tie_word_embeddings", False))
-        lm_head_f64 = (
-            causal.get_output_embeddings().weight.detach().to(torch.float64).cpu().numpy()
-            if not tied
-            else None
-        )
-        geometry = _export_geometry(causal)
-        inventory = _export_norm_inventory(causal)
-        norm_weights = _export_norm_weights(causal, inventory)
+        # [6/6] export — D-5 driver backstop: behind extract_and_pack's
+        # conversion-site refusal, an fp measurement is never handed to the
+        # export path at all, so no empty manifest can stand in for an artifact.
+        artifact_exported = False
+        if measured_artifact:
+            print("[6/6] exporting qk-server model directory ->", out_dir, flush=True)
+            embedding_f64 = (
+                causal.get_input_embeddings().weight.detach().to(torch.float64).cpu().numpy()
+            )
+            # Attention geometry + norm inventory + norm weights straight from the
+            # live model (never hardcoded): the exported artifact must be
+            # self-describing for the server's transformer forward (qk-attention
+            # N-1/N-2/E-2.0). The inventory IS the layout contract — sidecar order
+            # here must match the engine's slot semantics exactly. Head tying is
+            # the MODEL's property, not an export choice (Qwen3 ships untied).
+            tied = bool(getattr(causal.config, "tie_word_embeddings", False))
+            lm_head_f64 = (
+                causal.get_output_embeddings().weight.detach().to(torch.float64).cpu().numpy()
+                if not tied
+                else None
+            )
+            geometry = _export_geometry(causal)
+            inventory = _export_norm_inventory(causal)
+            norm_weights = _export_norm_weights(causal, inventory)
 
-        export_model_directory(
-            out_dir,
-            qm,
-            embedding_f64=embedding_f64,
-            model_id=args.model.replace("/", "-"),
-            eos_token_id=cfg.eos_token_id,
-            bos_token_id=cfg.bos_token_id,
-            tokenizer=tokenizer,
-            config_f64={"dtype_note": prov["dtype_note"]},
-            geometry=geometry,
-            inventory=inventory,
-            norm_weights=norm_weights,
-            lm_head_f64=lm_head_f64,
-            tied=tied,
-        )
+            export_model_directory(
+                out_dir,
+                qm,
+                embedding_f64=embedding_f64,
+                model_id=args.model.replace("/", "-"),
+                eos_token_id=cfg.eos_token_id,
+                bos_token_id=cfg.bos_token_id,
+                tokenizer=tokenizer,
+                config_f64={"dtype_note": prov["dtype_note"]},
+                geometry=geometry,
+                inventory=inventory,
+                norm_weights=norm_weights,
+                lm_head_f64=lm_head_f64,
+                tied=tied,
+            )
+            artifact_exported = True
+        else:
+            print(
+                "[6/6] export SKIPPED: factor_mode='fp' is a measurement — no artifact is written",
+                flush=True,
+            )
         ppl_ratio = ppl_quant / ppl_base
         status = verdict(ppl_ratio)
         report = {
@@ -812,6 +865,11 @@ def main() -> int:
             "eval_rows": len(held_out) * BATCH,
             "max_admm_iter": args.max_admm_iter,
             "seed": args.seed,
+            # Ablation provenance (D-5): the knobs are ALWAYS named, so a
+            # measurement can never be mistaken for a landing in the archive.
+            "factor_mode": args.factor_mode,
+            "ablation": args.ablation,
+            "layer_scope": args.layer_scope,
             "ppl_baseline_bf16": ppl_base,
             "ppl_quant_native": ppl_quant,
             "ppl_ratio": ppl_ratio,
@@ -834,7 +892,7 @@ def main() -> int:
                 "history": probe_history,
             },
             "probe_abort": None,  # no abort: the key exists on both paths
-            "artifact_exported": True,
+            "artifact_exported": artifact_exported,
             "status": status,
             "wall_seconds": round(time.time() - t0, 1),
         }
@@ -860,6 +918,9 @@ def main() -> int:
                 "rank": args.rank,
                 "solver": prov["solver"],
                 "scale_dtype": prov["scale_dtype"],
+                "factor_mode": args.factor_mode,
+                "ablation": args.ablation,
+                "layer_scope": args.layer_scope,
                 "seq_len": args.seq_len,
                 "tune_seq_len": tune_seq_len,
                 "calibration_rows": calibration_sequences,

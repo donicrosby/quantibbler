@@ -94,6 +94,18 @@ def _quantizable_names(model: nn.Module) -> set[str]:
     }
 
 
+def _scope_filter(names: set[str], scope: str) -> set[str]:
+    """Restrict the quantizable set to one component (D-4).
+
+    ``all`` is the identity. Otherwise a linear qualifies only when the scope
+    component is one of its module-path SEGMENTS — a substring test would let
+    an unrelated name containing ``mlp`` ride along.
+    """
+    if scope == "all":
+        return names
+    return {name for name in names if scope in name.split(".")}
+
+
 def _full_name(prefix: str, local: str) -> str:
     """Join a block prefix with a child module name into the model path."""
     if prefix and local:
@@ -101,16 +113,66 @@ def _full_name(prefix: str, local: str) -> str:
     return prefix or local
 
 
+def _factor_terms(
+    fac: FactorizedLinear, activation_dtype: torch.dtype, factor_mode: str
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The effective factor terms ``(s1 ⊙ f(U), s2 ⊙ f(V))`` — ONE definition.
+
+    Every site that turns latents into a weight consults this function: the
+    module's own forward, the live STE forward (``_quantized_forward_block``),
+    and the ``_set_linear`` write-back whose result is what the progress probe
+    and the end-of-run gate actually measure. A second hand-rolled sign site is
+    the divergence class this consolidation exists to forbid (D-1) — the probe
+    measuring one path while STE tunes another is a candidate for the
+    145x-per-block wreck the ablation ladder is chasing.
+
+    ``binary`` mode applies ``sign`` with the straight-through passthrough
+    while gradients are enabled. The passthrough is a *gradient device* (it
+    makes ``d/du sign(u) = 1``; with literal ``sign`` the gradient is exactly
+    zero and TuneLatentSTE silently dies), so with gradients off it is NOT
+    applied: its value is bit-unequal to ``sign`` — ``(sign(u) + u) - u``
+    leaves rounding behind, measured maxdiff 4.44e-16 over 1000 f64 entries —
+    and applying it under ``no_grad`` would perturb the stored weights by one
+    ulp, rotating every downstream capture. ``fp`` mode applies no sign in
+    either regime; that is the ablation's entire content.
+
+    The regime is chosen by an explicit ``torch.is_grad_enabled()`` test, never
+    by leaning on autograd.
+    """
+    if factor_mode == "fp":
+        u = fac.u_latent.to(activation_dtype)
+        v = fac.v_latent.to(activation_dtype)
+    elif torch.is_grad_enabled():
+        u = torch.sign(fac.u_latent)
+        u = u + fac.u_latent - fac.u_latent.detach()  # STE passthrough
+        v = torch.sign(fac.v_latent)
+        v = v + fac.v_latent - fac.v_latent.detach()
+        u, v = u.to(activation_dtype), v.to(activation_dtype)
+    else:
+        u = torch.sign(fac.u_latent).to(activation_dtype)
+        v = torch.sign(fac.v_latent).to(activation_dtype)
+    s1 = fac.s1.to(activation_dtype)
+    s2 = fac.s2.to(activation_dtype)
+    return s1.unsqueeze(1) * u, s2.unsqueeze(1) * v
+
+
 class FactorizedLinear(nn.Module):
     """A linear layer replaced by its latent factorization.
 
     Holds the continuous latents (u_latent, v_latent) and scales (s1, s2)
-    as float64 parameters for STE refinement; the effective forward maps
-    ``x -> ((s2 ⊙ sign(V)) V-side) ((sign(U)) (s1 ⊙ U))ᵀ x + b`` with the
-    straight-through estimator on both signs.
+    as float64 parameters for refinement; the effective terms come from
+    :func:`_factor_terms` — the single definition every forward and write-back
+    site consults — and the forward maps
+    ``x -> ((s2 ⊙ f(V)) V-side) ((f(U)) (s1 ⊙ U))ᵀ x + b``.
     """
 
-    def __init__(self, u_latent: torch.Tensor, v_latent: torch.Tensor, bias: torch.Tensor):
+    def __init__(
+        self,
+        u_latent: torch.Tensor,
+        v_latent: torch.Tensor,
+        bias: torch.Tensor,
+        factor_mode: str = "binary",
+    ):
         super().__init__()
         dout, r = u_latent.shape
         din, r_v = v_latent.shape
@@ -122,6 +184,9 @@ class FactorizedLinear(nn.Module):
         self.s2 = nn.Parameter(torch.ones(din, dtype=torch.float64))
         self.bias = nn.Parameter(bias.clone().double())
         self.dout, self.din, self.rank = dout, din, r
+        # The ablation mode is solver state carried by the layer, so every
+        # forward site agrees without re-deriving it (D-1/D-6).
+        self.factor_mode = factor_mode
 
     @classmethod
     def from_weight(cls, weight: torch.Tensor, rank: int, bias: torch.Tensor | None = None):
@@ -138,13 +203,11 @@ class FactorizedLinear(nn.Module):
         return cls(u0, v0, b0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        ub = torch.sign(self.u_latent)
-        ub = ub + self.u_latent - self.u_latent.detach()  # STE passthrough
-        vb = torch.sign(self.v_latent)
-        vb = vb + self.v_latent - self.v_latent.detach()
-        # Effective weight W_q = (s1 ⊙ sign(U)) @ (s2 ⊙ sign(V))ᵀ, shape
-        # (dout, din) — nn.Linear applies x @ W_q.T (non-square-safe).
-        w_q = (self.s1.unsqueeze(1) * ub) @ (self.s2.unsqueeze(1) * vb).T
+        # Effective weight W_q = (s1 ⊙ f(U)) @ (s2 ⊙ f(V))ᵀ, shape (dout, din)
+        # — nn.Linear applies x @ W_q.T (non-square-safe). The terms come from
+        # the ONE shared definition (D-1), never from a local sign expression.
+        left, right = _factor_terms(self, self.u_latent.dtype, self.factor_mode)
+        w_q = left @ right.T
         return x @ w_q.T + self.bias
 
 
@@ -178,19 +241,22 @@ class BlockReconResult:
         self.layers = layers
 
 
-def _set_linear(linear: nn.Linear, fac: FactorizedLinear) -> None:
+def _set_linear(linear: nn.Linear, fac: FactorizedLinear, factor_mode: str = "binary") -> None:
     """Write refined parameters back into the linear's weight/bias.
 
-    The stored weight is the quantized map itself,
-    ``W_q = (s1 ⊙ sign(U)) @ (s2 ⊙ sign(V))ᵀ`` with shape (dout, din) —
-    ``nn.Linear`` applies ``x @ W.T``, so the stored matrix must NOT be the
-    transpose-shaped product (which only silently worked for square layers).
+    The stored weight is the effective map itself, ``(s1 ⊙ f(U)) @ (s2 ⊙
+    f(V))ᵀ`` with shape (dout, din) — ``nn.Linear`` applies ``x @ W.T``, so the
+    stored matrix must NOT be the transpose-shaped product (which only silently
+    worked for square layers).
+
+    It consults :func:`_factor_terms`, the same definition the live STE forward
+    uses, so the weights the probe and the gate measure are the terms that were
+    tuned (D-1). In binary mode it is bit-identical to the pre-knob pipeline:
+    under ``no_grad`` the helper returns literal ``sign``.
     """
     with torch.no_grad():
-        ub = torch.sign(fac.u_latent)
-        vb = torch.sign(fac.v_latent)
-        w_q = (fac.s1.unsqueeze(1) * ub) @ (fac.s2.unsqueeze(1) * vb).T
-        linear.weight.copy_(w_q.to(linear.weight.dtype))
+        left, right = _factor_terms(fac, torch.float64, factor_mode)
+        linear.weight.copy_((left @ right.T).to(linear.weight.dtype))
         if linear.bias is not None:
             linear.bias.copy_(fac.bias.to(linear.bias.dtype))
 
@@ -224,13 +290,8 @@ def _quantized_forward_block(
                 # training regime. Latents stay float64; only the graph
                 # ops are cast. The f64 fixture path is bit-identical.
                 dt = x_in.dtype
-                ub = torch.sign(_f.u_latent)
-                ub = ub + _f.u_latent - _f.u_latent.detach()
-                vb = torch.sign(_f.v_latent)
-                vb = vb + _f.v_latent - _f.v_latent.detach()
-                s1 = _f.s1.to(dt)
-                s2 = _f.s2.to(dt)
-                w_q = (s1.unsqueeze(1) * ub.to(dt)) @ (s2.unsqueeze(1) * vb.to(dt)).T
+                left, right = _factor_terms(_f, dt, _f.factor_mode)
+                w_q = left @ right.T
                 return x_in @ w_q.T + _f.bias.to(dt)
 
             originals[name] = linear.forward
@@ -377,15 +438,33 @@ def _tune_latent_ste(
         print(f"[tune_latent_ste] skipped {skipped}/{total} non-finite-loss steps", flush=True)
 
 
-def extract_and_pack(u_latent, v_latent, name: str = "") -> QuantizedLayerState:
+def extract_and_pack(
+    u_latent, v_latent, name: str = "", factor_mode: str = "binary"
+) -> QuantizedLayerState:
     """Extract ``sign(U)``/``sign(V)`` (sign(0) = +1) and pack via the
     qk-kernels dispatch (Algorithm 1 lines 20-23).
+
+    **This function is the ONLY latent-to-bit conversion site, and therefore the
+    primary wall of the measurement/artifact boundary (D-5).** An ``fp`` run
+    means "no binary constraint": converting its continuous latents into signs
+    would produce a plausible-looking artifact out of a measurement — the
+    green-washing hazard this boundary exists to forbid — so fp latents are
+    refused outright, for every caller, rather than skipped politely by the
+    caller that happens to know the mode. The driver-level export refusal
+    remains as defense-in-depth behind this one.
 
     Bit identity across backends is asserted here: the packed bits are
     round-tripped through ``unpack_bits`` and must reproduce the extracted
     signs exact, on whichever backend dispatch selects (auto) — raising
     on any mismatch (parity-gated per config.yaml).
     """
+    if factor_mode == "fp":
+        raise ValueError(
+            f"refusing to extract binaries for {name!r}: this run carries "
+            "factor_mode='fp', so its latents are a MEASUREMENT and must never "
+            "be sign-converted into a binary artifact (qk-root-cause-ablation "
+            "D-5). Drop --factor-mode fp for a run that exports."
+        )
     from .. import kernels
 
     u_np = np.asarray(u_latent, dtype=np.float64)
@@ -447,11 +526,8 @@ def reconstruct_block(
     batches = list(calibration_batches)
     if not batches:
         raise ValueError("block reconstruction needs calibration batches")
-    quantizable_linears = (
-        [(name, m) for name, m in _linear_children(block) if name in facs_scope]
-        if (facs_scope := _quantizable_names(block))
-        else []
-    )
+    facs_scope = _scope_filter(_quantizable_names(block), cfg.layer_scope)
+    quantizable_linears = [(name, m) for name, m in _linear_children(block) if name in facs_scope]
 
     def _pname(local: str) -> str:
         if name_prefix is not None:
@@ -541,6 +617,14 @@ def reconstruct_block(
                     aligned.add(entry)
             stats_book = aligned
     dt = cfg.np_compute_dtype
+    # Which stages this run carries (D-2/D-3). ``polish`` is the greedy bit-flip
+    # stage: it is inherently discrete, so only a full binary run performs it.
+    # ``refine`` is TuneLatentSTE — ``untuned-signs`` skips it by definition
+    # (zero refinement is the ablation's content), while ``fp`` keeps it on
+    # continuous latents so the ONLY difference from a binary run is the
+    # discretization.
+    polish = cfg.factor_mode == "binary" and cfg.ablation != "untuned-signs"
+    refine = cfg.ablation != "untuned-signs"
     facs: dict[str, FactorizedLinear] = {}
     linears_by_name = dict(quantizable_linears)
     for entry, (name, linear) in zip(stats_book, quantizable_linears, strict=False):
@@ -584,25 +668,38 @@ def reconstruct_block(
         # cos x4-6 per layer in ~10 s). The latents below become exactly
         # +-1, so TuneLatentSTE's sign() sees fixed bits and its continuous
         # knobs (scales) refine on top of the polished signs.
-        ub_p, vb_p, s1_p, s2_p = greedy_polish(
-            w,
-            np.asarray(bal.Ub, dtype=np.float64),
-            np.asarray(bal.Vb, dtype=np.float64),
-            np.asarray(bal.s1, dtype=np.float64),
-            np.asarray(bal.s2, dtype=np.float64),
-            rounds=cfg.polish_rounds,
-        )
-        # Exact refold: latents = polished bits themselves (sign(latent) is
-        # then a fixed point — STE cannot and need not move them), scales
-        # carry the magnitude. cos(latent, bal.U) is irrelevant; the
-        # artifact is (bits, scales), and those are the polished ones.
-        u0 = torch.from_numpy(np.ascontiguousarray(ub_p))
-        v0 = torch.from_numpy(np.ascontiguousarray(vb_p))
+        if polish:
+            ub_p, vb_p, s1_p, s2_p = greedy_polish(
+                w,
+                np.asarray(bal.Ub, dtype=np.float64),
+                np.asarray(bal.Vb, dtype=np.float64),
+                np.asarray(bal.s1, dtype=np.float64),
+                np.asarray(bal.s2, dtype=np.float64),
+                rounds=cfg.polish_rounds,
+            )
+            # Exact refold: latents = polished bits themselves (sign(latent) is
+            # then a fixed point — STE cannot and need not move them), scales
+            # carry the magnitude. cos(latent, bal.U) is irrelevant; the
+            # artifact is (bits, scales), and those are the polished ones.
+            u0 = torch.from_numpy(np.ascontiguousarray(ub_p))
+            v0 = torch.from_numpy(np.ascontiguousarray(vb_p))
+        else:
+            # No discrete stage at all: the continuous balance latents ARE the
+            # factorization. In fp mode the forward never signs them (D-2); in
+            # untuned-signs mode they are exported as their signs with the Eq. 8
+            # scale fold and zero refinement (D-3).
+            u0 = torch.from_numpy(np.ascontiguousarray(np.asarray(bal.U, dtype=np.float64)))
+            v0 = torch.from_numpy(np.ascontiguousarray(np.asarray(bal.V, dtype=np.float64)))
+            s1_p = np.asarray(bal.s1, dtype=np.float64)
+            s2_p = np.asarray(bal.s2, dtype=np.float64)
         s1_np = np.ascontiguousarray(s1_p)
         s2_np = np.ascontiguousarray(s2_p)
         bias0 = original_bias[name]
         fac = FactorizedLinear(
-            u0, v0, bias0 if bias0 is not None else torch.zeros(linear.weight.shape[0])
+            u0,
+            v0,
+            bias0 if bias0 is not None else torch.zeros(linear.weight.shape[0]),
+            factor_mode=cfg.factor_mode,
         )
         # Scales initialized from Eq. 8 (with the latent scale folded in).
         with torch.no_grad():
@@ -611,34 +708,43 @@ def reconstruct_block(
         facs[name] = fac
     _note_block_progress(0, f"{name_prefix or 'block'}/lb_admm")
     if recorder is not None:
-        recorder("lb_admm")
+        # The polish count travels in the existing event: an ablation's log must
+        # PROVE zero polish invocations, and adding a new event name would
+        # change the stage sequence every existing consumer asserts.
+        recorder("lb_admm", polish_rounds=cfg.polish_rounds if polish else 0)
 
     # --- Step 3: TuneLatentSTE (line 19).
     _note_block_progress(0, f"{name_prefix or 'block'}/stats_done")
-    _tune_latent_ste(block, facs, x_b, y_b, cfg, cfg.stage_latent.batch_size)
-    _note_block_progress(0, f"{name_prefix or 'block'}/ste")
-    if recorder is not None:
-        recorder("ste")
+    if refine:
+        _tune_latent_ste(block, facs, x_b, y_b, cfg, cfg.stage_latent.batch_size)
+        _note_block_progress(0, f"{name_prefix or 'block'}/ste")
+        if recorder is not None:
+            recorder("ste")
 
     # --- Extraction and packing (lines 20-23).
     layers: list[QuantizedLayerState] = []
     for name, fac in facs.items():
-        u_np = fac.u_latent.detach().cpu().numpy()
-        v_np = fac.v_latent.detach().cpu().numpy()
-        st = extract_and_pack(u_np, v_np, name=_pname(name))
-        st.s1 = fac.s1.detach().cpu().numpy().astype(np.float64).copy()
-        st.s2 = fac.s2.detach().cpu().numpy().astype(np.float64).copy()
-        st.bias = fac.bias.detach().cpu().numpy().astype(np.float64).copy()
-        layers.append(st)
-        # Freeze the quantized weight into the module for subsequent prefix
-        # capture (the module graph keeps working for later blocks). The
+        # Bits are made only for a binary run. In fp mode extract_and_pack
+        # refuses outright (D-5), so the run produces no fabricated layer
+        # states at all — the measurement carries a report, never an artifact.
+        if cfg.factor_mode != "fp":
+            u_np = fac.u_latent.detach().cpu().numpy()
+            v_np = fac.v_latent.detach().cpu().numpy()
+            st = extract_and_pack(u_np, v_np, name=_pname(name))
+            st.s1 = fac.s1.detach().cpu().numpy().astype(np.float64).copy()
+            st.s2 = fac.s2.detach().cpu().numpy().astype(np.float64).copy()
+            st.bias = fac.bias.detach().cpu().numpy().astype(np.float64).copy()
+            layers.append(st)
+        # Freeze the effective weight into the module for subsequent prefix
+        # capture (the module graph keeps working for later blocks) — the
+        # continuous fp factorization in fp mode, the binary one otherwise. The
         # pre-TuneFP bias is restored first — TuneFP's fp-bias move is not
         # part of the artifact (no bias field in qpk1).
         linear = linears_by_name[name]
         if linear.bias is not None and original_bias[name] is not None:
             with torch.no_grad():
                 linear.bias.copy_(original_bias[name].to(linear.bias.dtype))
-        _set_linear(linear, fac)
+        _set_linear(linear, fac, factor_mode=cfg.factor_mode)
 
     return BlockReconResult(layers)
 

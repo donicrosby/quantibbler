@@ -1198,6 +1198,12 @@ _ABORT_IDENTITY_VALUES: dict[str, object] = {
     "eval_rows": 16,
     "max_admm_iter": 1,
     "seed": 0,
+    # Ablation provenance (qk-root-cause-ablation D-5): the recorded abort run
+    # used the defaults, and the knobs must travel on the abort path too so a
+    # measurement can never be mistaken for a landing.
+    "factor_mode": "binary",
+    "ablation": "none",
+    "layer_scope": "all",
     "ppl_baseline_bf16": 75.90947478697456,
     "regime": {"artifact": "qpk1: +-1 bitplanes + float32 scales"},
     "probe": {"interval": 1, "batches": 1, "fp_prefix_ppl": 83.08454639156159},

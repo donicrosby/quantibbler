@@ -87,13 +87,18 @@ def test_tune_knob_is_passthrough_and_never_wrapper_chosen():
     unset = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048")
     assert unset.returncode == 0, unset.stderr
     assert "'--tune-seq-len'" not in unset.stdout
-    assert "tune_seq_len=unset" in unset.stdout
+    assert "tune_seq_len=unset" in unset.stderr
+    # The stream contract, pinned from both sides: stdout is the machine channel
+    # (pure argv), stderr carries the announce and the advisories. A future
+    # accidental redirect reversal lands here, not in a human's eyeballs.
+    assert "run-ptq-container: model=" not in unset.stdout
+    assert unset.stdout.strip().splitlines()[-1].startswith("'docker' 'run'")
 
     split = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048", TUNE_SEQ_LEN="512")
     assert split.returncode == 0, split.stderr
     assert "'--tune-seq-len' '512'" in split.stdout
     assert "'--seq-len' '2048'" in split.stdout  # eval geometry untouched
-    assert "tune_seq_len=512" in split.stdout
+    assert "tune_seq_len=512" in split.stderr
 
 
 def test_dry_run_announces_nothing_it_need_not_and_the_advisories_it_must():
@@ -102,13 +107,14 @@ def test_dry_run_announces_nothing_it_need_not_and_the_advisories_it_must():
     assert default.returncode == 0
     assert "SOLVER unset -> admm" in default.stderr
     assert "SEQ_LEN=512 is a diagnostic geometry" in default.stderr
-    assert "rank=8 solver=admm seq_len=512" in default.stdout
+    assert "rank=8 solver=admm seq_len=512" in default.stderr
+    assert "run-ptq-container: model=" not in default.stdout
 
     # The claimable split run: eval geometry and tune window both chosen -> silent.
     split = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048", TUNE_SEQ_LEN="512")
     assert split.returncode == 0
     assert "note:" not in split.stderr, split.stderr
-    assert "rank=512 solver=svd seq_len=2048" in split.stdout
+    assert "rank=512 solver=svd seq_len=2048" in split.stderr
 
     # The OOM-shaped launch is ANNOUNCED, not refused: seq 2048 with the tune
     # window left unset is the geometry that died at the ceiling, so the wrapper
@@ -116,7 +122,7 @@ def test_dry_run_announces_nothing_it_need_not_and_the_advisories_it_must():
     oom = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048")
     assert oom.returncode == 0, oom.stderr
     assert "SEQ_LEN=2048 with TUNE_SEQ_LEN unset" in oom.stderr
-    assert "rank=512 solver=svd seq_len=2048" in oom.stdout
+    assert "rank=512 solver=svd seq_len=2048" in oom.stderr
 
 
 def test_wrapper_never_truncates_the_breadcrumb_trail():

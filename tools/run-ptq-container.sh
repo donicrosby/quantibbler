@@ -11,7 +11,8 @@
 #   /tmp/ptq = real-disk scratch (KD teacher-logit memmap lands here, 20GB class)
 #
 # Knobs, all env — positional arguments are REFUSED, not ignored:
-#   MODEL OUT RANK SOLVER SEQ_LEN TUNE_SEQ_LEN CALIBRATION_SEQS EVAL_SEQS DRY_RUN
+#   MODEL OUT RANK SOLVER SEQ_LEN TUNE_SEQ_LEN CALIBRATION_SEQS EVAL_SEQS
+#   FACTOR_MODE ABLATION LAYER_SCOPE DRY_RUN
 #
 # Two defaults are traps worth knowing before you launch: SOLVER defaults to
 # `admm` (the measured ablation showed the ADMM stage earns nothing here —
@@ -54,6 +55,13 @@ SEQ_LEN="${SEQ_LEN:-512}"
 # Deliberately NOT defaulted to anything: an empty value must reach the driver
 # as "unset" so the driver's own default (tune == --seq-len) applies.
 TUNE_SEQ_LEN="${TUNE_SEQ_LEN:-}"
+# Root-cause ablation knobs (qk-root-cause-ablation): STRICT PASSTHROUGH, exactly
+# like TUNE_SEQ_LEN — empty means UNSET, so the driver's own default applies. The
+# wrapper never authors a measurement geometry or mode: a launch that claims to
+# be an fp rung must have said so.
+FACTOR_MODE="${FACTOR_MODE:-}"
+ABLATION="${ABLATION:-}"
+LAYER_SCOPE="${LAYER_SCOPE:-}"
 CALIBRATION_SEQS="${CALIBRATION_SEQS:-16}"
 EVAL_SEQS="${EVAL_SEQS:-5}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -64,7 +72,7 @@ DRY_RUN="${DRY_RUN:-0}"
 # something other than what was asked for.
 if [ "$#" -ne 0 ]; then
   echo "run-ptq-container.sh takes no arguments; use the env knobs:" >&2
-  echo "  MODEL OUT RANK SOLVER SEQ_LEN TUNE_SEQ_LEN CALIBRATION_SEQS EVAL_SEQS DRY_RUN" >&2
+  echo "  MODEL OUT RANK SOLVER SEQ_LEN TUNE_SEQ_LEN CALIBRATION_SEQS EVAL_SEQS FACTOR_MODE ABLATION LAYER_SCOPE DRY_RUN" >&2
   echo "  got: $*" >&2
   exit 2
 fi
@@ -89,9 +97,16 @@ fi
 if [ "$SEQ_LEN" = "2048" ] && [ -z "$TUNE_SEQ_LEN" ]; then
   echo "note: SEQ_LEN=2048 with TUNE_SEQ_LEN unset runs the tune stage at 2048 too - the geometry that died with a memcg OOM at the 32g ceiling; set TUNE_SEQ_LEN=512 to bound the tune windows" >&2
 fi
+# Stream contract, deliberate and now pinned from both sides: STDOUT is the
+# machine channel and carries the resolved argv and NOTHING else, so a verifier
+# can parse the launch line byte-for-byte; STDERR is the human channel and
+# carries the announce plus the advisories. (Before this, the announce went to
+# stdout and mixed with the argv; the split arrived as part of the ablation-knob
+# passthrough repair, so the why is recorded here rather than left to archaeology.)
 echo "run-ptq-container: model=$MODEL rank=$RANK solver=$SOLVER seq_len=$SEQ_LEN" \
   "tune_seq_len=${TUNE_SEQ_LEN:-unset} calibration_seqs=$CALIBRATION_SEQS" \
-  "eval_seqs=$EVAL_SEQS out=$OUT"
+  "factor_mode=${FACTOR_MODE:-binary} ablation=${ABLATION:-none} layer_scope=${LAYER_SCOPE:-all}" \
+  "eval_seqs=$EVAL_SEQS out=$OUT" >&2
 
 set -- docker run --rm \
   --name quantibbler-ptq-run \
@@ -122,6 +137,15 @@ set -- docker run --rm \
 # `--tune-seq-len` is not a value the driver accepts.
 if [ -n "$TUNE_SEQ_LEN" ]; then
   set -- "$@" --tune-seq-len "$TUNE_SEQ_LEN"
+fi
+if [ -n "$FACTOR_MODE" ]; then
+  set -- "$@" --factor-mode "$FACTOR_MODE"
+fi
+if [ -n "$ABLATION" ]; then
+  set -- "$@" --ablation "$ABLATION"
+fi
+if [ -n "$LAYER_SCOPE" ]; then
+  set -- "$@" --layer-scope "$LAYER_SCOPE"
 fi
 
 # DRY_RUN=1 prints the exact command line (copy-pasteable) and stops: the launch

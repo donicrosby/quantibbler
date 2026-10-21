@@ -74,20 +74,28 @@ def quantize_model(
         for st in result.layers:
             layers[st.name] = st
 
-    missing = quant_names - set(layers)
-    if missing:
-        raise RuntimeError(f"block reconstruction skipped quantizable layers: {sorted(missing)}")
-    if set(layers) - quant_names:
-        raise RuntimeError(
-            f"block reconstruction produced out-of-scope layers: "
-            f"{sorted(set(layers) - quant_names)}"
-        )
+    # fp mode is a MEASUREMENT (qk-root-cause-ablation D-5): it makes no bits at
+    # all, so there are no layer states to account for and nothing to calibrate.
+    # Scale calibration serves a packed artifact, while the fp rung measures
+    # HOST-WEIGHT reconstruction fidelity — that skip is the ablation boundary
+    # and is design intent, not an accident of the plumbing.
+    if config.factor_mode != "fp":
+        missing = quant_names - set(layers)
+        if missing:
+            raise RuntimeError(
+                f"block reconstruction skipped quantizable layers: {sorted(missing)}"
+            )
+        if set(layers) - quant_names:
+            raise RuntimeError(
+                f"block reconstruction produced out-of-scope layers: "
+                f"{sorted(set(layers) - quant_names)}"
+            )
 
-    # Phase 3: global scale calibration — only s1/s2 train, packed binaries
-    # are bit-frozen ([NQ] Sec 3.3, Algorithm 1 lines 26-27). The tuned
-    # scales are then written back into the host model's frozen weights so
-    # the host forward equals the artifact forward bit-for-bit.
-    calibrate_scales(model, layers, teacher, batches, config)
+        # Phase 3: global scale calibration — only s1/s2 train, packed binaries
+        # are bit-frozen ([NQ] Sec 3.3, Algorithm 1 lines 26-27). The tuned
+        # scales are then written back into the host model's frozen weights so
+        # the host forward equals the artifact forward bit-for-bit.
+        calibrate_scales(model, layers, teacher, batches, config)
 
     # Finalize the scales at their storage precision: the qpk1 container's
     # scale values ARE the canonical artifact scales, so rounding to the

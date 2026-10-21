@@ -88,6 +88,19 @@ def _reduce_tokens(x: torch.Tensor) -> torch.Tensor:
     return x.detach().to(torch.float64).reshape(-1, x.shape[-1])
 
 
+@torch.no_grad()
+def _accumulate(rows: torch.Tensor, total: torch.Tensor, count: int) -> tuple[torch.Tensor, int]:
+    """Stream one chunk into per-feature sum-of-squares plus a token count.
+
+    D-7: the state is O(feature width) and the chunk's float64 copy dies with
+    this call, so retention does not grow with the row or chunk count. The
+    final per-feature mean of squares is ``total / count`` — the same quantity
+    the reference path computes as ``x.pow(2).mean(dim=0)``, re-associated.
+    """
+    flat = rows.detach().to(torch.float64).reshape(-1, rows.shape[-1])
+    return total + flat.pow(2).sum(dim=0), count + int(flat.shape[0])
+
+
 def _layer_statistic(feat_sq: torch.Tensor, grad_stat: torch.Tensor) -> torch.Tensor:
     """Diagonal curvature proxy per input feature: mean(x^2) + mean-square
     gradient statistic, float64.
@@ -117,7 +130,12 @@ def collect_stats(
     batch — the float64 reference path stays bit-identical to the landed
     single-pass behavior; lower-precision real-model paths opt in because a
     whole-batch backward retains attention graphs for every row at once and
-    OOMs under container caps.
+    OOMs under container caps. Setting ``chunk_rows`` also switches the
+    activation hooks to streamed statistics (D-7): per-feature sum-of-squares
+    plus a token count, state O(feature width), instead of retaining every
+    chunk's full float64 activation — the retention that OOM-killed the first
+    rung-1 launch. ``chunk_rows=None`` keeps the landed list/concatenate path
+    byte-for-byte.
     """
     linears = [(name, m) for name, m in module.named_modules() if isinstance(m, nn.Linear)]
     if not linears:
@@ -125,20 +143,39 @@ def collect_stats(
 
     grad_enabled = torch.is_grad_enabled()
     book = LayerStatsBook()
+    # D-7: the chunked path streams (sum of squares, token count) per feature
+    # and drops each chunk's activation; the reference path retains and
+    # concatenates exactly as landed.
+    streaming = chunk_rows is not None
     feats_in: dict[str, list[torch.Tensor]] = {name: [] for name, _ in linears}
     feats_out: dict[str, list[torch.Tensor]] = {name: [] for name, _ in linears}
+    sum_sq_in = {name: torch.zeros(m.weight.shape[1], dtype=torch.float64) for name, m in linears}
+    sum_sq_out = {name: torch.zeros(m.weight.shape[0], dtype=torch.float64) for name, m in linears}
+    rows_in = {name: 0 for name, _ in linears}
+    rows_out = {name: 0 for name, _ in linears}
     handles = []
     for name, m in linears:
-        handles.append(
-            m.register_forward_hook(
-                lambda mod, inp, out, key=name: feats_out[key].append(_reduce_tokens(out))
+        if streaming:
+
+            def _pre_hook(mod, inp, key=name):  # noqa: ANN001
+                sum_sq_in[key], rows_in[key] = _accumulate(inp[0], sum_sq_in[key], rows_in[key])
+
+            def _post_hook(mod, inp, out, key=name):  # noqa: ANN001
+                sum_sq_out[key], rows_out[key] = _accumulate(out, sum_sq_out[key], rows_out[key])
+
+            handles.append(m.register_forward_pre_hook(_pre_hook))
+            handles.append(m.register_forward_hook(_post_hook))
+        else:
+            handles.append(
+                m.register_forward_hook(
+                    lambda mod, inp, out, key=name: feats_out[key].append(_reduce_tokens(out))
+                )
             )
-        )
-        handles.append(
-            m.register_forward_pre_hook(
-                lambda mod, inp, key=name: feats_in[key].append(_reduce_tokens(inp[0]))
+            handles.append(
+                m.register_forward_pre_hook(
+                    lambda mod, inp, key=name: feats_in[key].append(_reduce_tokens(inp[0]))
+                )
             )
-        )
 
     params = [p for _, m in linears for p in m.parameters()]
     had_grad = [bool(p.grad is not None) for p in params]
@@ -190,13 +227,33 @@ def collect_stats(
 
     for name, m in linears:
         din, dout = m.weight.shape[1], m.weight.shape[0]
-        feat_in = torch.cat(feats_in[name], dim=0)
-        feat_out = torch.cat(feats_out[name], dim=0)
         grad_stat = torch.stack(grad_in2[name]).mean(dim=0)  # (din,)
-        d_in_raw = (
-            _layer_statistic(feat_in.pow(2), grad_stat).detach().cpu().numpy().astype(np.float64)
-        )
-        d_out_raw = feat_out.pow(2).mean(dim=0).detach().cpu().numpy().astype(np.float64)
+        if streaming:
+            if rows_in[name] == 0 or rows_out[name] == 0:
+                raise ValueError(f"streamed statistics for layer {name!r} saw no rows")
+            # sum(x^2)/n per feature is the quantity the reference computes as
+            # feat.pow(2).mean(dim=0); only the summation order differs.
+            d_in_raw = (
+                (sum_sq_in[name] / rows_in[name] + grad_stat)
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(np.float64)
+            )
+            d_out_raw = (
+                (sum_sq_out[name] / rows_out[name]).detach().cpu().numpy().astype(np.float64)
+            )
+        else:
+            feat_in = torch.cat(feats_in[name], dim=0)
+            feat_out = torch.cat(feats_out[name], dim=0)
+            d_in_raw = (
+                _layer_statistic(feat_in.pow(2), grad_stat)
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(np.float64)
+            )
+            d_out_raw = feat_out.pow(2).mean(dim=0).detach().cpu().numpy().astype(np.float64)
         d_in_raw = np.maximum(d_in_raw, _TINY)
         d_out_raw = np.maximum(d_out_raw, _TINY)
         if d_in_raw.shape != (din,) or d_out_raw.shape != (dout,):
