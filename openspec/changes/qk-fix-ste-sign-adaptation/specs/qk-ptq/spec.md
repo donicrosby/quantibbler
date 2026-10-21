@@ -28,3 +28,10 @@ deviations are named in the run record.
 - **THEN** each flip is accepted only if the block-local objective
   `‖Wq@x_b − y_b‖` decreases, with a deterministic sweep order and a recorded
   acceptance count per linear
+- **AND** `(x_b, y_b)` is the same corpus-pinned cached capture that feeds
+  TuneFP ([NQ] Algorithm 1 lines 9–10, 19): `x_b` is the compressed-prefix
+  stream and `y_b` is the pristine FP block's output on it, captured once
+  per block before any tuning, never recomputed from tuned or quantized
+  weights
+- **AND** the artifact records the same teacher provenance (source
+  fingerprint + capture index) as the TuneFP stage

@@ -39,15 +39,25 @@ informed-assumption marker, recorded in code and artifacts.
   carried by the pinned conversion). The block's remaining FP weights are
   then tuned so its output on the quantized-prefix stream reproduces `Y_b`.
 - In-block factorization is **sequential** ([NQ] Sec 3.2: "sequentially
-  compress each linear layer in each transformer block"), and TuneFP runs
-  per layer so it compensates previously-factorized layers in the current
-  block — the objective is nonzero once any in-block layer is factorized
-  (the prose is binding; the algorithm's once-per-block TuneFP line is
-  schematic).
+  compress each linear layer in each transformer block"), and TuneFP fires
+  **once per block** ([NQ] Algorithm 1 line 12) at the **Figure 3
+  placement**: after the attention projections (Q/K/V) are factorized and
+  before the remaining linears (O/G/U/D) are, tuning the still-FP
+  remainder so it compensates previously-factorized layers in the current
+  block — the objective is nonzero by construction. The figure's left
+  panel encodes exactly this (Q/K/V green, flames on O/G/U/D); the
+  line-12-before-everything placement — objective identically zero at
+  init — is the measured defect and is removed.
 - A **runtime contract catches vacuous teachers**: if the pre-tune objective
   gradient norm is zero at the first step, the stage aborts with a recorded
-  event naming the vacuous teacher — never a silent no-op (the same
-  fail-closed class as the fp-resume guard change).
+  event naming the vacuous teacher and carrying BOTH the gradient norm and
+  the initial residual norm (broken-teacher vs detached-student); a run
+  claiming paper fidelity fails on any vacuous event — never a silent no-op
+  (the same fail-closed class as the fp-resume guard change).
+- The teacher block's weights load from the **pinned pristine safetensors**
+  (or a frozen reference copy), never live module state; the teacher cache
+  is **memory-only in v1** and re-captured on resume; the artifact records
+  the source fingerprint + capture index.
 - The recorder/artifact records `tune_fp_effect` honestly (weight/output
   delta vs pristine) plus teacher provenance and the informed-assumption
   marker.
@@ -71,8 +81,8 @@ informed-assumption marker, recorded in code and artifacts.
 ## User directive (2026-10-21)
 
 User: "Follow the paper TO THE LETTER; prove the paper's method is possible
-first." Consequence: sequential in-block factorization + per-layer TuneFP
-move INTO scope here (the former v1 non-goal is withdrawn); this change and
-its siblings (`qk-fix-ste-sign-adaptation`, `qk-fix-fp-resume-guard`) land
-before any further diagnostic runs; the ladder fork fires only after a
-paper-faithful run exists.
+first." Consequence: sequential in-block factorization + the Figure 3
+TuneFP placement move INTO scope here (the former v1 non-goal is
+withdrawn); this change and its siblings (`qk-fix-ste-sign-adaptation`,
+`qk-fix-fp-resume-guard`) land before any further diagnostic runs; the
+ladder fork fires only after a paper-faithful run exists.

@@ -60,6 +60,23 @@ signs; (2) magnitude-decay toward zero with re-binarization (closest to the
 STE letter); (3) the discrete flip pass, recorded as an explicit deviation;
 (4) re-scope as scale-only. Gate (A)/(B) acceptance criteria are unchanged.
 
+## Amendment (2026-10-21, planner, from user-pinned Algorithm 1)
+
+The user pasted Algorithm 1 into the room (2026-10-21); it matches the
+pinned corpus (`docs/papers/nanoquant-2602.06694v3.md` lines 690–825) on
+every binding element. It pins what this change's spec left unstated: line
+19 `TuneLatentSTE(b, X_b, Y_b; T_post)` consumes the SAME captured teacher
+(X_b, Y_b) as line 12 `TuneFP` — captured once per block at lines 9–10.
+Folded into the delta: the STE stage's block-local objective uses that
+shared, pristine-pinned, memory-only cached capture, and the artifact
+records the same teacher provenance as TuneFP. Any construction where
+TuneLatentSTE recomputes its own target from live state reproduces the
+self-referential-teacher defect this fix class exists to kill. [NQ]
+Figure 3's right panel (vendored at `docs/papers/assets/block_recon.png`)
+confirms the placement: the flame sits on O alone AFTER O's factorization
+(scissors, middle panel) — STE refinement is per-layer, on the
+just-factorized layer, inside the block loop.
+
 ## Discarded
 
 - **Per-step re-binarization WITHOUT the crossing diagnosis.** Re-binarizing
