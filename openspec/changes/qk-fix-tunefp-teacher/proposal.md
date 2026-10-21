@@ -45,7 +45,8 @@ informed-assumption marker, recorded in code and artifacts.
   before the remaining linears (O/G/U/D) are, tuning the still-FP
   remainder so it compensates previously-factorized layers in the current
   block — the objective is nonzero by construction. The figure's left
-  panel encodes exactly this (Q/K/V green, flames on O/G/U/D); the
+  panel encodes exactly this (Q/K/V green, tuning flames on the still-FP
+  remainder); the
   line-12-before-everything placement — objective identically zero at
   init — is the measured defect and is removed.
 - A **runtime contract catches vacuous teachers**: if the pre-tune objective

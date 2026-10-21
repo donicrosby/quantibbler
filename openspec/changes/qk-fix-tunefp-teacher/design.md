@@ -24,9 +24,13 @@ image directly: [NQ] Figure 3, `block_recon.png` — vendored at
 `3b4c5ed8cb12757f6a39cb366329418abcc00c372366762223ae9926ab798c61`,
 source `https://arxiv.org/html/2602.06694v3/block_recon.png`. Panel
 inventory (verified on the vendored bytes): left panel — Q/K/V GREEN
-(already factorized), O/G/U/D YELLOW with flame icons (being tuned),
-all four flames simultaneous; middle panel — scissors on O only; right
-panel — O green with a flame on O only; sequence arrows left→right.
+(already factorized), O/G/U/D YELLOW (still FP) with the tuning flame
+markers on the still-FP remainder (exact flame inventory on the remainder
+is contested between readers — planner's passes count flames on O/G/U/D,
+sec-eng's counts G and U; the placement ruling depends only on Q/K/V being
+factorized while the remainder is FP, which both reads agree on); middle
+panel — scissors on O only; right panel — O green with a flame on O only;
+sequence arrows left→right.
 Official caption (pinned HTML): "(1) Error Propagation Mitigation to
 adjust full-precision weights for accumulated errors". Together with
 the Sec 3.2 Step 1 prose ("previously factorized layers in the current

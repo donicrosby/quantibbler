@@ -26,8 +26,10 @@ first:
    adds an explicit decay schedule rather than unbounded steps.
 3. **Bounded discrete sign-flip pass.** After the STE steps, propose flips
    of `Ub[i,j]`/`Vb[i,j]` one entry at a time (budgeted, e.g. one pass per
-   entry per linear), recompute the block-local objective `‖Wq@x_b − y_b‖`,
-   accept on decrease. Cost: budget × block forward — bounded and offline.
+   entry per linear), recompute the block-reconstruction objective
+   `‖block_tuned(x_b) − y_fp‖²` (the proposed flip applied to the linear
+   under refinement, every other block parameter held fixed), accept on
+   decrease. Cost: budget × block forward — bounded and offline.
    Deterministic sweep order (row-major, seeded tie handling) so runs are
    reproducible. Recorded as an **explicit deviation** if adopted (the
    paper has no discrete flip pass).
@@ -67,15 +69,46 @@ pinned corpus (`docs/papers/nanoquant-2602.06694v3.md` lines 690–825) on
 every binding element. It pins what this change's spec left unstated: line
 19 `TuneLatentSTE(b, X_b, Y_b; T_post)` consumes the SAME captured teacher
 (X_b, Y_b) as line 12 `TuneFP` — captured once per block at lines 9–10.
-Folded into the delta: the STE stage's block-local objective uses that
-shared, pristine-pinned, memory-only cached capture, and the artifact
-records the same teacher provenance as TuneFP. Any construction where
-TuneLatentSTE recomputes its own target from live state reproduces the
-self-referential-teacher defect this fix class exists to kill. [NQ]
-Figure 3's right panel (vendored at `docs/papers/assets/block_recon.png`)
-confirms the placement: the flame sits on O alone AFTER O's factorization
-(scissors, middle panel) — STE refinement is per-layer, on the
-just-factorized layer, inside the block loop.
+Folded into the delta: the STE stage's objective uses that shared,
+pristine-pinned, memory-only cached capture, and the artifact records the
+same teacher provenance as TuneFP. Any construction where TuneLatentSTE
+recomputes its own target from live state reproduces the
+self-referential-teacher defect this fix class exists to kill. [NQ] Figure
+3's right panel (vendored at `docs/papers/assets/block_recon.png`) confirms
+the placement: the flame sits on O alone AFTER O's factorization (scissors,
+middle panel) — STE refinement is per-layer, on the just-factorized layer,
+inside the block loop.
+
+## Amendment (2026-10-21, planner, from sec-eng required changes S1–S2)
+
+sec-eng found two spec defects before build; both folded as rulings:
+
+- **S1 — objective dimensional coherence.** The previous delta pinned
+  `‖Wq@x_b − y_b‖` — a layer-local residual (q_proj output, not
+  d_model-shaped on GQA k/v) scored against the block-level teacher, which
+  typechecks only by coincidence on square projections and scores noise.
+  Ruling: ONE objective, block-level `‖block_tuned(x_b) − y_fp‖²` where
+  `block_tuned(x_b)` is the block forward with the proposed flip applied to
+  the linear under refinement and every other block parameter held at its
+  current value. It typechecks for every factorized linear (the block
+  output is always d_model-shaped), it is consistent with the tunefp
+  design's objective family and Algorithm 1 line 19's block-level
+  signature, and it needs no new capture: `(x_b, y_fp)` is the shared
+  corpus-pinned capture, provenance recorded as in TuneFP. The layer-local
+  alternative (per-layer teacher intermediates) is discarded — it invents a
+  capture the algorithm never names.
+- **S2 — coverage and parameter set.** Refinement covers EVERY factorized
+  linear in the block (the seven scoped linears: attn q/k/v/o, mlp
+  gate/up/down), scheduled per-layer on the just-factorized linear per
+  Figure 3's right panel; the line-19 T_post budget is split
+  deterministically across the block's factorized linears (equal split,
+  remainder to the earliest linears in fixed order) and the per-layer
+  allocation is recorded. Parameter set ruling: **scales are IN** — the
+  joint set is (U, V, s1, s2) per [NQ] Eq. 10 and the Figure 3 caption
+  (corpus line 577, "fine-tunes the continuous latent matrices and
+  scales"). Flip counts instrument the U/V sign crossings; scale movement
+  is recorded per linear alongside. A build that omits scales from the
+  parameter set records a named deviation, never silence.
 
 ## Discarded
 

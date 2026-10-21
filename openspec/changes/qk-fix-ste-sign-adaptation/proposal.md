@@ -29,8 +29,15 @@ adaptation effective or declare the stage honestly scale-only.
   paper's own STE mechanism, instrumented and diagnosed so latents cross
   zero within [NQ] App. C parameter space; (2) magnitude decay toward zero
   with per-step re-binarization; (3) a bounded discrete sign-flip pass on
-  `Ub`/`Vb` with block-local loss-decrease acceptance, recorded as an
-  explicit deviation if adopted; (4) honest re-scope to scale-only.
+  `Ub`/`Vb` with block-reconstruction loss-decrease acceptance
+  (`‖block_tuned(x_b) − y_fp‖²`), recorded as an explicit deviation if
+  adopted; (4) honest re-scope to scale-only.
+- Refinement covers every factorized linear in the block (all seven scoped
+  linears, per-layer on the just-factorized linear per Figure 3's right
+  panel) with the line-19 T_post budget split deterministically across the
+  block's factorized linears; the parameter set is the paper's joint set
+  (U, V, s1, s2) per [NQ] Eq. 10, with scale movement recorded alongside
+  flip counts.
 
 ## Impact
 
@@ -46,6 +53,6 @@ adaptation effective or declare the stage honestly scale-only.
 
 - No change to [NQ] Step 2 (greedy polish) or the scales-only global tuning
   requirement.
-- No task-loss coupling: acceptance of any flip uses the block-local
-  objective only.
+- No task-loss coupling: acceptance of any flip uses the
+  block-reconstruction objective only.
 - No stage budget/lr retuning in this change.
