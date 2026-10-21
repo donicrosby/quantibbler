@@ -54,6 +54,8 @@ __all__ = [
     "probe_ratio",
     "probe_aborts",
     "abort_report",
+    "stage_failure_report",
+    "stage_map",
     "provenance",
 ]
 
@@ -269,6 +271,129 @@ def abort_report(exc: Any, identity_fields: dict, history: list) -> dict:
     for key in _ABORT_UNMEASURED:
         report[key] = None
     return report
+
+
+def stage_failure_report(exc: Any, identity_fields: dict, stages: list) -> dict:
+    """The report for a run that failed a fail-closed stage gate (torch-free).
+
+    Used by the TuneFP vacuity guard (qk-fix-tunefp-teacher A3): a run that
+    CLAIMS paper fidelity must fail rather than continue on a stage that did
+    not execute, and it must still leave a forensically complete report.
+    Same key set as the completion and abort reports (unmeasured end-of-run
+    numerics as ``null``, ``artifact_exported`` false, status ``failed``), so
+    a strict consumer cannot KeyError on this shape either.
+
+    ``exc`` is duck-typed on purpose, exactly like :func:`abort_report`: its
+    attributes are read directly with no defaults, so a wrong object fails
+    loudly instead of producing a report full of nulls.
+    """
+    report = dict(identity_fields)
+    report["stage_failure"] = {
+        "stage": exc.stage,
+        "block": exc.block,
+        "reason": exc.reason,
+        "gradient_norm": exc.gradient_norm,
+        "initial_residual_norm": exc.initial_residual_norm,
+    }
+    # The fidelity claim is recorded FALSE, never left standing: the run
+    # reached a stage whose execution the paper's method requires and it did
+    # not happen.
+    report["paper_faithful"] = False
+    report["stages"] = list(stages)
+    report["artifact_exported"] = False
+    report["status"] = FAILED
+    for key in _ABORT_UNMEASURED:
+        report[key] = None
+    return report
+
+
+#: Every stage the driver can execute, mapped to its [NQ] Algorithm 1 lines.
+#: ``required`` names the stages the paper's method cannot skip; a
+#: ``required`` stage that did not execute, or a stage carrying a
+#: ``deviation``, is exactly what a fidelity claim has to account for.
+_STAGE_LINES: tuple[tuple[str, str, str, str | None], ...] = (
+    (
+        "phase1_statistics",
+        "2-5",
+        "global calibration statistics (RobustDiag preconditioners)",
+        "collected per block from the compressed-prefix stream (Algorithm 1 "
+        "line 9 inputs) instead of once over the FP model on raw X_cal; the "
+        "statistic definition is unchanged",
+    ),
+    ("capture", "9-10", "compressed-prefix inputs X_b and teacher outputs Y_b", None),
+    (
+        "tune_fp",
+        "12 (Figure 3 placement)",
+        "TuneFP: error-propagation mitigation",
+        "placement read from Figure 3 (once per block, after Q/K/V are "
+        "factorized) and the internal loss formula is an informed assumption "
+        "(the corpus names the call but not its objective)",
+    ),
+    (
+        "lb_admm",
+        "14-17",
+        "LB-ADMM low-rank binary initialization",
+        "the greedy bit-flip polish (qk-root-cause line of work) is an EXTRA "
+        "discrete stage the paper does not describe; its round count travels "
+        "in the lb_admm event and is 0 for the untuned-signs ablation",
+    ),
+    (
+        "ste",
+        "19",
+        "TuneLatentSTE: factorized-component refinement",
+        "per-layer scheduling and the T_post split follow Figure 3's right "
+        "panel; the bounded discrete flip pass is a named deviation when its "
+        "budget is nonzero",
+    ),
+    ("sign_extract_pack", "20-23", "sign extraction and packing", None),
+    (
+        "tune_scales_kd",
+        "26-27",
+        "TuneScalesKD: global scale-only KD against the FP teacher",
+        "packed binaries are frozen during scale tuning (verified against "
+        "TuneScalesKD semantics); skipped entirely when the run is a "
+        "measurement (factor_mode='fp' exports no artifact)",
+    ),
+)
+
+
+def stage_map(stages: list) -> dict:
+    """Map every executable stage to its Algorithm 1 lines, naming deviations.
+
+    ``stages`` is the recorder's event list (``(event, info)`` pairs). The
+    result answers the faithful-run question directly: which stages of
+    Algorithm 1 lines 0-28 actually executed, and which parts of the letter
+    the pipeline deviates from.
+    """
+    executed = [event for event, _ in stages]
+    counts: dict[str, int] = {}
+    for event in executed:
+        counts[event] = counts.get(event, 0) + 1
+    out: dict[str, dict] = {}
+    for key, lines, description, deviation in _STAGE_LINES:
+        fired = counts.get(key, 0)
+        if key == "phase1_statistics":
+            # Statistics are collected once per block, at capture time, from
+            # the compressed-prefix stream: the capture count IS the count.
+            fired = counts.get("capture", 0)
+        out[key] = {
+            "algorithm1_lines": lines,
+            "description": description,
+            "invocations": fired,
+            "executed": bool(fired),
+            "deviation": deviation,
+        }
+    out["tune_fp"]["vacuous_events"] = counts.get("tune_fp_vacuous_teacher", 0)
+    out["ste"]["discrete_flip_pass"] = any(
+        isinstance(info, dict)
+        and any(
+            isinstance(rec, dict) and "flip_pass" in rec
+            for rec in (info.get("per_linear") or {}).values()
+        )
+        for event, info in stages
+        if event == "ste"
+    )
+    return out
 
 
 def provenance(solver: str, scale_dtype: str) -> dict:

@@ -37,6 +37,8 @@ from quantibbler.qk_report import (
     probe_aborts,
     probe_ratio,
     provenance,
+    stage_failure_report,
+    stage_map,
     verdict,
 )
 
@@ -475,11 +477,13 @@ def _driver_wiring_findings(src: str) -> list[str]:
                 f"the single return at line {ret.lineno} precedes {label} (line {max(lines)})"
             )
 
-    # The probe abort path (change qk-fail-fast-loop). An aborted run must
-    # still write a failed report and exit nonzero, through the SAME single
-    # verdict return: never returned from (a collapse would exit 0), never
-    # re-raised (the report would never be written), and never widened past
-    # PrefixProbeAbort (a crash would be labeled a measured collapse).
+    # The probe abort path (change qk-fail-fast-loop) and the fail-closed
+    # stage gate (qk-fix-tunefp-teacher) share one discipline. An aborted or
+    # stage-failed run must still write a failed report and exit nonzero,
+    # through the SAME single verdict return: never returned from (a collapse
+    # would exit 0), never re-raised (the report would never be written), and
+    # never widened past its own exception type (a crash would be labeled a
+    # measured collapse).
     for node in ast.walk(main):
         if isinstance(node, ast.Try):
             for wide in node.handlers:
@@ -489,34 +493,52 @@ def _driver_wiring_findings(src: str) -> list[str]:
                         f"line {wide.lineno}: `{caught}` in main() swallows failures "
                         f"into the verdict path instead of letting them surface"
                     )
-    probe_handlers = [
-        h
-        for node in ast.walk(main)
-        if isinstance(node, ast.Try)
-        for h in node.handlers
-        if h.type is not None and "PrefixProbeAbort" in ast.unparse(h.type)
-    ]
-    if len(probe_handlers) != 1:
-        findings.append(
-            f"expected exactly one `except PrefixProbeAbort` handler in main(), "
-            f"found {len(probe_handlers)}"
-        )
-    else:
-        handler = probe_handlers[0]
-        if ast.unparse(handler.type) != "PrefixProbeAbort":
+    handler_specs = (
+        (
+            "PrefixProbeAbort",
+            "aborted",
+            "abort_report",
+            "the abort handler",
+            "the abort handler does not record the abort (`aborted = ...`), so the "
+            "exit-code fallback cannot see it",
+        ),
+        (
+            "VacuousTeacherError",
+            "stage_failed",
+            "stage_failure_report",
+            "the stage-gate handler",
+            "the stage-gate handler does not record the failure (`stage_failed = ...`), "
+            "so the exit-code fallback cannot see it",
+        ),
+    )
+    for exc_name, flag, builder, label, missing_msg in handler_specs:
+        handlers = [
+            h
+            for node in ast.walk(main)
+            if isinstance(node, ast.Try)
+            for h in node.handlers
+            if h.type is not None and exc_name in ast.unparse(h.type)
+        ]
+        if len(handlers) != 1:
             findings.append(
-                f"line {handler.lineno}: the abort handler catches "
-                f"`{ast.unparse(handler.type)}`, not PrefixProbeAbort alone"
+                f"expected exactly one `except {exc_name}` handler in main(), found {len(handlers)}"
+            )
+            continue
+        handler = handlers[0]
+        if ast.unparse(handler.type) != exc_name:
+            findings.append(
+                f"line {handler.lineno}: the handler catches "
+                f"`{ast.unparse(handler.type)}`, not {exc_name} alone"
             )
         for node in ast.walk(handler):
             if isinstance(node, ast.Return):
                 findings.append(
-                    f"line {node.lineno}: the abort handler returns directly — an "
-                    f"aborted run must fall through to the verdict exit, never exit 0"
+                    f"line {node.lineno}: {label} returns directly — a run that "
+                    f"tripped it must fall through to the verdict exit, never exit 0"
                 )
             if isinstance(node, ast.Raise):
                 findings.append(
-                    f"line {node.lineno}: the abort handler raises — the abort must "
+                    f"line {node.lineno}: {label} raises — the failure must "
                     f"become a failed report, not an uncaught exception"
                 )
         recorded = [
@@ -525,22 +547,19 @@ def _driver_wiring_findings(src: str) -> list[str]:
             if isinstance(stmt, ast.Assign)
             for target in stmt.targets
         ]
-        if "aborted" not in recorded:
-            findings.append(
-                "the abort handler does not record the abort (`aborted = ...`), so the "
-                "exit-code fallback cannot see it"
-            )
+        if flag not in recorded:
+            findings.append(missing_msg)
         built = [
             stmt
             for stmt in handler.body
             if isinstance(stmt, ast.Assign)
             and any(getattr(t, "id", None) == "report" for t in stmt.targets)
             and isinstance(stmt.value, ast.Call)
-            and getattr(stmt.value.func, "id", None) == "abort_report"
+            and getattr(stmt.value.func, "id", None) == builder
         ]
         if len(built) != 1:
             findings.append(
-                f"the abort handler binds `report` to abort_report(...) {len(built)} "
+                f"{label} binds `report` to {builder}(...) {len(built)} "
                 f"times, expected exactly once — the catch→report→status construction "
                 f"belongs in the lean-tested builder, not inline in a torch-importing "
                 f"main()"
@@ -560,11 +579,12 @@ def _driver_wiring_findings(src: str) -> list[str]:
     # runtime abort leg (status failed, exit 1, the full key set on a real run),
     # not here. Layers, not an ever-growing case list.
     bindings = [node for node in ast.walk(main) if _binds_report_name(node)]
-    if len(bindings) != 2:
+    if len(bindings) != 3:
         lines = sorted({node.lineno for node in bindings})
         findings.append(
             f"main() establishes the `report` name {len(bindings)} times (lines {lines}), "
-            f"expected exactly 2 (the completion literal and the abort_report(...) call)"
+            f"expected exactly 3 (the completion literal, abort_report(...) for the probe "
+            f"abort, and stage_failure_report(...) for the fail-closed stage gate)"
         )
     for node in ast.walk(main):
         written: list[ast.AST] = []
@@ -604,11 +624,18 @@ def _driver_wiring_findings(src: str) -> list[str]:
             for stmt in node.body
         )
     ]
-    if fail_over and "aborted" not in ast.unparse(fail_over[0].test):
-        findings.append(
-            "the FAILED exit-code fallback does not consider the probe abort — an "
-            "aborted run would exit 0"
-        )
+    if fail_over:
+        fallback_test = ast.unparse(fail_over[0].test)
+        if "aborted" not in fallback_test:
+            findings.append(
+                "the FAILED exit-code fallback does not consider the probe abort — an "
+                "aborted run would exit 0"
+            )
+        if "stage_failed" not in fallback_test:
+            findings.append(
+                "the FAILED exit-code fallback does not consider the fail-closed stage "
+                "gate — a stage-failed run would exit 0"
+            )
     return findings
 
 
@@ -865,6 +892,8 @@ _ABORT_ANCHOR = "    except PrefixProbeAbort as exc:\n"
 #: The end of the abort branch's builder call: unique because the completion
 #: report spells its history line differently.
 _ABORT_BUILT_ANCHOR = "            probe_history,\n        )\n"
+#: The fail-closed stage-gate handler's first line: unique in the driver.
+_VACUOUS_ANCHOR = "    except VacuousTeacherError as exc:\n"
 
 
 def _poison(kind: str) -> str:
@@ -935,7 +964,21 @@ def _poison(kind: str) -> str:
         )
     if kind == "abort_ignored_by_exit_code":
         return src.replace(
-            "    if not faithful or aborted is not None:\n", "    if not faithful:\n", 1
+            "    if not faithful or aborted is not None or stage_failed is not None:\n",
+            "    if not faithful:\n",
+            1,
+        )
+    if kind == "stage_gate_ignored_by_exit_code":
+        return src.replace(
+            "    if not faithful or aborted is not None or stage_failed is not None:\n",
+            "    if not faithful or aborted is not None:\n",
+            1,
+        )
+    if kind == "stage_gate_returned_from":
+        return src.replace(
+            _VACUOUS_ANCHOR,
+            _VACUOUS_ANCHOR + "        return 1\n",
+            1,
         )
     raise AssertionError(f"unknown poison {kind}")
 
@@ -960,6 +1003,8 @@ def _poison(kind: str) -> str:
         ("abort_walrus_rebind", "establishes the `report` name"),
         ("abort_annassign_rebind", "establishes the `report` name"),
         ("abort_ignored_by_exit_code", "does not consider the probe abort"),
+        ("stage_gate_ignored_by_exit_code", "does not consider the fail-closed stage gate"),
+        ("stage_gate_returned_from", "exactly one return"),
     ],
 )
 def test_report_driver_tripwire_rejects_poisoned_drivers(kind, expected):
@@ -1204,28 +1249,54 @@ _ABORT_IDENTITY_VALUES: dict[str, object] = {
     "factor_mode": "binary",
     "ablation": "none",
     "layer_scope": "all",
+    # Paper-faithful claim + the bounded discrete flip pass
+    # (qk-fix-tunefp-teacher / qk-fix-ste-sign-adaptation): both are solver
+    # state and both must travel on every report path.
+    "paper_faithful": False,
+    "ste_flip_pass_budget": 0,
     "ppl_baseline_bf16": 75.90947478697456,
     "regime": {"artifact": "qpk1: +-1 bitplanes + float32 scales"},
     "probe": {"interval": 1, "batches": 1, "fp_prefix_ppl": 83.08454639156159},
+    # The stage record + Algorithm 1 map (qk-fix-tunefp-teacher): every report
+    # path carries them, so an aborted or stage-failed run is as auditable as
+    # a completed one.
+    "stages": [],
+    "stage_map": {},
     "wall_seconds": 69.6,
 }
 
 
 def _abort_payload_keys(src: str | None = None) -> set[str]:
-    """The keys the driver's abort payload literal declares, from source.
+    """The keys the driver's abort payload carries, from source.
 
-    `main()` hands `abort_report(...)` a dict literal; those keys are the
+    `main()` hands `abort_report(...)` a dict that SPREADS the shared
+    `_identity()` helper and adds the probe block; those keys together are the
     identity fields a real abort carries. Deriving them here is what makes the
     fixture structural: the completion and abort report shapes are compared as
     key sets, so the set standing in for the abort path must be read from the
     driver's payload rather than remembered beside it. `src` is overridable so a
     test can mutate the source and watch the derivation move (non-vacuity).
+
+    Re-homed when the property moved layer: the abort identity fields used to
+    be one flat literal at the call site, and the fail-closed stage-gate report
+    (qk-fix-tunefp-teacher) needs the identical set. They now live in the
+    shared `_identity()` helper, so the derivation follows the helper AND
+    asserts the call site really spreads it instead of re-inlining a second
+    copy that could drift.
     """
     text = _DRIVER_SRC if src is None else src
+    tree = ast.parse(text)
+    identity_keys: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_run_identity":
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Return) and isinstance(inner.value, ast.Dict):
+                    identity_keys = {
+                        key.value for key in inner.value.keys if isinstance(key, ast.Constant)
+                    }
+    assert identity_keys, "the shared _run_identity() payload literal is missing from the driver"
     main = [
-        node
-        for node in ast.parse(text).body
-        if isinstance(node, ast.FunctionDef) and node.name == "main"
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main"
     ][0]
     for node in ast.walk(main):
         if (
@@ -1234,7 +1305,11 @@ def _abort_payload_keys(src: str | None = None) -> set[str]:
             and len(node.args) >= 2
             and isinstance(node.args[1], ast.Dict)
         ):
-            return {key.value for key in node.args[1].keys if isinstance(key, ast.Constant)}
+            explicit = {key.value for key in node.args[1].keys if isinstance(key, ast.Constant)}
+            assert any(key is None for key in node.args[1].keys), (
+                "the abort payload no longer SPREADS the shared identity helper"
+            )
+            return identity_keys | explicit
     raise AssertionError("the abort payload dict literal is missing from main()")
 
 
@@ -1375,3 +1450,114 @@ def test_abort_report_dumps_strict_and_writes_non_finite_as_null():
     assert parsed["probe_abort"]["block"] == "layers.1"
     assert parsed["probe_abort"]["line"] == COLLAPSE_LINE
     assert parsed["probe"]["history"][0]["ratio"] == 34983.69806211141
+
+
+# --------------------------------------------------------------------------
+# qk-fix-tunefp-teacher: the Algorithm 1 stage map and the fail-closed report
+# --------------------------------------------------------------------------
+
+
+def _stage_fixture() -> list:
+    return [
+        ("capture", {"teacher_source": "frozen_reference_copy"}),
+        ("tune_fp", {"gradient_norm": 1.5, "initial_residual_norm": 0.4, "steps": 8}),
+        ("lb_admm", {"polish_rounds": 4}),
+        (
+            "ste",
+            {
+                "per_linear": {
+                    "attn.q": {"declared": "paper_ste", "zero_crossings": False},
+                    "attn.o": {"declared": "discrete_flip_pass", "flip_pass": {"accepted_u": 1}},
+                }
+            },
+        ),
+        ("sign_extract_pack", {"extracted": 7}),
+        ("tune_scales_kd", {"artifact": True}),
+    ]
+
+
+def test_stage_map_resolves_every_algorithm1_stage_and_names_deviations():
+    """The faithful-run question, answered from the record alone."""
+    mapped = stage_map(_stage_fixture())
+    for key in (
+        "phase1_statistics",
+        "capture",
+        "tune_fp",
+        "lb_admm",
+        "ste",
+        "sign_extract_pack",
+        "tune_scales_kd",
+    ):
+        assert key in mapped, key
+        assert mapped[key]["algorithm1_lines"], key
+        assert mapped[key]["description"], key
+    # Statistics are collected once per block, at capture time.
+    assert mapped["phase1_statistics"]["invocations"] == 1
+    assert mapped["tune_fp"]["invocations"] == 1
+    assert mapped["tune_fp"]["algorithm1_lines"].startswith("12")
+    assert mapped["ste"]["algorithm1_lines"] == "19"
+    assert mapped["tune_scales_kd"]["algorithm1_lines"] == "26-27"
+    assert mapped["ste"]["discrete_flip_pass"] is True
+    assert mapped["tune_fp"]["vacuous_events"] == 0
+    # Deviations are NAMED, not silent: the extra polish stage and the
+    # informed-assumption objective both carry text.
+    assert "polish" in mapped["lb_admm"]["deviation"]
+    assert "informed assumption" in mapped["tune_fp"]["deviation"]
+    assert "compressed-prefix" in mapped["phase1_statistics"]["deviation"]
+
+
+def test_stage_map_names_missing_stages_as_not_executed_never_omits_them():
+    """A stage that did not run is recorded as such, so a gap cannot hide."""
+    empty = stage_map([])
+    assert set(empty) == set(stage_map(_stage_fixture()))
+    assert empty["capture"]["executed"] is False
+    assert empty["tune_fp"]["executed"] is False
+    assert empty["tune_fp"]["invocations"] == 0
+    assert empty["ste"]["discrete_flip_pass"] is False
+
+
+def test_stage_failure_report_is_failed_and_carries_both_guard_norms():
+    """A fidelity-claiming run that trips the gate leaves forensics, not a crash."""
+    exc = SimpleNamespace(
+        stage="tune_fp",
+        block="layers.3",
+        reason="zero_first_step_gradient",
+        gradient_norm=0.0,
+        initial_residual_norm=0.25,
+    )
+    report = stage_failure_report(
+        exc,
+        {"model": "fixture", "paper_faithful": True, "stages": []},
+        [{"event": "capture"}],
+    )
+    assert report["status"] == FAILED
+    assert report["artifact_exported"] is False
+    # The fidelity claim is recorded FALSE, never left standing.
+    assert report["paper_faithful"] is False
+    assert report["stage_failure"] == {
+        "stage": "tune_fp",
+        "block": "layers.3",
+        "reason": "zero_first_step_gradient",
+        "gradient_norm": 0.0,
+        "initial_residual_norm": 0.25,
+    }
+    assert report["stages"] == [{"event": "capture"}]
+    for key in ("ppl_quant_native", "ppl_ratio", "effective_bpw", "qpk1_layer_bytes"):
+        assert report[key] is None, key
+    payload, faithful = dump_report(report)
+    assert faithful is True
+    assert json.loads(payload)["paper_faithful"] is False
+
+
+def test_stage_failure_report_carries_the_completion_key_set_plus_its_own():
+    """Strict consumers see every completion key on the stage-failure shape too."""
+    exc = SimpleNamespace(
+        stage="tune_fp",
+        block="layers.0",
+        reason="no_in_block_layer_factorized",
+        gradient_norm=0.0,
+        initial_residual_norm=0.0,
+    )
+    report = stage_failure_report(exc, dict(_ABORT_IDENTITY, probe_abort=None), [])
+    assert set(_completion_report_keys()) <= set(report)
+    assert set(report) - set(_completion_report_keys()) == {"stage_failure"}

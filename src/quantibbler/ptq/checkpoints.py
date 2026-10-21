@@ -97,8 +97,39 @@ def check_fingerprint(ckpt_dir: Path, cfg) -> None:
 
 def completed_blocks(ckpt_dir: Path) -> list[int]:
     """Sorted indices of fully-written block checkpoints (atomic-rename
-    discipline means a partial write never becomes visible)."""
-    return sorted(int(p.stem.split("-")[1]) for p in ckpt_dir.glob("block-*.npz"))
+    discipline means a partial write never becomes visible).
+
+    A block archive counts as done only when it actually carries readable
+    quantized-layer keys (qk-fix-fp-resume-guard, scenario
+    ``empty_archive_is_never_counted_done``). A zero-key archive is what an
+    fp-mode run used to write — 22 bytes of zip end-of-central-directory —
+    and counting it as done made the next resume SKIP that block's solve
+    with nothing restored, so the quantized prefix advanced on pristine
+    weights. Membership is decided here from the archive's own keys only
+    because this is a SCAN (which indices have an archive); the
+    expected-vs-present guard lives in :func:`apply_layer_states`, which
+    knows what the live block is owed.
+    """
+    done: list[int] = []
+    for path in ckpt_dir.glob("block-*.npz"):
+        try:
+            with np.load(path) as npz:
+                names = {key.rsplit("|", 1)[0] for key in npz.files}
+        except Exception as exc:  # unreadable archive: never a silent "done"
+            print(
+                f"[checkpoint] ignoring unreadable archive {path.name}: {exc!r}",
+                flush=True,
+            )
+            continue
+        if not names:
+            print(
+                f"[checkpoint] ignoring empty archive {path.name} "
+                "(no quantized-layer keys): not counted as done",
+                flush=True,
+            )
+            continue
+        done.append(int(path.stem.split("-")[1]))
+    return sorted(done)
 
 
 def save_block_checkpoint(ckpt_dir: Path, index: int, layers: list) -> None:
@@ -107,7 +138,21 @@ def save_block_checkpoint(ckpt_dir: Path, index: int, layers: list) -> None:
     int8 bits and float64 scales are stored exactly as the solver left
     them (npz has no casting step); a tmp+rename keeps partial writes
     invisible to completed_blocks().
+
+    Refuses to write an EMPTY archive (qk-fix-fp-resume-guard, scenario
+    ``empty_archive_is_never_written``): ``np.savez`` with no arrays emits
+    a 22-byte zip end-of-central-directory, which then read as "block done"
+    and let a resume skip the solve with nothing restored. An empty layer
+    list means the caller believed it solved a block and did not — that is
+    a defect at the call site, never a checkpoint.
     """
+    if not layers:
+        raise RuntimeError(
+            f"refusing to write an empty block checkpoint for block {index} "
+            f"({ckpt_dir}): a block that is owed quantized layers produced none, "
+            "so an archive here would make the next resume skip its solve with "
+            "nothing restored. Fix the solve, not the checkpoint."
+        )
     arrays: dict[str, np.ndarray] = {}
     for st in layers:
         p = f"{st.name}"
@@ -142,7 +187,25 @@ def load_block_checkpoint(ckpt_dir: Path, index: int, layer_cls) -> list:
     return layers
 
 
-def apply_layer_states(block: nn.Module, block_name: str, layers: list) -> None:
+def _archive_key(name: str, block_name: str) -> str:
+    """Normalize a layer name into the checkpoint archive's key space.
+
+    Nested linears are keyed by their path relative to the block
+    (``self_attn.q_proj``); a flat block (the block IS the Linear) is keyed
+    by the block name itself. Both the archive's stored names and the live
+    block's expected names go through this one function so the two sides of
+    the guard can never disagree about spelling.
+    """
+    if not name or name == block_name:
+        return block_name
+    if name.startswith(block_name + "."):
+        return name[len(block_name) + 1 :]
+    return name
+
+
+def apply_layer_states(
+    block: nn.Module, block_name: str, layers: list, expected_names=None
+) -> None:
     """Write checkpointed bits+scales back into a block's linears.
 
     This reproduces reconstruct_block's final write-back (_set_linear)
@@ -151,11 +214,33 @@ def apply_layer_states(block: nn.Module, block_name: str, layers: list) -> None:
     resumed run's quantized prefix forward is bit-identical to a fresh
     run's. Layer names are host-global (``layers.N.inner...``); the
     block-name prefix is stripped to address submodules.
+
+    ``expected_names`` is the set of quantizable names the LIVE block is
+    owed (the same predicate the solver scopes with — ``_quantizable_names``
+    filtered by ``layer_scope``), in the block's relative name space. When
+    supplied, the archive's present set is asserted EQUAL to it before any
+    write-back, and a symmetric difference raises naming the block and the
+    missing/unexpected names (qk-fix-fp-resume-guard, scenario
+    ``restore_asserts_expected_equals_present``). The guard is driven by
+    what the block is OWED, never by what the archive happened to contain:
+    a hand-copied or truncated archive therefore fails loudly instead of
+    advancing the prefix on partially-restored weights.
     """
     by_rel = {}
     for st in layers:
-        rel = st.name[len(block_name) + 1 :] if st.name.startswith(block_name + ".") else st.name
-        by_rel[rel] = st
+        by_rel[_archive_key(st.name, block_name)] = st
+    if expected_names is not None:
+        expected = {_archive_key(name, block_name) for name in expected_names}
+        present = set(by_rel)
+        if expected != present:
+            missing = sorted(expected - present)
+            unexpected = sorted(present - expected)
+            raise RuntimeError(
+                f"checkpoint restore for block {block_name!r} is incomplete: the "
+                f"live block is owed {len(expected)} quantized layer(s), the archive "
+                f"holds {len(present)}; missing={missing}, unexpected={unexpected} "
+                "— refusing to advance the quantized prefix on a partial archive"
+            )
     applied = set()
     for rel, module in block.named_modules():
         # Flat blocks (the block IS the Linear, e.g. _TinyApiModel.lin1)

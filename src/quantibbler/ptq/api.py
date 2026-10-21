@@ -30,6 +30,7 @@ def quantize_model(
     config: PTQConfig,
     *,
     checkpoint_dir=None,
+    recorder=None,
 ) -> QuantizedModel:
     """Run the NanoQuant PTQ pipeline (Phases 1-3) and return the artifact.
 
@@ -38,12 +39,19 @@ def quantize_model(
     the call; the returned :class:`QuantizedModel` is the serializable view.
     Phase 3's teacher is the caller's model in its pre-reconstruction state:
     a structural deep copy is taken up front so seeded models reproduce the
-    fp teacher exactly.
+    fp teacher exactly. That same frozen copy is the pristine-pinned TuneFP
+    teacher source for Phase 2 (qk-fix-tunefp-teacher A1) — the pipeline
+    never reads teacher weights off live, already-written-back module state.
 
     ``checkpoint_dir`` (optional): enables per-block solve checkpointing
     and crash resume — see :mod:`quantibbler.ptq.checkpoints`. Resumed
     runs are byte-identical to fresh runs (deterministic solve;
     fingerprint-guarded against stale configs/code).
+
+    ``recorder`` (optional): ``recorder(event, **info)``, forwarded to the
+    block loop so the run artifact can carry the stage records (teacher
+    provenance, TuneFP effect, per-linear STE flip counts, scale movement,
+    the TuneFP vacuity guard event).
     """
     from .scale_calib import calibrate_scales
 
@@ -61,14 +69,22 @@ def quantize_model(
     # public for the QAT lane's global-pass use.
 
     # fp teacher, structurally frozen before any block is reconstructed
-    # (Phase 3's cached logits must come from the pre-quantization model).
+    # (Phase 3's cached logits must come from the pre-quantization model,
+    # and Phase 2's TuneFP teacher is read from this same frozen copy).
     teacher = copy.deepcopy(model)
     for param in teacher.parameters():
         param.requires_grad_(False)
 
     # Phase 2: block-wise reconstruction (Algorithm 1 lines 8-24). Each
     # BlockReconResult carries the per-layer artifacts in declaration order.
-    results = reconstruct_model(model, batches, config, checkpoint_dir=checkpoint_dir)
+    results = reconstruct_model(
+        model,
+        batches,
+        config,
+        checkpoint_dir=checkpoint_dir,
+        recorder=recorder,
+        teacher_model=teacher,
+    )
     layers: dict[str, QuantizedLayerState] = {}
     for result in results:
         for st in result.layers:

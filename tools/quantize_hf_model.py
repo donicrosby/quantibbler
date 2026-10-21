@@ -93,6 +93,7 @@ from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from quantibbler.ptq.api import QuantizedModel, quantize_model
+from quantibbler.ptq.block_recon import VacuousTeacherError
 from quantibbler.ptq.config import PrefixProbeAbort, PTQConfig, StageHyper
 from quantibbler.qk_report import (
     COLLAPSE_LINE,
@@ -104,6 +105,8 @@ from quantibbler.qk_report import (
     probe_aborts,
     probe_ratio,
     provenance,
+    stage_failure_report,
+    stage_map,
     verdict,
 )
 from quantibbler.qk_report import (
@@ -310,12 +313,27 @@ def quantized_config(
     progress probe when the caller wired one in (None = no probe, the
     pipeline path is unchanged).
 
+    ``--paper-faithful`` switches the stage budgets to [NQ] App. C verbatim
+    (T_pre/T_post/T_glob = 8 epochs at 1e-4/1e-5/1e-6) and sets
+    ``paper_faithful`` on the config, which makes the TuneFP vacuity guard
+    FAIL the run instead of continuing with pristine weights. That flag is
+    the whole difference between "we ran something" and "we ran the paper's
+    method": the gate-shaped override turns TuneFP into a single step.
+
     scale_dtype follows --scale-dtype (default float32): v5/v6 proved the
     hard-coded float16 overflows late-block s2 (>65,504 -> inf, 54/196
     layers). float16 remains available for BPW-tight artifacts whose
     post-polish scales are verified bounded; the storage cast now raises
     instead of silently emitting inf.
     """
+    if getattr(args, "paper_faithful", False):
+        stage_pre = StageHyper(1e-4, 4, 8)
+        stage_latent = StageHyper(1e-5, 1, 8)
+        stage_global = StageHyper(1e-6, 1, 8)
+    else:
+        stage_pre = StageHyper(1e-4, 4, 0)
+        stage_latent = StageHyper(2e-3, 4, 3)
+        stage_global = StageHyper(1e-3, 4, 4)
     return PTQConfig(
         seed=args.seed,
         rank=args.rank,
@@ -323,9 +341,9 @@ def quantized_config(
         scale_dtype=args.scale_dtype,
         admm_max_iter=args.max_admm_iter,
         solver=args.solver,
-        stage_pre=StageHyper(1e-4, 4, 0),
-        stage_latent=StageHyper(2e-3, 4, 3),
-        stage_global=StageHyper(1e-3, 4, 4),
+        stage_pre=stage_pre,
+        stage_latent=stage_latent,
+        stage_global=stage_global,
         verbose=True,
         progress_probe=progress_probe,
         # Root-cause ablation knobs (qk-root-cause-ablation): solver state, so
@@ -334,7 +352,80 @@ def quantized_config(
         factor_mode=args.factor_mode,
         ablation=args.ablation,
         layer_scope=args.layer_scope,
+        # Paper-faithful claim + the bounded discrete flip pass
+        # (qk-fix-tunefp-teacher / qk-fix-ste-sign-adaptation): both are
+        # solver state and both are recorded in the run report.
+        paper_faithful=bool(getattr(args, "paper_faithful", False)),
+        ste_flip_pass_budget=int(getattr(args, "ste_flip_pass_budget", 0)),
     )
+
+
+def _reportable_stage_payload(value: Any) -> Any:
+    """Strip non-report material (tensors, modules) from a stage record.
+
+    Tensors are not report material — the numbers they carried are, and those
+    are recorded separately — so they collapse to a type marker. Everything
+    else passes through for ``dump_report``'s own sanitizer.
+    """
+    if isinstance(value, dict):
+        return {k: _reportable_stage_payload(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_reportable_stage_payload(v) for v in value]
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    return f"<{type(value).__name__}>"
+
+
+def _stage_recorder(sink: list) -> Any:
+    """The pipeline's stage recorder, appending JSON-safe records to ``sink``."""
+
+    def _record(event: str, **info: Any) -> None:
+        sink.append((event, _reportable_stage_payload(info)))
+
+    return _record
+
+
+def _run_identity(
+    args: argparse.Namespace,
+    prov: dict,
+    *,
+    tune_seq_len: int,
+    calibration_rows: int,
+    eval_rows: int,
+    ppl_baseline_bf16: Any,
+) -> dict:
+    """Report identity fields shared by every exit path.
+
+    Built once so a failed run is as self-describing as a finished one — the
+    probe-abort, stage-failure, and completion reports all carry the same
+    identity. Lives at module level (not nested in ``main``) because the
+    wiring pin reads this literal from source, and because a nested helper's
+    own ``return`` would red the one-return pin on ``main``.
+    """
+    return {
+        "model": args.model,
+        "rank": args.rank,
+        "solver": prov["solver"],
+        "scale_dtype": prov["scale_dtype"],
+        "factor_mode": args.factor_mode,
+        "ablation": args.ablation,
+        "layer_scope": args.layer_scope,
+        "seq_len": args.seq_len,
+        "tune_seq_len": tune_seq_len,
+        "calibration_rows": calibration_rows,
+        "eval_rows": eval_rows,
+        "max_admm_iter": args.max_admm_iter,
+        "seed": args.seed,
+        "ppl_baseline_bf16": ppl_baseline_bf16,
+        "paper_faithful": bool(args.paper_faithful),
+        "ste_flip_pass_budget": int(args.ste_flip_pass_budget),
+        "regime": {
+            "baseline_eval": "bfloat16 (checkpoint native; papers' pedestal)",
+            "solver": "float64, per-layer just-in-time (sign margins + parity reference)",
+            "kd_and_ste": "model dtype (the papers' distillation regime)",
+            "artifact": prov["regime_artifact"],
+        },
+    }
 
 
 def export_model_directory(
@@ -653,6 +744,24 @@ def main() -> int:
         action="store_true",
         help="disable solve checkpointing entirely",
     )
+    parser.add_argument(
+        "--paper-faithful",
+        action="store_true",
+        help="claim paper fidelity: [NQ] App. C stage budgets verbatim "
+        "(T_pre/T_post/T_glob = 8 epochs at 1e-4/1e-5/1e-6), and any TuneFP "
+        "vacuity event FAILS the run instead of continuing with pristine "
+        "weights (qk-fix-tunefp-teacher A3). The report's stage_map names "
+        "every deviation that remains",
+    )
+    parser.add_argument(
+        "--ste-flip-pass-budget",
+        type=int,
+        default=0,
+        help="bounded discrete sign-flip proposals per factor per linear "
+        "(qk-fix-ste-sign-adaptation fallback 3). 0 disables the pass; any "
+        "nonzero value is an EXPLICIT DEVIATION from the paper and is "
+        "recorded as such in the run report",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path, default=Path("artifacts") / "model-qpk1")
     args = parser.parse_args()
@@ -771,17 +880,39 @@ def main() -> int:
     _bread("entering quantize_model: block recon first, then KD scale calibration")
     solver_t = time.time()
     aborted: PrefixProbeAbort | None = None
+    stage_failed: VacuousTeacherError | None = None
     ppl_ratio: float | None = None
     # provenance is computed before the pipeline so the abort report can
     # carry the same identity fields as the completion report: an aborted
     # run must be as self-describing as a finished one.
     prov = provenance(args.solver, args.scale_dtype)
+
+    # --- stage record (qk-fix-tunefp-teacher / qk-fix-ste-sign-adaptation) --
+    # The pipeline reports every stage through this recorder; the JSON-safe
+    # part of each record lands in the run report as `stages`, and
+    # `stage_map` resolves it against [NQ] Algorithm 1 lines 0-28. Tensors are
+    # dropped (they are not report material; the numbers they carried are).
+    stage_events: list[tuple[str, dict]] = []
+    _record = _stage_recorder(stage_events)
+    # Identity fields shared by every report path, built once (see
+    # `_run_identity`: the probe-abort and stage-failure reports must be as
+    # self-describing as a completion report).
+    identity = _run_identity(
+        args,
+        prov,
+        tune_seq_len=tune_seq_len,
+        calibration_rows=calibration_sequences,
+        eval_rows=len(held_out) * BATCH,
+        ppl_baseline_bf16=ppl_base,
+    )
+
     try:
         qm = quantize_model(
             model,
             calib,
             quantized_config(args, progress_probe=_probe),
             checkpoint_dir=None if args.no_checkpoints else args.checkpoint_dir,
+            recorder=_record,
         )
         _bread(f"quantize_model returned: {len(qm.layers)} layers")
         print(f"      solver wall: {time.time() - solver_t:.0f}s", flush=True)
@@ -854,6 +985,15 @@ def main() -> int:
             )
         ppl_ratio = ppl_quant / ppl_base
         status = verdict(ppl_ratio)
+        # Phase 3 (Algorithm 1 lines 26-27) runs inside quantize_model; the
+        # driver records its execution here so the stage map covers every
+        # stage of lines 0-28 without threading a recorder into scale_calib.
+        stage_events.append(
+            (
+                "tune_scales_kd",
+                {"factor_mode": args.factor_mode, "artifact": measured_artifact},
+            )
+        )
         report = {
             "model": args.model,
             "rank": args.rank,
@@ -893,6 +1033,13 @@ def main() -> int:
             },
             "probe_abort": None,  # no abort: the key exists on both paths
             "artifact_exported": artifact_exported,
+            # Stage record + Algorithm 1 map (qk-fix-tunefp-teacher): every
+            # executed stage resolved against lines 0-28 with its deviations
+            # named, so "paper-faithful" is auditable from the report alone.
+            "paper_faithful": bool(args.paper_faithful),
+            "ste_flip_pass_budget": int(args.ste_flip_pass_budget),
+            "stages": [{"event": event, **info} for event, info in stage_events],
+            "stage_map": stage_map(stage_events),
             "status": status,
             "wall_seconds": round(time.time() - t0, 1),
         }
@@ -914,43 +1061,56 @@ def main() -> int:
         report = abort_report(
             exc,
             {
-                "model": args.model,
-                "rank": args.rank,
-                "solver": prov["solver"],
-                "scale_dtype": prov["scale_dtype"],
-                "factor_mode": args.factor_mode,
-                "ablation": args.ablation,
-                "layer_scope": args.layer_scope,
-                "seq_len": args.seq_len,
-                "tune_seq_len": tune_seq_len,
-                "calibration_rows": calibration_sequences,
-                "eval_rows": len(held_out) * BATCH,
-                "max_admm_iter": args.max_admm_iter,
-                "seed": args.seed,
-                "ppl_baseline_bf16": ppl_base,
-                "regime": {
-                    "baseline_eval": "bfloat16 (checkpoint native; papers' pedestal)",
-                    "solver": "float64, per-layer just-in-time (sign margins + parity reference)",
-                    "kd_and_ste": "model dtype (the papers' distillation regime)",
-                    "artifact": prov["regime_artifact"],
-                },
+                **identity,
                 "probe": {
                     "interval": args.probe_interval,
                     "batches": args.probe_batches,
                     "fp_prefix_ppl": fp_probe_ppl,
                 },
+                "stages": [{"event": event, **info} for event, info in stage_events],
+                "stage_map": stage_map(stage_events),
                 "wall_seconds": round(time.time() - t0, 1),
             },
             probe_history,
         )
+    except VacuousTeacherError as exc:
+        # Fail-closed stage gate (qk-fix-tunefp-teacher A3): a run that
+        # CLAIMS paper fidelity must not continue on a TuneFP pass that
+        # executed nothing. The report is written through the same
+        # dump_report path as every other shape, with `paper_faithful: false`
+        # and the two norms on record — a failed run leaves forensics, never
+        # a traceback and no evidence.
+        stage_failed = exc
+        print(
+            f"\n      TUNEFP VACUOUS TEACHER at block {exc.block!r} "
+            f"({exc.reason}): grad_norm={exc.gradient_norm!r} "
+            f"initial_residual={exc.initial_residual_norm!r} — a run claiming "
+            "paper fidelity fails here",
+            flush=True,
+        )
+        failure_identity = dict(identity)
+        failure_identity["probe"] = {
+            "interval": args.probe_interval,
+            "batches": args.probe_batches,
+            "fp_prefix_ppl": fp_probe_ppl,
+            "history": probe_history,
+        }
+        failure_identity["probe_abort"] = None
+        failure_identity["wall_seconds"] = round(time.time() - t0, 1)
+        report = stage_failure_report(
+            exc,
+            failure_identity,
+            [{"event": event, **info} for event, info in stage_events],
+        )
     payload, faithful = dump_report(report)
-    if not faithful or aborted is not None:
-        # Two routes to a failed process, and both must fail: the report could
-        # not be serialized as measured (an unrecognized value type reached the
-        # encoder), or the progress probe aborted the run before the end-of-run
-        # gate produced a verdict. A report and an exit code that disagree is
-        # exactly the drift this gate exists to stop; the abort report was
-        # written with status FAILED, so the two agree by construction.
+    if not faithful or aborted is not None or stage_failed is not None:
+        # Three routes to a failed process, and all must fail: the report
+        # could not be serialized as measured (an unrecognized value type
+        # reached the encoder), the progress probe aborted the run, or a
+        # fail-closed stage gate tripped — each before the end-of-run gate
+        # produced a verdict. A report and an exit code that disagree is
+        # exactly the drift this gate exists to stop; both failure reports
+        # are written with status FAILED, so the two agree by construction.
         status = FAILED
     (out_dir / "quantize_report.json").write_text(payload)
     print(payload)
@@ -962,12 +1122,20 @@ def main() -> int:
     if aborted is None:
         print("\nserver acquisition check (linear-stack engine: load only, no generation):")
         print(f"  cargo run --release -p quantibbler-server -- serve --model-dir {out_dir}")
-    else:
+    elif aborted is not None:
         print("\nno artifact exported: the probe aborted the run, so there is")
         print("nothing to serve — the report above is the whole forensic trace.")
+    else:
+        print(
+            "\nno artifact exported: a fail-closed stage gate tripped "
+            f"({stage_failed.stage} at block {stage_failed.block!r}), so the run "
+            "stopped before the end-of-run gate; the report above carries the "
+            "stage record and the Algorithm 1 map."
+        )
     # Fail closed: on a completed run the artifact and report above are written
     # either way, so a failed run leaves a forensically complete artifact and a
-    # nonzero exit; on an aborted run the report alone is the forensic trace.
+    # nonzero exit; on an aborted or stage-failed run the report alone is the
+    # forensic trace.
     return verdict_exit_code(status)
 
 

@@ -4,24 +4,47 @@ Algorithm 1 lines 8-24).
 Per transformer block, sequentially:
 
 1. capture quantized-prefix inputs ``X_b`` (calibration data through the
-   already-quantized prefix) and teacher targets ``Y_b`` (fp block on those
-   inputs) — Algorithm 1 lines 9-10;
-2. TuneFP: brief full-precision tuning of the block against (X_b, Y_b) for
-   T_pre steps ([NQ] Step 1, error-propagation mitigation);
-3. per-linear-layer LB-ADMM initialization in module declaration order
-   (Step 2, lines 14-17) on the preconditioned target W~ = D~_out W D~_in;
-4. TuneLatentSTE: joint straight-through refinement of (U, V, s1, s2)
-   against the block objective of Eq. 10 (Step 3, line 19);
+   already-quantized prefix) and teacher targets ``Y_b`` (the PRISTINE fp
+   block on those inputs) — Algorithm 1 lines 9-10; the teacher's weights
+   come from a frozen reference copy of the block, never the live module;
+2. factorize the block's attention projections (Q/K/V) in module
+   declaration order (Step 2, lines 14-17) on the preconditioned target
+   W~ = D~_out W D~_in, freezing each into the module as it is solved;
+3. TuneFP: brief full-precision tuning of the block's STILL-FP remainder
+   (O/G/U/D) against the cached teacher for T_pre steps ([NQ] Step 1,
+   error-propagation mitigation) — fired ONCE per block at the [NQ]
+   Figure 3 placement, after Q/K/V are factorized;
+4. factorize the remaining linears (O/G/U/D), refining each one's
+   factors (U, V, s1, s2) with TuneLatentSTE against the block objective
+   of Eq. 10 (Step 3, line 19) right after its own factorization;
 5. sign extraction ``sign(U)``/``sign(V)`` (sign(0) = +1) and packing via
    the qk-kernels dispatch (lines 20-23).
 
 Embeddings, LM heads and norms stay full precision (A-9); only ``nn.Linear``
 children of the block are factorized. In-block layer order is module
 declaration order (A-12).
+
+Stage changes folded here (2026-10-21 user directive, "follow the paper to
+the letter"):
+
+* ``qk-fix-tunefp-teacher`` — the teacher is the pristine FP block's output
+  on the compressed-prefix stream, captured once per block from a frozen
+  reference copy (A1), memory-only (A2); TuneFP fires at the Figure 3
+  placement with the still-FP remainder as its tunable set; a zero
+  first-step gradient aborts with ``tune_fp_vacuous_teacher`` carrying both
+  the gradient norm and the initial residual norm (A3).
+* ``qk-fix-ste-sign-adaptation`` — per-linear, per-factor flip
+  instrumentation, per-layer refinement on the just-factorized linear with
+  a deterministic split of the line-19 T_post budget, and flip acceptance
+  judged against the block-reconstruction objective.
+* ``qk-fix-fp-resume-guard`` — the resume guard is driven by the live
+  block's expected quantizable names, not by the archive's contents.
 """
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import os
 import time
 from pathlib import Path  # checkpoint resume: accept str or Path
@@ -34,6 +57,88 @@ from .bit_polish import greedy_polish
 from .calibration import LayerStatsBook, collect_stats, robust_diag
 from .config import PTQConfig
 from .lb_admm import lb_admm, magnitude_balance
+
+# Artifact markers (greppable in code, spec, and the run record).
+#
+# ``TUNE_FP_LOSS_MARKER`` — the corpus names the TuneFP call but never writes
+# its internal loss formula; this stage uses the block-output squared error
+# against the cached teacher (design.md, "Remaining informed assumption").
+# ``STE_RESCOPE_MARKER`` — a scoped linear whose refinement produced zero
+# accepted sign flips is declared scale-only in the run record under this
+# marker (qk-fix-ste-sign-adaptation, scenario
+# ``sign_adaptation_is_effective_or_declared``); a zero-flip completion
+# without the declaration is impossible by construction.
+TUNE_FP_LOSS_MARKER = "tune_fp_loss: informed_assumption"
+STE_RESCOPE_MARKER = "ste_scale_only_declared"
+
+# Leaf names treated as attention projections for the Figure 3 TuneFP
+# placement (the group that must be factorized BEFORE the TuneFP pass).
+_ATTENTION_PROJECTION_LEAVES = frozenset(
+    {"q_proj", "k_proj", "v_proj", "qkv_proj", "query", "key", "value"}
+)
+
+
+class VacuousTeacherError(RuntimeError):
+    """A TuneFP pass saw a zero first-step gradient in a fidelity-claiming run.
+
+    Raised by :func:`_tune_fp` when ``cfg.paper_faithful`` is set and the
+    pre-tune objective gradient norm is exactly zero: under the Figure 3
+    placement the operative call always has factorized in-block layers, so a
+    zero gradient is a construction defect (broken teacher or detached
+    student), never legitimate "nothing to compensate". A run that claims
+    paper fidelity must fail rather than print "paper-faithful" on a stage
+    that silently did not execute (qk-fix-tunefp-teacher A3).
+
+    Carries the two norms and the reason so the caller can write a
+    forensically complete failure report (see
+    :func:`quantibbler.qk_report.stage_failure_report`).
+    """
+
+    def __init__(
+        self,
+        *,
+        block: str,
+        reason: str,
+        gradient_norm: float,
+        initial_residual_norm: float,
+    ) -> None:
+        self.stage = "tune_fp"
+        self.block = block
+        self.reason = reason
+        self.gradient_norm = gradient_norm
+        self.initial_residual_norm = initial_residual_norm
+        super().__init__(
+            f"tune_fp vacuous teacher at block {block!r} ({reason}): gradient norm "
+            f"{gradient_norm!r}, initial residual norm {initial_residual_norm!r} — a "
+            "run claiming paper fidelity cannot continue on a stage that did not execute"
+        )
+
+
+def _leaf_name(name: str) -> str:
+    return name.rsplit(".", 1)[-1]
+
+
+def _is_attention_projection(name: str) -> bool:
+    """True when ``name`` is an attention projection (Q/K/V) of its block."""
+    return _leaf_name(name) in _ATTENTION_PROJECTION_LEAVES
+
+
+def _weights_fingerprint(module: nn.Module) -> str:
+    """Stable sha256 over a module's parameters (the pristine teacher source).
+
+    The TuneFP teacher's provenance is only provable if the artifact can name
+    the WEIGHTS the teacher was built from (qk-fix-tunefp-teacher A1): this
+    hash is recorded alongside the capture index, so a reader can tell a
+    pristine-pinned teacher from one taken off live (already written-back)
+    module state.
+    """
+    digest = hashlib.sha256()
+    for name, param in sorted(module.named_parameters()):
+        digest.update(name.encode("utf-8"))
+        digest.update(str(tuple(param.shape)).encode("utf-8"))
+        digest.update(str(param.dtype).encode("utf-8"))
+        digest.update(param.detach().to(torch.float64).contiguous().cpu().numpy().tobytes())
+    return digest.hexdigest()
 
 
 def _note_block_progress(idx: int, name: str | None, x_running=None) -> None:
@@ -63,6 +168,9 @@ __all__ = [
     "BlockReconResult",
     "FactorizedLinear",
     "QuantizedLayerState",
+    "STE_RESCOPE_MARKER",
+    "TUNE_FP_LOSS_MARKER",
+    "VacuousTeacherError",
     "extract_and_pack",
     "reconstruct_block",
     "reconstruct_model",
@@ -311,9 +419,38 @@ def _tune_fp(
     batch_size: int,
     *,
     label: str = "block",
-) -> None:
+    tune_names: list[str] | None = None,
+    factorized_in_block: int = 0,
+    recorder=None,
+    capture_index: int | None = None,
+    teacher_fingerprint: str | None = None,
+    teacher_source: str = "frozen_reference_copy",
+) -> dict:
     """TuneFP ([NQ] Step 1): T_pre steps of full-precision block tuning
-    against the teacher targets with Adam + cosine lr ([NQ] App. C).
+    against the cached teacher with Adam + cosine lr ([NQ] App. C).
+
+    Placement and tunable set (qk-fix-tunefp-teacher, [NQ] Figure 3): the
+    caller fires this ONCE per block, after the attention projections are
+    factorized and before the remaining linears are, and passes the
+    still-FP remainder as ``tune_names`` — so the objective
+    ``||block_tuned(x_b) - y_b||**2`` is nonzero by construction (the
+    factorized Q/K/V are the compensation source). ``y_b`` is the cached,
+    pristine-pinned teacher captured once per block; it is never recomputed
+    from tuned weights.
+
+    Guard (A3, fail-closed): a zero first-step gradient norm — or any call
+    emitted with ``factorized_in_block == 0`` (the legacy pre-loop placement
+    the figure rules out) — aborts with the recorder event
+    ``tune_fp_vacuous_teacher`` carrying BOTH the gradient norm and the
+    initial residual norm (gradient-zero + residual-zero = broken teacher;
+    gradient-zero + residual-nonzero = detached student). In a diagnostic
+    run the stage continues with pristine weights and the event stays on
+    record; in a run claiming paper fidelity it raises
+    :class:`VacuousTeacherError` — there is no trivial-zero carve-out under
+    the figure placement.
+
+    Returns the honest stage record (steps, gradient/residual norms, the fp
+    weight delta versus the pre-tune snapshot) for the run artifact.
 
     Bulletproofing (r137 run #3b autopsy): a single inf/NaN gradient in
     bf16 poisons EVERY parameter of a tensor at the next opt.step(), and
@@ -324,15 +461,44 @@ def _tune_fp(
     snapshot is restored and the stage ends early if finiteness is ever
     violated. A slightly underfit block beats a poisoned pipeline.
     """
-    linears = _linear_children(block)
-    if not linears:
-        return
+    stats: dict = {
+        "stage": "tune_fp",
+        "label": label,
+        "tunable": sorted(tune_names) if tune_names is not None else None,
+        "factorized_in_block": int(factorized_in_block),
+        "capture_index": capture_index,
+        "teacher_source": teacher_source,
+        "teacher_fingerprint": teacher_fingerprint,
+        "marker": TUNE_FP_LOSS_MARKER,
+        "steps": 0,
+        "gradient_norm": None,
+        "initial_residual_norm": None,
+        "residual_after": None,
+        "weight_delta_rel": None,
+        "vacuous": False,
+    }
+    all_linears = _linear_children(block)
+    if tune_names is None:
+        linears = all_linears
+    else:
+        wanted = set(tune_names)
+        linears = [(n, m) for n, m in all_linears if n in wanted]
     params = [p for _, m in linears for p in m.parameters()]
+    if not params:
+        stats["steps"] = 0
+        return stats
+
+    def _residual() -> float:
+        with torch.no_grad():
+            out = block(x_b)
+            return float((out - y_b).pow(2).mean().sqrt())
+
     opt = torch.optim.Adam(params, lr=cfg.stage_pre.lr)
     n = x_b.shape[0]
     bs = max(1, min(batch_size, n))
     total = max(cfg.stage_pre.epochs * (n // bs), 1)
     snapshot = [p.detach().clone() for p in params]
+    before_residual = _residual()
     skipped = 0
     for step in range(total):
         if cfg.cosine_schedule and total > 1:
@@ -350,7 +516,52 @@ def _tune_fp(
             continue
         opt.zero_grad()
         loss.backward()
+        if step == 0:
+            grad_sq = 0.0
+            for p in params:
+                if p.grad is not None:
+                    grad_sq += float(p.grad.detach().pow(2).sum())
+            grad_norm = float(np.sqrt(grad_sq))
+            residual_norm = float(loss.detach().sqrt())
+            stats["gradient_norm"] = grad_norm
+            stats["initial_residual_norm"] = residual_norm
+            if grad_norm == 0.0 or factorized_in_block <= 0:
+                reason = (
+                    "no_in_block_layer_factorized"
+                    if factorized_in_block <= 0
+                    else "zero_first_step_gradient"
+                )
+                stats["vacuous"] = True
+                stats["vacuous_reason"] = reason
+                event = {
+                    "block": label,
+                    "gradient_norm": grad_norm,
+                    "initial_residual_norm": residual_norm,
+                    "reason": reason,
+                    "capture_index": capture_index,
+                    "teacher_source": teacher_source,
+                    "teacher_fingerprint": teacher_fingerprint,
+                }
+                if recorder is not None:
+                    recorder("tune_fp_vacuous_teacher", **event)
+                print(
+                    f"[tune_fp:{label}] VACUOUS TEACHER ({reason}): "
+                    f"grad_norm={grad_norm!r} initial_residual={residual_norm!r}",
+                    flush=True,
+                )
+                with torch.no_grad():
+                    for p, p0 in zip(params, snapshot, strict=True):
+                        p.copy_(p0)
+                if cfg.paper_faithful:
+                    raise VacuousTeacherError(
+                        block=label,
+                        reason=reason,
+                        gradient_norm=grad_norm,
+                        initial_residual_norm=residual_norm,
+                    )
+                return stats
         opt.step()
+        stats["steps"] = step + 1
         if not all(bool(torch.isfinite(p).all()) for p in params):
             with torch.no_grad():
                 for p, p0 in zip(params, snapshot, strict=True):
@@ -360,9 +571,20 @@ def _tune_fp(
                 "restored snapshot, ending stage early",
                 flush=True,
             )
-            return
+            break
+    after_residual = _residual()
+    num = den = 0.0
+    with torch.no_grad():
+        for p, p0 in zip(params, snapshot, strict=True):
+            num += float((p.detach() - p0).pow(2).sum())
+            den += float(p0.pow(2).sum())
+    stats["residual_after"] = after_residual
+    stats["residual_before"] = before_residual
+    stats["weight_delta_rel"] = float(np.sqrt(num) / np.sqrt(den)) if den > 0.0 else 0.0
+    stats["skipped_steps"] = skipped
     if skipped:
         print(f"[tune_fp:{label}] skipped {skipped}/{total} non-finite-loss steps", flush=True)
+    return stats
 
 
 def _tune_latent_ste(
@@ -372,10 +594,27 @@ def _tune_latent_ste(
     y_b: torch.Tensor,
     cfg: PTQConfig,
     batch_size: int,
-) -> None:
+    *,
+    steps: int | None = None,
+    label: str = "",
+) -> dict:
     """TuneLatentSTE ([NQ] Step 3): joint refinement of (U, V, s1, s2) with
     the straight-through estimator against the block-level objective of
     Eq. 10, T_post steps at the stage lr ([NQ] App. C).
+
+    Per-layer scheduling (qk-fix-ste-sign-adaptation, Figure 3 right panel):
+    the caller invokes this once per just-factorized linear with its share of
+    the line-19 T_post budget; the block forward is the module as it stands,
+    so every other block parameter is held at its current value.
+
+    Instrumentation (same change, scenarios ``flip_counts_are_recorded`` /
+    ``sign_adaptation_is_effective_or_declared``): per-step, per-factor sign
+    crossings of the latents, the relative latent movement, and the scale
+    (s1, s2) movement are recorded for EVERY factorized linear. A linear
+    that finishes with zero crossings on both factors is what the caller
+    turns into either an accepted discrete flip or the scale-only
+    declaration — a silent zero-flip completion cannot be produced here,
+    because the counts leave the stage in the returned record.
 
     The bias is deliberately NOT a refinement parameter: the qpk1 container
     carries no bias field, so a bias moved during refinement would make the
@@ -384,8 +623,15 @@ def _tune_latent_ste(
     keeps the layer's pre-pipeline bias.
     """
     params = [p for fac in facs.values() for p in (fac.u_latent, fac.v_latent, fac.s1, fac.s2)]
+    stats: dict = {
+        "stage": "ste",
+        "label": label,
+        "linears": sorted(facs),
+        "steps": 0,
+        "per_linear": {},
+    }
     if not params:
-        return
+        return stats
     # Per-tensor RELATIVE lr (r137-v7 post-mortem, user-directed fix): one
     # absolute lr for all four tensors let Adam step s1 — measured
     # post-polish scale class 1e-7 vs s2's 1e4 — by ~5e4x its own magnitude
@@ -400,11 +646,37 @@ def _tune_latent_ste(
     opt = torch.optim.Adam(groups)
     n = x_b.shape[0]
     bs = max(1, min(batch_size, n))
-    total = max(cfg.stage_latent.epochs * (n // bs or 1), 1)
+    if steps is None:
+        total = max(cfg.stage_latent.epochs * (n // bs or 1), 1)
+    else:
+        total = max(int(steps), 0)
+    per_linear: dict[str, dict] = {
+        name: {
+            "steps": 0,
+            "flips_u": 0,
+            "flips_v": 0,
+            "per_step_flips": [],
+            "first_flip_step": None,
+            "u_rel_move": 0.0,
+            "v_rel_move": 0.0,
+            "s1_rel_move": 0.0,
+            "s2_rel_move": 0.0,
+            "zero_crossings": True,
+        }
+        for name in facs
+    }
+    stats["per_linear"] = per_linear
+    if total == 0:
+        return stats
     # Same finiteness armor as TuneFP (r137 run #3b): a NaN loss or a
     # poisoned step must not kill the run or corrupt latents that the
     # exported binaries come from.
-    snapshot = [p.detach().clone() for p in params]
+    snapshot = {name: [p.detach().clone() for p in _fac_params(fac)] for name, fac in facs.items()}
+    entry = {name: [p.detach().clone() for p in _fac_params(fac)] for name, fac in facs.items()}
+    prev_sign = {
+        name: (torch.sign(fac.u_latent.detach()), torch.sign(fac.v_latent.detach()))
+        for name, fac in facs.items()
+    }
     skipped = 0
     for step in range(total):
         if cfg.cosine_schedule and total > 1:
@@ -424,18 +696,142 @@ def _tune_latent_ste(
         opt.zero_grad()
         loss.backward()
         opt.step()
+        step_flips = 0
+        for name, fac in facs.items():
+            rec = per_linear[name]
+            rec["steps"] += 1
+            su = torch.sign(fac.u_latent.detach())
+            sv = torch.sign(fac.v_latent.detach())
+            fu = int((su != prev_sign[name][0]).sum())
+            fv = int((sv != prev_sign[name][1]).sum())
+            prev_sign[name] = (su, sv)
+            rec["flips_u"] += fu
+            rec["flips_v"] += fv
+            rec["per_step_flips"].append(fu + fv)
+            step_flips += fu + fv
+            if (fu or fv) and rec["first_flip_step"] is None:
+                rec["first_flip_step"] = step
         if not all(bool(torch.isfinite(p).all()) for p in params):
             with torch.no_grad():
-                for p, p0 in zip(params, snapshot, strict=True):
-                    p.copy_(p0)
+                for name, fac in facs.items():
+                    for p, p0 in zip(_fac_params(fac), snapshot[name], strict=True):
+                        p.copy_(p0)
             print(
-                f"[tune_latent_ste] non-finite parameters after step {step}; "
+                f"[tune_latent_ste:{label}] non-finite parameters after step {step}; "
                 "restored snapshot, ending stage early",
                 flush=True,
             )
-            return
+            break
+        stats["steps"] = step + 1
+        if step_flips:
+            stats.setdefault("flip_steps", []).append(step)
+    with torch.no_grad():
+        for name, fac in facs.items():
+            rec = per_linear[name]
+            cur = _fac_params(fac)
+            start = entry[name]
+            rec["u_rel_move"] = _rel_move(cur[0], start[0])
+            rec["v_rel_move"] = _rel_move(cur[1], start[1])
+            rec["s1_rel_move"] = _rel_move(cur[2], start[2])
+            rec["s2_rel_move"] = _rel_move(cur[3], start[3])
+            rec["zero_crossings"] = bool(rec["flips_u"] == 0 and rec["flips_v"] == 0)
+    stats["skipped_steps"] = skipped
     if skipped:
-        print(f"[tune_latent_ste] skipped {skipped}/{total} non-finite-loss steps", flush=True)
+        print(
+            f"[tune_latent_ste:{label}] skipped {skipped}/{total} non-finite-loss steps", flush=True
+        )
+    return stats
+
+
+def _fac_params(fac: FactorizedLinear) -> tuple[torch.Tensor, ...]:
+    """The paper's joint refinement parameter set for one linear (Eq. 10)."""
+    return (fac.u_latent, fac.v_latent, fac.s1, fac.s2)
+
+
+def _rel_move(current: torch.Tensor, start: torch.Tensor) -> float:
+    """Relative L2 movement of a parameter tensor versus its entry value."""
+    den = float(start.pow(2).sum())
+    if den <= 0.0:
+        return 0.0
+    return float((current.detach() - start).pow(2).sum().sqrt()) / float(np.sqrt(den))
+
+
+def _discrete_flip_pass(
+    block: nn.Module,
+    linear: nn.Linear,
+    name: str,
+    fac: FactorizedLinear,
+    x_b: torch.Tensor,
+    y_b: torch.Tensor,
+    *,
+    budget: int,
+    factor_mode: str,
+) -> dict:
+    """Bounded discrete sign-flip pass (qk-fix-ste-sign-adaptation alt. 3).
+
+    The paper has no discrete flip pass, so this is an EXPLICIT DEVIATION:
+    it exists only to serve a linear whose continuous refinement produced no
+    sign crossing (the measured geometry: warm-start latents sit far from
+    the decision boundary, so 4,096 STE steps move them 5-33% without
+    crossing zero). Each proposal flips ONE factor entry of the linear under
+    refinement and is accepted only when the block-reconstruction objective
+    ``||block_tuned(x_b) - y_fp||**2`` DECREASES with every other block
+    parameter held at its current value (scenario
+    ``flip_acceptance_uses_block_reconstruction_objective``).
+
+    The sweep order is deterministic — candidate entries sorted by ascending
+    ``|latent|`` (smallest margin first), ties broken by (factor, row, col)
+    — so the same seed and sweep produce the identical flip sequence.
+    ``budget`` bounds the proposals PER FACTOR; 0 disables the pass.
+
+    Returns a record naming the deviation and the per-factor acceptance
+    counts.
+    """
+    record = {
+        "linear": name,
+        "mechanism": "discrete_flip_pass",
+        "deviation": "paper has no discrete sign-flip pass (design alt. 3)",
+        "budget_per_factor": int(budget),
+        "accepted_u": 0,
+        "accepted_v": 0,
+        "proposals": 0,
+        "objective_before": None,
+        "objective_after": None,
+    }
+    if budget <= 0:
+        return record
+    with torch.no_grad():
+        objective = float((block(x_b) - y_b).pow(2).mean())
+    record["objective_before"] = objective
+    order: list[tuple[str, int, int]] = []
+    for tag, latent in (("u", fac.u_latent), ("v", fac.v_latent)):
+        flat = latent.detach().abs().reshape(-1)
+        k = min(int(budget), int(flat.numel()))
+        if k <= 0:
+            continue
+        # torch.argsort is stable for ties in index order on CPU; the tuple
+        # sort below makes the ordering explicit and backend-independent.
+        picked = torch.argsort(flat, stable=True)[:k].tolist()
+        rows, cols = latent.shape
+        for flat_idx in picked:
+            order.append((tag, flat_idx // cols, flat_idx % cols))
+    for tag, i, j in order:
+        latent = fac.u_latent if tag == "u" else fac.v_latent
+        with torch.no_grad():
+            latent.data[i, j] = -latent.data[i, j]
+        _set_linear(linear, fac, factor_mode=factor_mode)
+        with torch.no_grad():
+            candidate = float((block(x_b) - y_b).pow(2).mean())
+        record["proposals"] += 1
+        if candidate < objective:
+            objective = candidate
+            record["accepted_u" if tag == "u" else "accepted_v"] += 1
+        else:
+            with torch.no_grad():
+                latent.data[i, j] = -latent.data[i, j]
+            _set_linear(linear, fac, factor_mode=factor_mode)
+    record["objective_after"] = objective
+    return record
 
 
 def extract_and_pack(
@@ -495,6 +891,10 @@ def reconstruct_block(
     recorder=None,
     layer_offset: int = 0,
     name_prefix: str | None = None,
+    teacher_block: nn.Module | None = None,
+    teacher_source: str | None = None,
+    teacher_fingerprint: str | None = None,
+    capture_index: int | None = None,
 ) -> BlockReconResult:
     """Run the full Phase 2 pipeline for one block (Algorithm 1 lines 8-24).
 
@@ -506,18 +906,29 @@ def reconstruct_block(
         x_b: optional pre-captured quantized-prefix inputs (must lie on the
             block's input device/dtype); captured from calibration data if
             omitted.
-        y_b: optional pre-captured fp block targets for ``x_b``.
+        y_b: optional pre-captured teacher targets for ``x_b`` (the pristine
+            fp block's output on the compressed-prefix stream).
         stats_book: Phase 1 statistics for THIS block's linears, aligned
             element-wise with ``quantizable_linears`` (built on demand when
             omitted — the inputs are first embedded to the block's float
             dtype so raw token-id batches never reach a ``nn.Linear``).
         recorder: optional callable invoked as ``recorder(event, **info)``
-            with events ``capture`` (x_b, y_b), ``tune_fp``, ``lb_admm``,
-            ``ste`` (stage order, per [NQ] Algorithm 1).
+            with events ``capture`` (x_b, y_b, teacher provenance),
+            ``tune_fp`` (with the stage record), ``lb_admm``, ``ste`` (with
+            the per-linear flip/scale-movement record), and
+            ``tune_fp_vacuous_teacher`` on the fail-closed guard path.
         layer_offset: naming offset for multi-block models.
         name_prefix: module path of ``block`` inside the host model; layer
             artifact names are ``prefix.local`` so multi-block models with
             same-named children produce unique, host-addressable keys.
+        teacher_block: frozen reference copy of this block, at pristine
+            weights, used for the teacher capture when ``y_b`` is omitted
+            (qk-fix-tunefp-teacher A1). Never mutated; when absent a local
+            ``copy.deepcopy(block)`` is taken so the teacher never reads the
+            live module's mutable state.
+        teacher_source: provenance label for the teacher weights.
+        teacher_fingerprint: sha256 of the teacher block's parameters.
+        capture_index: which block this teacher capture belongs to.
 
     Returns:
         :class:`BlockReconResult` with one :class:`QuantizedLayerState` per
@@ -547,8 +958,27 @@ def reconstruct_block(
             if params and params[0].dtype.is_floating_point:
                 x_b = x_b.to(params[0].dtype)
     if y_b is None:
+        # Teacher capture (Algorithm 1 lines 9-10; qk-fix-tunefp-teacher A1):
+        # ``Y_b = B^FP_b(X_b)`` — the PRISTINE fp block applied to the
+        # compressed-prefix stream. The weights come from a frozen reference
+        # copy, never the live module: by block N the live model carries
+        # earlier blocks written back quantized, and reading live state would
+        # silently turn the teacher into a quantized-prefix teacher with
+        # every gate still green. The capture is detached and under
+        # ``no_grad`` (memory-only, A2 — never persisted).
+        teacher = teacher_block if teacher_block is not None else copy.deepcopy(block)
+        was_training = teacher.training
+        teacher.eval()
         with torch.no_grad():
-            y_b = block(x_b)
+            y_b = teacher(x_b)
+        if teacher_fingerprint is None:
+            teacher_fingerprint = _weights_fingerprint(teacher)
+        teacher_source = teacher_source or "frozen_reference_copy"
+        teacher.train(was_training)
+        if teacher_block is None:
+            del teacher
+    else:
+        teacher_source = teacher_source or "caller_supplied_frozen_capture"
     # Boundary finiteness check (r137 run #3b autopsy): non-finite inputs
     # here mean the PREVIOUS block's quantized artifact is broken (its
     # forward produces inf/NaN), and every statistic, solve, and export
@@ -565,27 +995,25 @@ def reconstruct_block(
                 "poisoned data"
             )
     if recorder is not None:
-        recorder("capture", x_b=x_b.detach().clone(), y_b=y_b.detach().clone())
+        recorder(
+            "capture",
+            x_b=x_b.detach().clone(),
+            y_b=y_b.detach().clone(),
+            teacher_source=teacher_source,
+            teacher_fingerprint=teacher_fingerprint,
+            capture_index=capture_index,
+        )
 
-    # --- Step 1: TuneFP (line 12). The fp block's bias may move here (it
-    # shapes the teacher target), but the factorized replacement reverts to
-    # the pre-TuneFP bias: the artifact has no bias field, so the quantized
-    # layer must carry the host's own bias for the round trip to close.
+    # --- Step 1: TuneFP (line 12) is fired INSIDE the factorization loop
+    # below, at the [NQ] Figure 3 placement (after Q/K/V, before O/G/U/D).
+    # The fp block's bias may move there (it shapes the teacher target), but
+    # the factorized replacement reverts to the pre-TuneFP bias: the artifact
+    # has no bias field, so the quantized layer must carry the host's own
+    # bias for the round trip to close.
     original_bias = {
         name: (m.bias.detach().clone() if m.bias is not None else None)
         for name, m in quantizable_linears
     }
-    _tune_fp(
-        block,
-        x_b,
-        y_b,
-        cfg,
-        cfg.stage_pre.batch_size,
-        label=name_prefix or f"offset{layer_offset}",
-    )
-    _note_block_progress(0, f"{name_prefix or 'block'}/tune_fp")
-    if recorder is not None:
-        recorder("tune_fp")
 
     # --- Step 2: per-linear-layer LB-ADMM (lines 14-17). Statistics for
     # the block come from Phase 1 bookkeeping, or a local pass when absent.
@@ -627,7 +1055,37 @@ def reconstruct_block(
     refine = cfg.ablation != "untuned-signs"
     facs: dict[str, FactorizedLinear] = {}
     linears_by_name = dict(quantizable_linears)
-    for entry, (name, linear) in zip(stats_book, quantizable_linears, strict=False):
+    # --- Figure 3 placement: which in-block group must be factorized BEFORE
+    # the single TuneFP pass (qk-fix-tunefp-teacher). The attention
+    # projections (Q/K/V) are that group; the tunable set at the pass is the
+    # still-FP remainder (O/G/U/D), so the objective is nonzero by
+    # construction. A block carrying no attention projection at all cannot
+    # honour the figure literally, so the group degenerates to the first
+    # linear in declaration order (design.md crystallization) — the guard's
+    # invariant, "the operative call always has >= 1 in-block layer
+    # factorized", then holds for every block shape.
+    attn_idx = [i for i, (n, _) in enumerate(quantizable_linears) if _is_attention_projection(n)]
+    if attn_idx:
+        split = attn_idx[-1] + 1
+    elif len(quantizable_linears) >= 2:
+        split = 1
+    else:
+        split = len(quantizable_linears)
+    # --- TuneLatentSTE budget (qk-fix-ste-sign-adaptation): the line-19
+    # T_post budget is split deterministically across the block's factorized
+    # linears — equal split, remainder to the earliest linears in fixed
+    # declaration order — and the per-layer allocation is recorded.
+    n_rows = int(x_b.shape[0])
+    bs_latent = max(1, min(cfg.stage_latent.batch_size, n_rows))
+    total_ste = max(cfg.stage_latent.epochs * (n_rows // bs_latent or 1), 1)
+    n_linears = len(quantizable_linears)
+    _base, _rem = divmod(total_ste, n_linears)
+    alloc = [_base + (1 if i < _rem else 0) for i in range(n_linears)]
+    ste_records: dict[str, dict] = {}
+    tune_fp_record: dict | None = None
+    for idx, (entry, (name, linear)) in enumerate(
+        zip(stats_book, quantizable_linears, strict=False)
+    ):
         w = linear.weight.detach().to(torch.float64).cpu().numpy()
         d_in_t, d_out_t = robust_diag(entry.d_in_raw, entry.d_out_raw, tau=cfg.tau, gamma=cfg.gamma)
         w_tilde = (d_out_t[:, None] * w) * d_in_t[None, :]
@@ -706,6 +1164,119 @@ def reconstruct_block(
             fac.s1.copy_(torch.from_numpy(s1_np))
             fac.s2.copy_(torch.from_numpy(s2_np))
         facs[name] = fac
+        # Freeze this linear's factorized weight into the module NOW: every
+        # later stage in the block (the per-layer STE below, the TuneFP pass,
+        # the next layer's statistics-free solve) must see the quantized
+        # version of the layers already factorized. The pre-TuneFP bias is
+        # restored first — TuneFP's fp-bias move is not part of the artifact
+        # (no bias field in qpk1).
+        if original_bias[name] is not None:
+            with torch.no_grad():
+                linear.bias.copy_(original_bias[name].to(linear.bias.dtype))
+        _set_linear(linear, fac, factor_mode=cfg.factor_mode)
+
+        # --- Step 3 (line 19): per-layer TuneLatentSTE on the
+        # just-factorized linear, with its deterministic share of T_post.
+        # Every other block parameter is held at its current value: the
+        # module carries the frozen weights of the previously factorized
+        # layers and the untouched fp weights of the later ones.
+        if refine:
+            per: dict = {
+                "steps": 0,
+                "flips_u": 0,
+                "flips_v": 0,
+                "per_step_flips": [],
+                "first_flip_step": None,
+                "u_rel_move": 0.0,
+                "v_rel_move": 0.0,
+                "s1_rel_move": 0.0,
+                "s2_rel_move": 0.0,
+                "zero_crossings": None,
+                "declared": "not_scheduled_zero_budget",
+            }
+            if alloc[idx] > 0:
+                rec = _tune_latent_ste(
+                    block,
+                    {name: fac},
+                    x_b,
+                    y_b,
+                    cfg,
+                    cfg.stage_latent.batch_size,
+                    steps=alloc[idx],
+                    label=name,
+                )
+                per = rec["per_linear"][name]
+                if per["zero_crossings"]:
+                    # No continuous sign crossing: fall back to the bounded
+                    # discrete flip pass (design alt. 3, an explicit
+                    # deviation), and if that also accepts nothing, declare
+                    # the linear scale-only under the greppable re-scope
+                    # marker. A silent zero-flip completion is impossible on
+                    # this path.
+                    flip = _discrete_flip_pass(
+                        block,
+                        linear,
+                        name,
+                        fac,
+                        x_b,
+                        y_b,
+                        budget=cfg.ste_flip_pass_budget,
+                        factor_mode=cfg.factor_mode,
+                    )
+                    per["flip_pass"] = flip
+                    if flip["accepted_u"] + flip["accepted_v"] > 0:
+                        per["declared"] = "discrete_flip_pass"
+                    else:
+                        per["declared"] = "scale_only"
+                        per["rescope_marker"] = STE_RESCOPE_MARKER
+                else:
+                    per["declared"] = "paper_ste"
+                _set_linear(linear, fac, factor_mode=cfg.factor_mode)
+            per["allocated_steps"] = int(alloc[idx])
+            ste_records[name] = per
+
+        # --- Step 1 (line 12): the single per-block TuneFP pass, at the
+        # [NQ] Figure 3 placement — after the attention projections are
+        # factorized (and before the remaining linears are). Its tunable set
+        # is exactly the still-FP remainder.
+        if idx + 1 >= split and tune_fp_record is None:
+            remainder = [nm for nm, _ in quantizable_linears[split:]]
+            label = name_prefix or f"offset{layer_offset}"
+            if remainder:
+                tune_fp_record = _tune_fp(
+                    block,
+                    x_b,
+                    y_b,
+                    cfg,
+                    cfg.stage_pre.batch_size,
+                    label=label,
+                    tune_names=remainder,
+                    factorized_in_block=split,
+                    recorder=recorder,
+                    capture_index=capture_index,
+                    teacher_fingerprint=teacher_fingerprint,
+                    teacher_source=teacher_source,
+                )
+            else:
+                # Degenerate block: every factorized linear is already in the
+                # pre-TuneFP group, so there is no still-FP remainder to
+                # tune. Recorded, never silent.
+                tune_fp_record = {
+                    "stage": "tune_fp",
+                    "label": label,
+                    "skipped": "no_still_fp_remainder",
+                    "tunable": [],
+                    "factorized_in_block": split,
+                    "capture_index": capture_index,
+                    "teacher_source": teacher_source,
+                    "teacher_fingerprint": teacher_fingerprint,
+                    "marker": TUNE_FP_LOSS_MARKER,
+                    "steps": 0,
+                    "vacuous": False,
+                }
+            _note_block_progress(0, f"{name_prefix or 'block'}/tune_fp")
+            if recorder is not None:
+                recorder("tune_fp", **tune_fp_record)
     _note_block_progress(0, f"{name_prefix or 'block'}/lb_admm")
     if recorder is not None:
         # The polish count travels in the existing event: an ablation's log must
@@ -713,13 +1284,42 @@ def reconstruct_block(
         # change the stage sequence every existing consumer asserts.
         recorder("lb_admm", polish_rounds=cfg.polish_rounds if polish else 0)
 
-    # --- Step 3: TuneLatentSTE (line 19).
+    # --- Step 3 record (line 19), emitted once per block after the
+    # factorization loop so the stage sequence every existing consumer
+    # asserts (capture -> tune_fp -> lb_admm -> ste) is unchanged.
     _note_block_progress(0, f"{name_prefix or 'block'}/stats_done")
     if refine:
-        _tune_latent_ste(block, facs, x_b, y_b, cfg, cfg.stage_latent.batch_size)
+        if tune_fp_record is None:
+            # The factorization loop ended before the Figure 3 placement
+            # (a truncated statistics book). TuneFP did not execute; say so
+            # rather than letting a silent no-op read as a clean stage.
+            tune_fp_record = {
+                "stage": "tune_fp",
+                "label": name_prefix or f"offset{layer_offset}",
+                "skipped": "factorization_loop_truncated_before_placement",
+                "tunable": [],
+                "factorized_in_block": len(facs),
+                "capture_index": capture_index,
+                "teacher_source": teacher_source,
+                "teacher_fingerprint": teacher_fingerprint,
+                "marker": TUNE_FP_LOSS_MARKER,
+                "steps": 0,
+                "vacuous": False,
+            }
+            if recorder is not None:
+                recorder("tune_fp", **tune_fp_record)
         _note_block_progress(0, f"{name_prefix or 'block'}/ste")
         if recorder is not None:
-            recorder("ste")
+            recorder(
+                "ste",
+                per_linear=ste_records,
+                allocation={name: int(alloc[i]) for i, (name, _) in enumerate(quantizable_linears)},
+                total_steps=total_ste,
+                teacher_source=teacher_source,
+                teacher_fingerprint=teacher_fingerprint,
+                capture_index=capture_index,
+                rescope_marker=STE_RESCOPE_MARKER,
+            )
 
     # --- Extraction and packing (lines 20-23).
     layers: list[QuantizedLayerState] = []
@@ -745,6 +1345,17 @@ def reconstruct_block(
             with torch.no_grad():
                 linear.bias.copy_(original_bias[name].to(linear.bias.dtype))
         _set_linear(linear, fac, factor_mode=cfg.factor_mode)
+
+    if recorder is not None:
+        # Stage map (Algorithm 1 lines 20-23): recorded so the faithful-run
+        # record can show that sign extraction + packing executed for every
+        # factorized linear (and that an fp measurement extracted none).
+        recorder(
+            "sign_extract_pack",
+            layers=sorted(facs),
+            extracted=len(layers),
+            factor_mode=cfg.factor_mode,
+        )
 
     return BlockReconResult(layers)
 
@@ -832,21 +1443,27 @@ def reconstruct_model(
     *,
     recorder=None,
     checkpoint_dir=None,
+    teacher_model: nn.Module | None = None,
 ) -> list[BlockReconResult]:
     """Phase 2 over every direct child block of ``model``, sequentially.
 
     Block ``b`` sees ``X_b`` = calibration data through the already
     quantized prefix (earlier blocks run their frozen-binary replacements;
-    Algorithm 1 line 9) and ``Y_b`` = the fp block's output on those inputs
-    (line 10). Only blocks that contain a quantizable ``nn.Linear`` (A-9
-    scope: embeddings, heads, and everything under an embedding module are
-    fp) participate; layer artifacts are named by the host model's module
+    Algorithm 1 line 9) and ``Y_b`` = the PRISTINE fp block's output on those
+    inputs (line 10). Only blocks that contain a quantizable ``nn.Linear``
+    (A-9 scope: embeddings, heads, and everything under an embedding module
+    are fp) participate; layer artifacts are named by the host model's module
     paths so quantize_model can address them.
 
-    The fp teacher output ``Y_b`` is captured from the block's PRE-recon
-    state: reconstruction modifies the block in place, so teacher targets
-    for the final stem layer (embedding + head) are snapshotted before the
-    loop and reattached for Phase 3 (which needs a genuinely fp teacher).
+    ``teacher_model`` is the frozen reference copy of the whole model at
+    pristine weights (qk-fix-tunefp-teacher A1): each block's teacher output
+    is read from THAT copy, never from the live block — by block N the live
+    model already carries earlier blocks written back quantized, so a teacher
+    read off live state would silently be a quantized-prefix teacher. When
+    the caller supplies none (a direct ``reconstruct_model`` call), one is
+    deep-copied here with gradients disabled. Each block's teacher capture
+    records the teacher weights' sha256 fingerprint and the block index, so
+    provenance is provable from the artifact alone.
 
     Checkpointing (``checkpoint_dir`` set): each finished block's layer
     states are persisted losslessly (int8 bits, float64 scales) and a
@@ -854,7 +1471,9 @@ def reconstruct_model(
     activations are rebuilt by replaying the quantized prefix forward,
     which is bit-identical to a fresh run's prefix (the solve is
     deterministic; asserted by test_scn_checkpoint_resume). Resume
-    refuses on config/code fingerprint mismatch.
+    refuses on config/code fingerprint mismatch, and both the save and the
+    restore are driven by the LIVE block's expected quantizable names
+    (qk-fix-fp-resume-guard), never by what an archive happened to contain.
     """
     quantizable = _quantizable_names(model)
     if not quantizable:
@@ -873,6 +1492,12 @@ def reconstruct_model(
         done_set = set(done)
     else:
         done_set = set()
+
+    if teacher_model is None:
+        teacher_model = copy.deepcopy(model)
+        for param in teacher_model.parameters():
+            param.requires_grad_(False)
+    teacher_children = dict(_iter_named_children(teacher_model))
 
     batches = list(calibration_batches)
     # Map raw token-id batches once through the model's own input stem
@@ -896,21 +1521,31 @@ def reconstruct_model(
         )
         if not has_quant:
             continue
+        # Expected names for THIS block, from the LIVE model and through the
+        # SAME predicate the solver scopes with (qk-fix-fp-resume-guard): the
+        # checkpoint write and the checkpoint restore are both driven by what
+        # the block is OWED, never by what an archive contains.
+        expected_names = _scope_filter(_quantizable_names(block), cfg.layer_scope)
         _note_block_progress(len(results) + 1, name, x_running)
         if i in done_set:
             # Resume: restore this block's solved layers bit-exactly,
             # write them into the host (the quantized prefix then
             # advances exactly as a fresh run's would), skip the solve.
             layers = ckpt.load_block_checkpoint(ckpt_dir, i, QuantizedLayerState)
-            ckpt.apply_layer_states(block, name, layers)
+            ckpt.apply_layer_states(block, name, layers, expected_names=expected_names)
             results.append(BlockReconResult(layers))
             print(
                 f"[checkpoint] block {i} ({name}): restored from checkpoint, skipping solve",
                 flush=True,
             )
         else:
+            # Teacher capture from the FROZEN reference copy (A1): the live
+            # block is still pristine at this instant, but pinning the source
+            # structurally means a later reordering of this loop cannot
+            # silently turn the teacher into a quantized-prefix teacher.
+            teacher_block = teacher_children.get(name)
             with torch.no_grad():
-                y_b = block(x_running)
+                y_b = (teacher_block if teacher_block is not None else block)(x_running)
             result = reconstruct_block(
                 block,
                 batches,
@@ -919,10 +1554,16 @@ def reconstruct_model(
                 y_b=y_b,
                 recorder=recorder,
                 name_prefix=name,
+                teacher_block=teacher_block,
+                teacher_source="frozen_reference_copy",
+                teacher_fingerprint=_weights_fingerprint(teacher_block)
+                if teacher_block is not None
+                else None,
+                capture_index=i,
             )
             layers = result.layers
             results.append(result)
-            if ckpt_dir is not None:
+            if ckpt_dir is not None and expected_names:
                 ckpt.save_block_checkpoint(ckpt_dir, i, layers)
         # Prefix advances through the block with its factorized layers active
         # (frozen binaries already written back by reconstruct_block).

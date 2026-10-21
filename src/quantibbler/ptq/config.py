@@ -172,6 +172,24 @@ class PTQConfig:
     factor_mode: Literal["binary", "fp"] = "binary"
     ablation: Literal["none", "untuned-signs"] = "none"
     layer_scope: Literal["all", "self_attn", "mlp"] = "all"
+    # --- paper-faithful run flag (change qk-fix-tunefp-teacher) ------------
+    # A run that CLAIMS paper fidelity fails closed on any
+    # ``tune_fp_vacuous_teacher`` event instead of continuing with pristine
+    # weights: under the [NQ] Figure 3 placement the operative TuneFP call
+    # always has factorized in-block layers, so a zero first-step gradient is
+    # a construction defect, never legitimate nothing-to-compensate. Default
+    # False keeps the diagnostic semantics (event recorded, stage skipped).
+    # Solver state: it joins the checkpoint fingerprint.
+    paper_faithful: bool = False
+    # --- bounded discrete flip pass (change qk-fix-ste-sign-adaptation) ----
+    # Fallback 3 of the mechanism ladder: proposals per factor per linear,
+    # accepted only on a decrease of the block-reconstruction objective. The
+    # paper has no discrete flip pass, so any nonzero value is an EXPLICIT
+    # DEVIATION and is recorded as such in the run record. 0 disables the
+    # pass, in which case a linear whose continuous refinement produced no
+    # sign crossing is declared scale-only under the greppable re-scope
+    # marker — never a silent zero-flip completion.
+    ste_flip_pass_budget: int = 0
     # Observer hook (change qk-fail-fast-loop): called by the sequential
     # block reconstruction after each block is written back into the host
     # model, as ``probe(model, depth, name)`` with the live host, the 1-based
@@ -240,4 +258,11 @@ class PTQConfig:
             raise ValueError(
                 "ablation='untuned-signs' is a BINARY ablation (it exports signs of the "
                 f"balance latents); it cannot combine with factor_mode={self.factor_mode!r}"
+            )
+        if not isinstance(self.paper_faithful, bool):
+            raise ValueError(f"paper_faithful must be a bool, got {self.paper_faithful!r}")
+        if self.ste_flip_pass_budget < 0:
+            raise ValueError(
+                "ste_flip_pass_budget must be >= 0 (0 disables the discrete flip "
+                f"pass), got {self.ste_flip_pass_budget}"
             )

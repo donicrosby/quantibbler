@@ -7,9 +7,18 @@ Date: 2026-10-21. Owner: planner. Status: **recorded — licenses the ladder for
 
 | Artifact | Path | sha256 |
 |---|---|---|
-| probe script | `/opt/data/tmp/rca-stage-trace/probe_stage_trace.py` | `e54b72a100012c12ca072aed98350fbbac5fdb3f014f473f07c28063accc2a19` |
-| attn trace | `/opt/data/tmp/rca-stage-trace-attn/attn.json` | `b6135b098e1e59d32e185c76ea897bd39f3325ad96a5ab1ee935e38f02ea8b35` (landed run) |
-| mlp trace | `/opt/data/tmp/rca-stage-trace-mlp/mlp.json` | `b6135b098e1e59d32e185c76ea897bd39f3325ad96a5ab1ee935e38f02ea8b35` (landed run) |
+| probe script (trace-producing version) | `/opt/data/tmp/rca-stage-trace/probe_stage_trace.py` | `b6135b098e1e59d32e185c76ea897bd39f3325ad96a5ab1ee935e38f02ea8b35` — recorded by the probe itself in `run.log` and in both JSONs' internal `probe_script_sha256` field |
+| attn trace | `/opt/data/tmp/rca-stage-trace-attn/attn.json` | `bc73bb48bba562c3dd5f902c68e2b8bd10a1beb85c2a8e30398f34fb0abf927c` (landed run, verified on disk) |
+| mlp trace | `/opt/data/tmp/rca-stage-trace-mlp/mlp.json` | `255e226c475feeebd36810f537f6418a4b9d16ba0e28742eee3727ca6a794ce4` (landed run, verified on disk) |
+
+Probe script lineage (recorded 2026-10-21 after bug-hunter's doc check): the
+file was since updated for the ladder extension — on-disk sha now
+`3fa1c232142718fb8e94236a6b0ca65abd173dd79c041abb232ed009ae77910c`, whose
+predecessor `e54b72a1100012c12ca072aed98350fbbac5fdb3f014f473f07c28063accc2a19`
+is recorded in `FIRE-LINE.md`. The two trace rows previously listed
+`b6135b09…` for BOTH files — that is the producer probe's sha copied from
+the JSONs' internal provenance field, not the files' own hashes; corrected
+to the disk hashes above.
 
 `traced_code` identities recorded in both JSONs: block_recon `132b5c8c…`,
 checkpoints `92027214…`, driver `85d0d0d8…`. Integrity fields: `void=None`,

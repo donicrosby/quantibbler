@@ -12,7 +12,7 @@
 #
 # Knobs, all env — positional arguments are REFUSED, not ignored:
 #   MODEL OUT RANK SOLVER SEQ_LEN TUNE_SEQ_LEN CALIBRATION_SEQS EVAL_SEQS
-#   FACTOR_MODE ABLATION LAYER_SCOPE DRY_RUN
+#   FACTOR_MODE ABLATION LAYER_SCOPE PAPER_FAITHFUL STE_FLIP_PASS_BUDGET DRY_RUN
 #
 # Two defaults are traps worth knowing before you launch: SOLVER defaults to
 # `admm` (the measured ablation showed the ADMM stage earns nothing here —
@@ -62,6 +62,14 @@ TUNE_SEQ_LEN="${TUNE_SEQ_LEN:-}"
 FACTOR_MODE="${FACTOR_MODE:-}"
 ABLATION="${ABLATION:-}"
 LAYER_SCOPE="${LAYER_SCOPE:-}"
+# Paper-faithful claim + the bounded discrete flip pass (qk-fix-tunefp-teacher /
+# qk-fix-ste-sign-adaptation): STRICT PASSTHROUGH like the ablation knobs, and
+# the wrapper never authors either. PAPER_FAITHFUL=1 is the ONLY way a launch
+# claims the paper's method: it switches the stage budgets to [NQ] App. C and
+# makes a TuneFP vacuity event FAIL the run instead of continuing. An empty or
+# 0 value is the gate-shaped pipeline, which is not the paper.
+PAPER_FAITHFUL="${PAPER_FAITHFUL:-}"
+STE_FLIP_PASS_BUDGET="${STE_FLIP_PASS_BUDGET:-}"
 CALIBRATION_SEQS="${CALIBRATION_SEQS:-16}"
 EVAL_SEQS="${EVAL_SEQS:-5}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -72,7 +80,7 @@ DRY_RUN="${DRY_RUN:-0}"
 # something other than what was asked for.
 if [ "$#" -ne 0 ]; then
   echo "run-ptq-container.sh takes no arguments; use the env knobs:" >&2
-  echo "  MODEL OUT RANK SOLVER SEQ_LEN TUNE_SEQ_LEN CALIBRATION_SEQS EVAL_SEQS FACTOR_MODE ABLATION LAYER_SCOPE DRY_RUN" >&2
+  echo "  MODEL OUT RANK SOLVER SEQ_LEN TUNE_SEQ_LEN CALIBRATION_SEQS EVAL_SEQS FACTOR_MODE ABLATION LAYER_SCOPE PAPER_FAITHFUL STE_FLIP_PASS_BUDGET DRY_RUN" >&2
   echo "  got: $*" >&2
   exit 2
 fi
@@ -103,9 +111,17 @@ fi
 # carries the announce plus the advisories. (Before this, the announce went to
 # stdout and mixed with the argv; the split arrived as part of the ablation-knob
 # passthrough repair, so the why is recorded here rather than left to archaeology.)
+# A launch that does not claim paper fidelity is NOT running the paper's method:
+# the gate-shaped stage budgets turn TuneFP into a single step and the vacuity
+# guard into a diagnostic event. Said before the run so the resulting artifact
+# cannot be read as a paper-faithful one.
+if [ "$PAPER_FAITHFUL" != "1" ]; then
+  echo "note: PAPER_FAITHFUL unset -> gate-shaped stage budgets (TuneFP 1 step); the paper's method is PAPER_FAITHFUL=1" >&2
+fi
 echo "run-ptq-container: model=$MODEL rank=$RANK solver=$SOLVER seq_len=$SEQ_LEN" \
   "tune_seq_len=${TUNE_SEQ_LEN:-unset} calibration_seqs=$CALIBRATION_SEQS" \
   "factor_mode=${FACTOR_MODE:-binary} ablation=${ABLATION:-none} layer_scope=${LAYER_SCOPE:-all}" \
+  "paper_faithful=${PAPER_FAITHFUL:-0} ste_flip_pass_budget=${STE_FLIP_PASS_BUDGET:-0}" \
   "eval_seqs=$EVAL_SEQS out=$OUT" >&2
 
 set -- docker run --rm \
@@ -147,6 +163,14 @@ fi
 if [ -n "$LAYER_SCOPE" ]; then
   set -- "$@" --layer-scope "$LAYER_SCOPE"
 fi
+# PAPER_FAITHFUL is a boolean FLAG, not a valued option: it is appended only
+# when it was asked for, so an unset knob cannot author the claim.
+if [ "$PAPER_FAITHFUL" = "1" ]; then
+  set -- "$@" --paper-faithful
+fi
+if [ -n "$STE_FLIP_PASS_BUDGET" ]; then
+  set -- "$@" --ste-flip-pass-budget "$STE_FLIP_PASS_BUDGET"
+fi
 
 # DRY_RUN=1 prints the exact command line (copy-pasteable) and stops: the launch
 # is checkable without spending 32g of host RAM and without stealing the
@@ -163,8 +187,8 @@ mkdir -p /opt/data/tmp "$(dirname "$OUT")"
 # killed run leaves behind: `: >` destroyed it on every launch, including the
 # one that died (`tail` from the *failed* run is the useful line, not the new
 # run's first sample).
-printf '=== run %s rank=%s solver=%s seq_len=%s tune_seq_len=%s out=%s ===\n' \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-unset}" "$OUT" \
+printf '=== run %s rank=%s solver=%s seq_len=%s tune_seq_len=%s paper_faithful=%s ste_flip_pass_budget=%s out=%s ===\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-unset}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "$OUT" \
   >> /opt/data/tmp/quantibbler-breadcrumbs.log
 
 exec "$@"

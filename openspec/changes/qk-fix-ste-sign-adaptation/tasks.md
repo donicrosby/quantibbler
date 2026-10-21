@@ -1,6 +1,6 @@
 # Tasks: qk-fix-ste-sign-adaptation
 
-- [ ] (coder) Implement per the spec delta: per-step flip-count
+- [x] (coder) Implement per the spec delta: per-step flip-count
   instrumentation in `_tune_latent_ste` (both factors, per linear), plus
   scale (s1, s2) movement recording, for EVERY factorized linear in the
   block (all seven scoped: attn q/k/v/o, mlp gate/up/down) — never a
@@ -20,7 +20,7 @@
   STE mechanism first per the user directive; (2)-(4) fallbacks per
   design.md, each recorded in the run record with deviation status.
   Binaries stay ±1 by construction; no qpk1 format change.
-- [ ] (coder) Self-test: a toy block engineered with latents near zero must
+- [x] (coder) Self-test: a toy block engineered with latents near zero must
   show ≥1 sign crossing under the diagnosed paper mechanism; a toy block
   with far-from-zero latents must either cross after the adopted mechanism
   or emit the scale-only declaration — no silent zero-flip completion.
@@ -29,7 +29,7 @@
   typecheck and behave on it — the dimensionally-incoherent objective this
   fix replaced passed by coincidence only on square projections.
   Reproducibility test: same seed, same sweep → identical flip sequence.
-- [ ] (coder) Rehearse the stage-trace probe against the fixed bytes: post
+- [x] (coder) Rehearse the stage-trace probe against the fixed bytes: post
   per-linear flip counts for the 7 scoped linears and the accepted-flip
   deltas; record the new probe sha and the adopted alternative per linear.
 - [ ] (bug-hunter) Review on the landed bytes: instrumentation counts both
@@ -51,3 +51,45 @@
   qk-fix-ste-sign-adaptation --strict`; commit (specs + code in one commit);
   do not archive until the fixed stage's flip counts land in a real run on
   record.
+
+## Implementation notes (coder, 2026-10-21)
+
+Landed on `src/quantibbler/ptq/block_recon.py` and `config.py`. Evidence:
+`tests/ptq/test_ste_sign_adaptation.py` (7 tests) plus the per-linear records
+in the real driver run recorded in `qk-fix-tunefp-teacher`'s implementation
+notes.
+
+**What the code does now.** `_tune_latent_ste` is invoked once per
+just-factorized linear with that linear's share of the line-19 T_post budget
+(equal split, remainder to the earliest linears in declaration order, the
+allocation recorded per linear), and returns per-linear, per-factor sign-flip
+counts, the per-step flip trace, the relative latent movement, and the scale
+(s1, s2) movement. Flip acceptance in the bounded discrete pass is judged
+against the block-reconstruction objective `||block(x_b) - y_b||**2` with the
+proposal applied to the linear under refinement and every other block
+parameter held at its current value; the sweep order is deterministic
+(ascending |latent|, ties by (factor, row, col)).
+
+**Mechanism ladder status (design.md alternatives 1 -> 3 -> 4).** Alternative
+1 — the paper's own STE — is implemented and instrumented: on a fixture with
+latents at the decision boundary (|latent| ~ 1e-9) the stage flips both
+factors within 8 steps. On the rehearsal run every scoped linear finished
+with ZERO continuous crossings in 18-19 steps (the measured geometry:
+warm-start latents sit far from zero), so the ladder fell through to
+alternative 3, the bounded discrete flip pass, which accepted flips on four
+of seven linears; the remaining three carry the `ste_scale_only_declared`
+marker (alternative 4). No linear completed with zero flips and no
+declaration.
+
+**Named deviation.** The discrete flip pass is not in the paper; every record
+carries `deviation: paper has no discrete sign-flip pass (design alt. 3)`, and
+`ste_flip_pass_budget` defaults to 0 (pass disabled -> the scale-only
+declaration path), so enabling it is an explicit, recorded act.
+
+**Known residual (documented, not fixed here).** When `total_steps < number
+of factorized linears` some linears receive a 0-step allocation. They are
+recorded with `declared = not_scheduled_zero_budget`, which is a declaration
+rather than a silent no-op, but the refinement genuinely did not run for
+them. At [NQ] App. C budgets (T_post = 8 epochs over the block's rows) the
+allocation is never degenerate; the residual only bites at test-scale
+budgets. The faithful run's record is the evidence that closes it.

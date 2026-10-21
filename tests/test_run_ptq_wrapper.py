@@ -25,6 +25,11 @@ _KNOBS = (
     "TUNE_SEQ_LEN",
     "CALIBRATION_SEQS",
     "EVAL_SEQS",
+    "FACTOR_MODE",
+    "ABLATION",
+    "LAYER_SCOPE",
+    "PAPER_FAITHFUL",
+    "STE_FLIP_PASS_BUDGET",
     "DRY_RUN",
 )
 
@@ -109,12 +114,31 @@ def test_dry_run_announces_nothing_it_need_not_and_the_advisories_it_must():
     assert "SEQ_LEN=512 is a diagnostic geometry" in default.stderr
     assert "rank=8 solver=admm seq_len=512" in default.stderr
     assert "run-ptq-container: model=" not in default.stdout
+    # A launch that does not claim paper fidelity is not running the paper's
+    # method (gate-shaped stage budgets, TuneFP at one step): the wrapper says
+    # so, and the flag never reaches the command line unasked.
+    assert "PAPER_FAITHFUL unset" in default.stderr
+    assert "'--paper-faithful'" not in default.stdout
+    assert "paper_faithful=0 ste_flip_pass_budget=0" in default.stderr
 
-    # The claimable split run: eval geometry and tune window both chosen -> silent.
-    split = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048", TUNE_SEQ_LEN="512")
+    # The claimable split run: eval geometry, tune window AND the paper-faithful
+    # claim all chosen -> silent.
+    split = _launch(
+        RANK="512", SOLVER="svd", SEQ_LEN="2048", TUNE_SEQ_LEN="512", PAPER_FAITHFUL="1"
+    )
     assert split.returncode == 0
     assert "note:" not in split.stderr, split.stderr
     assert "rank=512 solver=svd seq_len=2048" in split.stderr
+    assert "paper_faithful=1" in split.stderr
+    assert "'--paper-faithful'" in split.stdout
+
+    # The discrete flip pass is a STRICT PASSTHROUGH: unset means the driver's
+    # own default, set means the flag and its value reach the driver.
+    flip = _launch(STE_FLIP_PASS_BUDGET="4")
+    assert flip.returncode == 0, flip.stderr
+    assert "'--ste-flip-pass-budget' '4'" in flip.stdout
+    assert "ste_flip_pass_budget=4" in flip.stderr
+    assert "'--ste-flip-pass-budget'" not in default.stdout
 
     # The OOM-shaped launch is ANNOUNCED, not refused: seq 2048 with the tune
     # window left unset is the geometry that died at the ceiling, so the wrapper
