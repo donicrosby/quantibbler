@@ -46,12 +46,14 @@ and `push` to `main` (never `pull_request_target`), no secrets:
    gate's code path executes end-to-end and the report/exit contract
    holds — it makes no detection or abort-coverage claim.
 6. **abort-leg** — the weights-cached real-checkpoint leg: restores the
-   Qwen3-0.6B checkpoint + wikitext snapshot from the cache (seeded by a
-   manual `workflow_dispatch` seed job), runs coder's recorded abort
-   command fully offline, and asserts abort-before-block-3, minutes-not-
-   tens-of-minutes wall time, `status: failed` + `probe_abort` fields +
-   history in the report, and nonzero exit. A cache miss fails the job —
-   fail-closed, never a silent live download; re-warm via the seed job.
+   Qwen3-0.6B checkpoint + wikitext snapshot from the cache (seeded by the
+   **self-seeding** seed job, which restore-looks-up first — a hit is a no-op,
+   a miss re-fetches — so a cold cache heals without a human in the loop), runs
+   coder's recorded abort command fully offline, and asserts abort-before-
+   block-3, minutes-not-tens-of-minutes wall time, `status: failed` +
+   `probe_abort` fields + history in the report, and nonzero exit. A cache miss
+   fails the job — fail-closed, never a silent live download; recovery is the
+   next push to main, or a manual dispatch.
 
 ## Impact
 

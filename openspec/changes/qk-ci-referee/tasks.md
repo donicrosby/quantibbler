@@ -5,8 +5,8 @@
 - [x] (coder) Rehearse every job's command body locally in the sandbox and record each leg's real output (the lean/full/rust numbers, the smoke's offline run, the abort leg's 26–70 s abort with the recorded command) — CI YAML must not contain a command that has never been executed.
 - [ ] (bug-hunter) Review: every `uses:` line is a full SHA; no `pull_request_target`; no unrestricted `permissions`; full-python extras exactly `torch hf kernels`; openspec loop one-id-per-invocation with `set -e` semantics; lean job's absence-family assert precedes the skip-count parse; smoke asserts `exit_code == verdict_exit_code(status)` on the real report offline and claims nothing beyond plumbing; abort leg is offline-only with fail-closed cache miss; seed job is never-skippable with its network gated at step level (delta 2026-10-27 — see the section below, which supersedes the earlier `workflow_dispatch`-only shape).
 - [ ] (sec-eng) Threat pass: no secret access from PR runs (`secrets: none`), action SHAs match declared upstream heads, smoke/abort jobs cannot become executors (no `pull_request_target`, contents read-only), the seed job's live-network allowance cannot be triggered by PR content.
-- [ ] (orchestrator) `npx --yes @fission-ai/openspec validate qk-ci-referee --strict`; fail-fast already landed (b5712d5), so sequencing is clear; scoped stage + commit (workflow + change dir, one commit); fenced push; watch the first real CI run — the push to main itself triggers the workflow, which is this change's own acceptance test.
-- [ ] (orchestrator + team) Record the first CI run's verdict per job in this tasks file — the repo's first independent referee result — and re-run the seed job if the abort leg's cache needs warming before the first green.
+- [x] (orchestrator) `npx --yes @fission-ai/openspec validate qk-ci-referee --strict`; fail-fast already landed (b5712d5), so sequencing is clear; scoped stage + commit (workflow + change dir, one commit); fenced push; watch the first real CI run — the push to main itself triggers the workflow, which is this change's own acceptance test. **DONE:** commits `a91684d` (tune/eval split + `_ABORT_IDENTITY` derivation + OOM advisory) and `b8815ce` (CI auto-seed + referee pins), pushed `f438177..b8815ce` with `PUSH_RC=0`, fence restored, key cleaned.
+- [x] (orchestrator + team) Record the first CI run's verdict per job in this tasks file — the repo's first independent referee result. **DONE — run `39514036948` on `b8815ce` (event `push`), conclusion `success`: 7/7 jobs green.** Per job, **read back from the GitHub API rather than relayed**: `seed the weights cache` ✅ · `lean python` ✅ · `full python` ✅ · `rust kernels` ✅ · `openspec` ✅ · `driver smoke` ✅ · `abort leg` ✅. Step-level proof the delta works in the wild: the seed job's **lookup ran unconditionally** (step 4 success on a cold cache), the **fetch self-ran with no manual dispatch** (step 5), the "already seeded" no-op branch correctly **skipped** (step 6), the save succeeded (step 7); then the abort leg's fail-closed restore **hit** that freshly seeded cache (step 5) and executed the recorded abort command for real (step 6). No job skipped, no seed chore, no red mail.
 
 ## Evidence: workflow authorship and the command rehearsals (coder, 2026-10-20)
 
@@ -17,7 +17,7 @@ the lean interpreter at `/opt/data/tmp/ci-lean-venv`, because the sandbox has an
 active `VIRTUAL_ENV` of its own that must not be pruned; in CI those are the
 default `$PWD/.venv` / `.venv-lean` and nothing else changes.
 
-### Task 1 — `.github/workflows/ci.yml` (six jobs + a workflow_dispatch-only seed job)
+### Task 1 — `.github/workflows/ci.yml` (six jobs + a seed job; the seed was `workflow_dispatch`-only as authored — superseded by the self-seeding delta at the end of this file)
 
 - Actions are pinned by full commit SHA, **resolved live against the GitHub API
   while authoring** (never from memory), each line carrying repo + release
@@ -38,7 +38,9 @@ default `$PWD/.venv` / `.venv-lean` and nothing else changes.
   validates one id per invocation with the CLI pinned to `1.14.3` and fails closed
   on an empty glob; smoke job is labeled plumbing-only and offline; abort leg
   restores the weights cache with `fail-on-cache-miss: true`; the seed job is the
-  only place network is allowed and runs only on `workflow_dispatch`.
+  only place network is allowed — **never skippable, its fetch/save steps gated at
+  step level** (as authored it ran only on `workflow_dispatch`; superseded by the
+  self-seeding delta at the end of this file).
 - YAML validated: `uvx --from yamllint yamllint .github/workflows/ci.yml` →
   **rc 0, no findings** (config committed as `.yamllint.yaml`: `relaxed` plus
   `line-length: max 200`, because the deliberate provenance prose would otherwise
@@ -376,3 +378,69 @@ battery specified up front and run against the REAL workflow text.
   run's abort leg *executes* rather than skips is the post-landing
   `pr-proof-abort-leg` run (planner pre-committed), and that run id is this
   delta's evidence — not a local rehearsal.
+
+### Referee-only hardening cycle (coder, 2026-10-27) — after the first 7/7
+
+@planner's contract for this commit, implemented as written: the
+parse-don't-enumerate route for the seed-shape pin, `pyyaml` as an explicit
+test-harness dependency, an extended battery, and the stale *current-mechanism*
+prose corrected. The frozen decision was **no regex enumeration** — a text
+matcher for a step's condition must enumerate YAML's key spellings *and* its
+block boundaries by hand, and both enumerations leaked (measured last cycle: three
+poison forms returned `rc=0`, i.e. the pin missed them).
+
+- [x] (coder) `_step_condition` (hand-rolled text scan) **removed**.
+  `_seed_shape_findings()` now `yaml.safe_load`s the workflow and inspects the
+  parsed structure: no `if` key on the seed job; no `if` on the lookup step;
+  `with["lookup-only"] is True`; both network steps' `if` VALUE exactly equal to
+  `_SEED_GATE`; `jobs["abort-leg"]["needs"] == "seed-weights"`. A workflow that
+  does not parse is itself a finding, never a traceback. `_triggers()` reads
+  `on:` under both `True` (PyYAML resolves the bare key `on` to the boolean) and
+  `"on"`, and the positive pin now asserts the trigger set as an **exact key
+  set** — so an added `pull_request_target` reds instead of riding along as an
+  unnoticed extra.
+- [x] (coder) `pyyaml>=6,<7` added to the dev group with the regenerated
+  `uv.lock` (**additive only**: two dev-group edges, no version churn), and
+  installed **explicitly** in the lean CI recipe
+  (`uv pip install -e . pytest "pyyaml>=6,<7"`) because PyYAML is not in the
+  product floor — measured: the lean interpreter raised
+  `ModuleNotFoundError: No module named 'yaml'` before this commit. The lean spec
+  scenario now names the harness dependency, and a pin asserts `pyyaml` is in the
+  lean recipe. The torch/transformers/tokenizers absence proof is unchanged.
+- [x] (coder) Battery extended from four rows to **nine**, each applied to the
+  REAL workflow text, each asserting non-no-op first, **and each now also
+  asserting the poison still PARSES** (a syntax error would red the parser rather
+  than the pin, proving nothing about the checks). Rows: job-level `if`
+  reinstated · PR guard dropped from the fetch · `needs` dropped · lookup
+  conditional placed first in the step · the same condition placed last · a blank
+  line inside the step then the condition · a quoted `'if':` key · `if :` with a
+  spaced colon · `lookup-only` flipped to `false`. `tests/test_ci_referee.py` →
+  **62 passed**.
+- [x] (coder) **Poisoned-tree proof on the real file's bytes** (the proof this pin
+  owes, and the one the previous pin had), run on a mirror at `/tmp/poison-demo`
+  so the shared tree was never written — verified by hash, `ci.yml` identical
+  before and after. Healthy mirror control green (10 passed); **all seven poison
+  forms CAUGHT**: `blank-line-inside-step`, `quoted-'if'-key`,
+  `spaced-'if :'-colon`, `lookup-only->false`, `cond-before-uses`,
+  `cond-after-lookup-only`, `job-level-if-back`. The first three are exactly the
+  spellings the removed text matcher escaped; the parser closes them by
+  construction.
+- [x] (coder) Stale *current-mechanism* prose corrected, historical "was
+  `workflow_dispatch`-only" passages preserved: `proposal.md` abort-leg bullet;
+  `design.md` "Weights cache mechanism" (self-seeding on push, unconditional
+  lookup, PR-gated fetch/save, the per-repo 10 GB / 7-day-LRU threat model,
+  next-push recovery) and the cache-poisoning residual (the reason is now the
+  step-level PR gate, not "dispatch-only"); `tasks.md` Task-1 heading/prose carry
+  a supersede pointer instead of describing the old shape as current. `tools/ci/*`
+  left **untouched**.
+- [x] (coder) First main run recorded above: **`39514036948`, 7/7 green**, read
+  back per job from the GitHub API — the run's own job list, not a relay.
+- [ ] (orchestrator + @user) **PR-shaped proof — deliberately UNCHECKED.** The
+  in-the-wild evidence that a PR run's abort leg *executes* rather than skips is
+  the post-landing `pr-proof-abort-leg` branch plus one no-op PR (one user click).
+  Its run id closes @sec-eng's runner-semantics premise and @bug-hunter's
+  in-the-wild trigger negatives. Nothing local can settle it.
+- **Honesty boundary:** the battery and the mirror proof show the PINS reject
+  mutations *in the file*. Runner trigger/skip semantics stay a runner fact: the
+  7/7 establishes them for `push`, and the no-op PR is what establishes them for
+  `pull_request`.

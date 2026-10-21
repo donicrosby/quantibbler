@@ -1035,6 +1035,7 @@ dev = [
     { name = "maturin" },
     { name = "pre-commit" },
     { name = "pytest" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
@@ -1054,6 +1055,7 @@ dev = [
     { name = "maturin", specifier = ">=1.14,<2" },
     { name = "pre-commit", specifier = ">=4.6,<5" },
     { name = "pytest", specifier = ">=9,<10" },
+    { name = "pyyaml", specifier = ">=6,<7" },
 ]
 
 [[package]]

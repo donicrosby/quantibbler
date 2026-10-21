@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TOOLS_CI = REPO_ROOT / "tools" / "ci"
@@ -447,6 +448,17 @@ def test_workflow_smoke_is_plumbing_only_and_the_abort_leg_is_offline_and_fail_c
 # seed. The delta moves that property to STEP level: the job is never
 # skippable, the abort leg `needs:` it, and only the network steps are gated on
 # the event. That is what makes the leg execute for real on every run.
+#
+# These pins PARSE the workflow (`yaml.safe_load`) and assert on the resulting
+# structure instead of matching its text. Measured reason: a text matcher for a
+# step's condition has to enumerate YAML's spellings of a key AND its block
+# boundaries by hand, and each enumeration leaked — a blank line inside a step
+# block ended the scan before a later `if:` (legal YAML, and what a formatter
+# emits), a quoted `'if':` key never matched `startswith("if:")`, and `if :`
+# with a spaced colon matched neither. A parser closes all three by
+# construction: every spelling resolves to the same dict key, blank lines and
+# comments are its problem rather than ours, and a condition is compared as a
+# VALUE (exactly equal to the gate) rather than matched as text.
 # ---------------------------------------------------------------------------
 
 _SEED_FETCH_STEP = "Fetch the pinned snapshots (live network here and only here)"
@@ -455,89 +467,142 @@ _SEED_LOOKUP_STEP = "Is this key already seeded?"
 _SEED_GATE = "steps.seeded.outputs.cache-hit != 'true' && github.event_name != 'pull_request'"
 
 
-def _step_condition(block: str, step_name: str) -> str | None:
-    """The `if:` line of one named step, or None when that step has no `if:`."""
-    lines = block.splitlines()
-    for index, line in enumerate(lines):
-        if line.strip() != f"- name: {step_name}":
-            continue
-        for following in lines[index + 1 :]:
-            stripped = following.strip()
-            if not stripped or stripped.startswith("- name:"):
-                return None
-            if stripped.startswith("if:"):
-                return stripped
-        return None
-    raise AssertionError(f"step {step_name!r} not found in the seed job")
+def _workflow_yaml(text: str) -> dict:
+    """The workflow as parsed YAML (comments and blank lines are its problem)."""
+    return yaml.safe_load(text)
+
+
+def _triggers(workflow: dict) -> dict:
+    """The `on:` block.
+
+    YAML 1.1 resolves the bare key `on` to the boolean `True`, NOT the string
+    `"on"` — read both spellings or the trigger set silently reads empty.
+    """
+    for key in (True, "on"):
+        if key in workflow:
+            return workflow[key] or {}
+    return {}
+
+
+def _named_steps(job: dict) -> dict[str, dict]:
+    """One job's steps, by name."""
+    return {
+        step["name"]: step
+        for step in job.get("steps") or []
+        if isinstance(step, dict) and isinstance(step.get("name"), str)
+    }
 
 
 def _seed_shape_findings(text: str) -> list[str]:
     """Findings for the seed job's never-skippable, step-gated shape.
 
-    Reads the uncommented text, so the job's own prose can never satisfy a
-    check. The four properties are exactly the ones the delta froze: no
-    job-level `if`, an unconditional lookup restore, the literal event+cache
-    gate on both network steps, and the abort leg's `needs: seed-weights`.
+    The four properties the delta froze, read off the PARSED structure: no
+    job-level `if`; a lookup restore with no condition whose `with.lookup-only`
+    is `True`; the event+cache gate as the exact `if` VALUE on both network
+    steps; and the abort leg's `needs: seed-weights`. A workflow that does not
+    parse is itself a finding — an unreadable referee certifies nothing.
     """
     findings: list[str] = []
-    seed = _job_block(_uncommented(text), "seed-weights")
-    if re.search(r"^    if:", seed, re.M):
+    try:
+        workflow = yaml.safe_load(text)
+    except yaml.YAMLError as error:
+        return [
+            f"the workflow does not parse as YAML, so nothing about it can be "
+            f"trusted (that is a finding, never a traceback): {error}"
+        ]
+    if not isinstance(workflow, dict):
+        return ["the workflow does not parse to a mapping"]
+    jobs = workflow.get("jobs")
+    if not isinstance(jobs, dict):
+        return ["the workflow has no `jobs` mapping"]
+    seed = jobs.get("seed-weights")
+    if not isinstance(seed, dict):
+        return ["the workflow has no `seed-weights` job"]
+    if "if" in seed:
         findings.append(
             "the seed job carries a job-level `if:` — a condition-skip there "
             "propagates through the abort leg's `needs:` and turns a real run "
             "into a green no-run; the no-PR-content property belongs on the "
             "fetch/save STEPS, not on the job"
         )
-    lookup = _step_condition(seed, _SEED_LOOKUP_STEP)
-    if lookup is not None:
+    steps = _named_steps(seed)
+    lookup = steps.get(_SEED_LOOKUP_STEP)
+    if lookup is None:
         findings.append(
-            f"the lookup-only restore step is conditional ({lookup!r}) — it must "
-            "run unconditionally on all three triggers, or a PR run loses the "
-            "read-across-scope cache hit it relies on"
+            f"the seed job has no {_SEED_LOOKUP_STEP!r} step — without the "
+            f"lookup a hit is not a no-op and every run downloads the snapshots"
         )
-    for step in (_SEED_FETCH_STEP, _SEED_SAVE_STEP):
-        condition = _step_condition(seed, step)
-        if condition != f"if: {_SEED_GATE}":
+    else:
+        if "if" in lookup:
             findings.append(
-                f"the {step!r} step must be gated on exactly {_SEED_GATE!r} "
-                f"(got {condition!r}) — a cache-miss gate alone would let a PR "
-                f"run download weights, and the event guard alone would re-save "
-                f"on every hit"
+                f"the lookup-only restore step carries a condition "
+                f"({lookup['if']!r}) — it must run unconditionally on all three "
+                f"triggers, or a hit stops being a no-op and the save reds "
+                f"'cache already exists' on every push (the chore-red the "
+                f"idempotency gate exists to prevent)"
             )
-    abort = _job_block(_uncommented(text), "abort-leg")
-    if not re.search(r"^    needs:[ \t]*seed-weights[ \t]*$", abort, re.M):
+        lookup_with = lookup.get("with")
+        if not isinstance(lookup_with, dict) or lookup_with.get("lookup-only") is not True:
+            findings.append(
+                f"the lookup step must set `lookup-only: true` in its `with` "
+                f"block (got {lookup_with!r}) — without it the restore downloads "
+                f"the whole cache on every run before the fetch decision is made"
+            )
+    for name in (_SEED_FETCH_STEP, _SEED_SAVE_STEP):
+        step = steps.get(name)
+        if step is None:
+            findings.append(f"the seed job has no {name!r} step")
+        elif step.get("if") != _SEED_GATE:
+            findings.append(
+                f"the {name!r} step's `if` is {step.get('if')!r}, not exactly "
+                f"{_SEED_GATE!r} — a cache-miss gate alone lets a PR run "
+                f"download weights, and the event guard alone re-saves on every hit"
+            )
+    abort = jobs.get("abort-leg")
+    if not isinstance(abort, dict):
+        findings.append("the workflow has no `abort-leg` job to check `needs:` on")
+    elif abort.get("needs") != "seed-weights":
         findings.append(
-            "the abort leg does not declare `needs: seed-weights` — without it "
-            "the leg can start before the seed's one download and red fail-closed "
-            "on a cold cache"
+            f"the abort leg's `needs` is {abort.get('needs')!r}, not "
+            f"'seed-weights' — without the dependency the leg can start before "
+            f"the seed's one download and red fail-closed on a cold cache"
         )
     return findings
 
 
 def test_seed_job_is_never_skippable_and_the_network_is_gated_at_step_level():
-    """The delta's binding shape, asserted on the real workflow.
+    """The delta's binding shape, asserted on the real workflow's parsed structure.
 
-    Positive: the trigger set still names `pull_request`, `workflow_dispatch`,
-    and push-to-main. Negative: no job-level condition can skip the seed — and
-    through the leg's `needs:` skip the leg too — because the PR guard lives on
-    the fetch and save steps, where it cannot propagate.
+    Positive: the trigger set names `pull_request`, `workflow_dispatch` and
+    push-to-main — asserted as an exact key set, so an added trigger (say the
+    privileged `pull_request_target`) is a red rather than an unnoticed extra.
+    Negative: no job-level condition can skip the seed — and through the leg's
+    `needs:` skip the leg too — because the PR guard lives on the fetch and save
+    steps, where it cannot propagate.
     """
-    text = _uncommented(WORKFLOW.read_text())
+    text = WORKFLOW.read_text()
     findings = _seed_shape_findings(text)
     assert findings == [], findings
-    for trigger in ("  pull_request:\n", "  workflow_dispatch:\n", "    branches: [main]\n"):
-        assert trigger in text, trigger
-    assert "pull_request_target" not in text
-    # The gate is on the network steps and only there: the lookup restore is
-    # unconditional, so a PR run reads main's cache but never writes one.
-    seed = _job_block(text, "seed-weights")
-    assert _step_condition(seed, _SEED_LOOKUP_STEP) is None
-    assert _step_condition(seed, _SEED_FETCH_STEP) == f"if: {_SEED_GATE}"
-    assert _step_condition(seed, _SEED_SAVE_STEP) == f"if: {_SEED_GATE}"
+    workflow = _workflow_yaml(text)
+    triggers = _triggers(workflow)
+    assert set(triggers) == {"pull_request", "push", "workflow_dispatch"}, triggers
+    assert triggers["push"]["branches"] == ["main"], triggers["push"]
+    assert "pull_request_target" not in _uncommented(text)
+    # Re-assert each property directly, so this test names them itself instead
+    # of only trusting the findings function's silence.
+    jobs = workflow["jobs"]
+    seed = jobs["seed-weights"]
+    assert "if" not in seed
+    steps = _named_steps(seed)
+    assert "if" not in steps[_SEED_LOOKUP_STEP]
+    assert steps[_SEED_LOOKUP_STEP]["with"]["lookup-only"] is True
+    assert steps[_SEED_FETCH_STEP]["if"] == _SEED_GATE
+    assert steps[_SEED_SAVE_STEP]["if"] == _SEED_GATE
+    assert jobs["abort-leg"]["needs"] == "seed-weights"
 
 
 def _reinstate_the_job_level_if(text: str) -> str:
-    """Bypass 1: buy the no-PR property back with a job-level skip."""
+    """Bypass: buy the no-PR property back with a job-level skip."""
     return text.replace(
         "  seed-weights:\n",
         "  seed-weights:\n    if: github.event_name != 'pull_request'\n",
@@ -546,22 +611,69 @@ def _reinstate_the_job_level_if(text: str) -> str:
 
 
 def _drop_the_pr_guard_from_the_fetch(text: str) -> str:
-    """Bypass 2: the fetch goes back to cache-miss-only — a PR run downloads."""
+    """Bypass: the fetch goes back to cache-miss-only — a PR run downloads."""
     return text.replace(" && github.event_name != 'pull_request'", "", 1)
 
 
 def _drop_the_needs_from_the_abort_leg(text: str) -> str:
-    """Bypass 3: the leg can start before the seed and red on a cold cache."""
+    """Bypass: the leg can start before the seed and red on a cold cache."""
     return text.replace("    needs: seed-weights\n", "", 1)
 
 
-def _condition_the_lookup_restore(text: str) -> str:
-    """Bypass 4: a PR run loses the cache hit it reads across scope."""
+def _condition_the_lookup_before_its_uses(text: str) -> str:
+    """Bypass: the condition placed first in the lookup step's key list."""
     return text.replace(
         f"      - name: {_SEED_LOOKUP_STEP}\n",
         f"      - name: {_SEED_LOOKUP_STEP}\n        if: github.event_name != 'pull_request'\n",
         1,
     )
+
+
+def _condition_the_lookup_after_its_lookup_only(text: str) -> str:
+    """Bypass: the SAME condition placed last in the step's key list."""
+    return text.replace(
+        "          lookup-only: true\n",
+        "          lookup-only: true\n        if: github.event_name != 'pull_request'\n",
+        1,
+    )
+
+
+def _blank_line_then_condition_the_lookup(text: str) -> str:
+    """Bypass: a blank line inside the step, then the condition.
+
+    Legal YAML (a blank line between a mapping's keys) and exactly what a
+    formatter or a readability edit emits. It terminated the old text
+    matcher's hand-rolled scan before it ever reached the `if:`.
+    """
+    return text.replace(
+        f"      - name: {_SEED_LOOKUP_STEP}\n        id: seeded\n",
+        f"      - name: {_SEED_LOOKUP_STEP}\n        id: seeded\n\n"
+        f"        if: github.event_name != 'pull_request'\n",
+        1,
+    )
+
+
+def _quote_the_lookup_condition_key(text: str) -> str:
+    """Bypass: `'if':` — valid YAML that no `startswith("if:")` can match."""
+    return text.replace(
+        f"      - name: {_SEED_LOOKUP_STEP}\n",
+        f"      - name: {_SEED_LOOKUP_STEP}\n        'if': github.event_name != 'pull_request'\n",
+        1,
+    )
+
+
+def _space_the_lookup_condition_colon(text: str) -> str:
+    """Bypass: `if :` — valid YAML (PyYAML reads a plain `if` key), one char wider."""
+    return text.replace(
+        f"      - name: {_SEED_LOOKUP_STEP}\n",
+        f"      - name: {_SEED_LOOKUP_STEP}\n        if : github.event_name != 'pull_request'\n",
+        1,
+    )
+
+
+def _drop_the_lookup_only_flag(text: str) -> str:
+    """Bypass: `lookup-only: false` — every run downloads before deciding."""
+    return text.replace("          lookup-only: true\n", "          lookup-only: false\n", 1)
 
 
 @pytest.mark.parametrize(
@@ -570,19 +682,35 @@ def _condition_the_lookup_restore(text: str) -> str:
         pytest.param(_reinstate_the_job_level_if, id="job-level-if-reinstated"),
         pytest.param(_drop_the_pr_guard_from_the_fetch, id="pr-guard-dropped-from-fetch"),
         pytest.param(_drop_the_needs_from_the_abort_leg, id="needs-dropped"),
-        pytest.param(_condition_the_lookup_restore, id="lookup-restore-conditional"),
+        pytest.param(_condition_the_lookup_before_its_uses, id="lookup-conditional-before-uses"),
+        pytest.param(
+            _condition_the_lookup_after_its_lookup_only,
+            id="lookup-conditional-after-lookup-only",
+        ),
+        pytest.param(
+            _blank_line_then_condition_the_lookup, id="lookup-conditional-after-blank-line"
+        ),
+        pytest.param(_quote_the_lookup_condition_key, id="lookup-conditional-quoted-if-key"),
+        pytest.param(_space_the_lookup_condition_colon, id="lookup-conditional-spaced-colon"),
+        pytest.param(_drop_the_lookup_only_flag, id="lookup-only-flipped-to-false"),
     ],
 )
 def test_seed_shape_pin_rejects_every_bypass(mutate):  # noqa: ANN001
-    """Bug-hunter's four rows, each applied to the REAL workflow text.
+    """Every bypass against the REAL workflow, each required to red.
 
-    Each row asserts its own mutation is not a no-op first, so the battery
-    fails loudly if the YAML ever drifts out from under it instead of going
-    quietly green.
+    Three assertions per row, in this order: the mutation is not a no-op (so a
+    drifted file fails the battery loudly instead of going quietly green); the
+    poison still PARSES as YAML (a syntax error would red the parser, not the
+    pin, and would prove nothing about the checks); and the pin now reports at
+    least one finding.
     """
-    text = _uncommented(WORKFLOW.read_text())
+    text = WORKFLOW.read_text()
     mutated = mutate(text)
     assert mutated != text, "the mutation is a no-op: the workflow drifted out from under it"
+    try:
+        yaml.safe_load(mutated)
+    except yaml.YAMLError as error:
+        pytest.fail(f"the poison is a YAML syntax error, so a red would prove nothing: {error}")
     assert _seed_shape_findings(mutated), mutated
 
 
@@ -704,6 +832,10 @@ def test_workflow_never_resolves_dependencies_unlocked():
 
     lean = _job_block(text, "lean-python")
     assert "uv pip install -e . pytest" in lean
+    # The referee test file imports yaml and PyYAML is NOT in the product floor,
+    # so the lean recipe must install it explicitly: an uninstalled harness
+    # dependency would fail the whole lean leg at collection.
+    assert "pyyaml" in lean, "the lean recipe must install the referee's harness dependency"
     assert "--locked" not in lean, "the lean leg floats on the dependency floor by design"
 
 

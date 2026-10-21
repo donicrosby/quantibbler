@@ -17,7 +17,7 @@ The workflow's full-python job SHALL sync the `torch`, `hf`, and `kernels` extra
 #### Scenario: lean_python_interpreter_built_without_extras
 
 - **WHEN** the lean-python job builds its interpreter
-- **THEN** it uses the proven recipe — a fresh `uv venv` with `uv pip install -e . pytest` and no extras — so the absence assertion tests the shipped dependency floor, not a hand-pruned environment
+- **THEN** it uses the proven recipe — a fresh `uv venv` with `uv pip install -e . pytest` plus the referee's test-harness dependency `pyyaml` (which is not in the product floor) and no extras — so the absence assertion still tests the shipped dependency floor, not a hand-pruned environment
 
 ### Requirement: CI SHALL execute the driver end-to-end on a tiny offline model and assert the gate contract
 

@@ -59,14 +59,32 @@
 
 ## Weights cache mechanism (abort leg)
 
-- **Seed job**: a `workflow_dispatch`-only job downloads the
-  Qwen3-0.6B snapshot + wikitext-2 parquet once (live network allowed
-  ONLY here, a human-triggered one-shot) and saves them to the actions
-  cache under a key naming the checkpoint repo + revision.
-- **Abort leg**: strictly offline — restores by that key; on cache miss
-  the job FAILS (fail-closed) rather than downloading silently; re-warm
-  is a manual seed-job run, which is also the documented recovery for
-  the 7-day-unused cache-eviction window.
+- **Seed job**: **never skippable** — it runs on all three triggers, so the abort
+  leg's `needs: seed-weights` can never inherit a condition-skip and turn a real
+  run into a green no-run. It restore-looks-up first: a hit is a pure no-op; a
+  miss re-fetches the pinned Qwen3-0.6B snapshot + wikitext-2 parquet (network
+  allowed ONLY in this job's fetch/save steps) and re-saves them under a key
+  naming the checkpoint repo + revision. The no-PR-content property therefore
+  lives at STEP level: the fetch and save steps carry
+  `cache-hit != 'true' && github.event_name != 'pull_request'`, while the
+  lookup-only restore is unconditional — restore reads ACROSS scope, save does
+  not, so a PR run can read main's cache and can never write one.
+- **Abort leg**: strictly offline — restores by that key; on cache miss the job
+  FAILS (fail-closed) rather than downloading silently. **Recovery is the next
+  push to main**, which self-heals the cache; a manual `workflow_dispatch` of
+  the same job remains available as the out-of-band lever.
+- **Threat model that makes this proportionate**: the key names the repo +
+  revision, and GitHub's cache allowance is a per-repo 10 GB cap with a 7-day
+  least-recently-used sweep — so there is no cross-repo collision to defend
+  against, eviction on an idle repo is the sweep doing its job, and the
+  per-push touch this job performs keeps its own cache the most-recently-used
+  one in the repo. Eviction stops being a failure mode and becomes a
+  self-healing hiccup that costs one download.
+- **Documented residual**: if the cache is evicted and a PR runs before the next
+  push to main, the PR's seed cannot fetch (the PR guard blocks network,
+  correctly), its lookup misses, and the abort leg reds fail-closed until that
+  push re-seeds — the design working, not a defect: a PR never fabricates a
+  weights cache.
 - Rationale: the leg's whole point is independent repeatable proof of
   the abort path; letting it download on miss would make the same run
   network-dependent and, worse, let a cache miss go unnoticed as a
@@ -113,8 +131,10 @@ it becomes load-bearing the day this public repo takes an outside PR.
   `contents: read` and no reachable secrets. Proportionate at this exposure;
   vendoring under a lockfile with integrity is the upgrade path if it grows.
 - Cache poisoning is not reachable: PR-facing jobs only RESTORE
-  (`fail-on-cache-miss: true`) and GitHub scopes cache keys per ref, so only the
-  dispatch-only seed job can save — and it verifies the content it saves
+  (`fail-on-cache-miss: true`), and the seed job's fetch and save steps are
+  gated on `github.event_name != 'pull_request'`, so no PR run can write a cache
+  entry — a PR's saves would land on the merge ref and be restorable only by
+  that PR's own re-runs. The content is verified at the point it is written
   (pinned-revision fetch, snapshot assert, revision↔key pair pinned by test).
 
 ## Implementation crystallization

@@ -59,11 +59,16 @@ jobs:
       # one with extras. Deliberately NOT `--locked` and not `uv sync`: this leg
       # floats on purpose, because "does the shipped floor still work" is its
       # signal. Do not "fix" it into determinism.
-      - name: Build the lean interpreter (uv venv + pip install -e . pytest, no extras)
+      # The referee test file pins this workflow's shape by PARSING it
+      # (`yaml.safe_load`), and PyYAML is not in the product floor, so the lean
+      # leg installs it explicitly here. It is a test-harness dependency: the
+      # absence assertion below still proves the PRODUCT floor cannot import
+      # torch/transformers/tokenizers.
+      - name: Build the lean interpreter (uv venv + pip install -e . pytest + pyyaml, no extras)
         run: |
           rm -rf .venv-lean
           uv venv --python 3.12 .venv-lean
-          VIRTUAL_ENV="$PWD/.venv-lean" uv pip install -e . pytest
+          VIRTUAL_ENV="$PWD/.venv-lean" uv pip install -e . pytest "pyyaml>=6,<7"
       # lean_python_asserts_absence_before_skips: absence is proven in THIS
       # interpreter before any count is parsed. A torch-synced run reporting
       # "lean" numbers is the failure mode this step exists to make impossible.

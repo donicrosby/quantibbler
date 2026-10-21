@@ -27,7 +27,12 @@ hf = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=9,<10", "pre-commit>=4.6,<5", "maturin>=1.14,<2"]
+# pyyaml is a TEST-harness dependency, not a product one: tests/test_ci_referee.py
+# parses .github/workflows/ci.yml with `yaml.safe_load` and asserts on the parsed
+# job/step structure, so no spelling of a key (`if:`, `'if':`, `if :`) can escape
+# the pin and blank lines are the parser's problem rather than the matcher's. The
+# lean CI leg installs it explicitly for the same reason — see that job's recipe.
+dev = ["pytest>=9,<10", "pre-commit>=4.6,<5", "maturin>=1.14,<2", "pyyaml>=6,<7"]
 
 [tool.uv]
 required-version = ">=0.12"
