@@ -14,17 +14,25 @@ the run record.
 
 #### Scenario: flip_counts_are_recorded
 
-- **WHEN** the STE stage runs for T_post steps on a binary-factor block
+- **WHEN** the STE stage runs its full per-linear budget on a binary-factor
+  block
 - **THEN** the run artifact records per-linear, per-factor sign-flip counts,
-  the latent relative movement, and the scale (s1, s2) movement for every
-  factorized linear in the block — the seven scoped linears — so neither a
-  zero-flip U/V nor a frozen scale can pass unnoticed
+  the latent relative movement, the scale (s1, s2) movement, and the
+  scheduled step count for every factorized linear in the block — the seven
+  scoped linears — so neither a zero-flip U/V nor a frozen scale can pass
+  unnoticed
 
 #### Scenario: sign_adaptation_is_effective_or_declared
 
 - **WHEN** the stage completes with zero accepted flips on a scoped linear
+  on the non-faithful (diagnostic) path
 - **THEN** either the run record declares the stage scale-only for that
   linear with the re-scoping marker, or the gate for this change fails
+- **AND** the paper-faithful path is exempt from the re-scope branch: it
+  records the measured zero crossings and completes as the paper's
+  mechanism — [NQ] prescribes sign+pack on whatever signs STE produced
+  (Algorithm 1 lines 20-23), never declaring a re-scope the paper does not
+  have
 
 #### Scenario: flip_acceptance_uses_block_reconstruction_objective
 
@@ -54,13 +62,42 @@ the run record.
   seven scoped linears — scheduled per-layer on the just-factorized linear
   per [NQ] Figure 3's right panel, never a partial set that refines only
   the O/G/U/D exemplar path
-- **AND** the Algorithm-1 line-19 T_post budget is allocated
-  deterministically across the block's factorized linears (equal split with
-  the remainder to the earliest linears in fixed order) and the artifact
-  records the per-layer step allocation
+- **AND** each linear's refinement consumes the FULL per-linear budget —
+  `epochs × (n // batch)` steps per [NQ] App. C (corpus line 3007: the
+  factorized tuning stage consists of 8 epochs at batch 1, so 8 × 128 =
+  1024 steps per linear at the protocol's calibration) — never a
+  block-pooled split across linears, and the artifact records each
+  linear's scheduled steps
 - **AND** the refinement parameter set is the paper's joint set (U, V, s1,
   s2) per [NQ] Eq. 10 and the Figure 3 caption (corpus line 577:
   "fine-tunes the continuous latent matrices and scales"): flip counts
   instrument the U/V sign crossings and scale movement is recorded per
   linear alongside them — omitting scales from the parameter set is a named
   deviation, never silent
+
+### Requirement: The paper-faithful path SHALL execute the paper's Stage 2 to 3 mechanism without extra-paper discrete stages
+
+On the paper-faithful path the latent factorization SHALL initialize per
+[NQ] Stage 2 — LB-ADMM, Eq. 7/8 balancing, Eq. 9 latents — with the greedy
+bit-flip polish disabled, and the Eq. 10 STE refinement SHALL run on those
+continuous latents and scales for the full per-linear budget before
+sign+pack (Algorithm 1 lines 20-23).
+
+#### Scenario: paper_faithful_disables_greedy_polish
+
+- **WHEN** a run configures paper_faithful
+- **THEN** the factorization event records polish_rounds 0 and the STE
+  stage receives the continuous balanced latents (Eq. 9 initializers),
+  never polish-binarized ±1 bits
+- **AND** the production path (paper_faithful unset) keeps the greedy
+  polish unchanged — this gate touches the faithful path only
+
+#### Scenario: paper_faithful_uses_the_paper_solver
+
+- **WHEN** a run configures paper_faithful
+- **THEN** the factorization solver is the paper's LB-ADMM with the App. C
+  linear penalty schedule over 400 factorization steps per weight matrix
+  (the pipeline's `lb_admm`, default `max_admm_iter=400`)
+- **AND** the SVD warm start — the measured production ablation — cannot
+  carry the faithful label (the fidelity verdict flips the label on
+  solver != admm)

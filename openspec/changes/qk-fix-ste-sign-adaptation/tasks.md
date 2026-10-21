@@ -86,10 +86,84 @@ carries `deviation: paper has no discrete sign-flip pass (design alt. 3)`, and
 `ste_flip_pass_budget` defaults to 0 (pass disabled -> the scale-only
 declaration path), so enabling it is an explicit, recorded act.
 
-**Known residual (documented, not fixed here).** When `total_steps < number
-of factorized linears` some linears receive a 0-step allocation. They are
-recorded with `declared = not_scheduled_zero_budget`, which is a declaration
-rather than a silent no-op, but the refinement genuinely did not run for
-them. At [NQ] App. C budgets (T_post = 8 epochs over the block's rows) the
-allocation is never degenerate; the residual only bites at test-scale
-budgets. The faithful run's record is the evidence that closes it.
+**Known residual (superseded by the 2026-10-21 pre-fire re-ruling).** The
+per-linear budget re-ruling (design.md amendment) removes the pooled
+allocation entirely: every scoped linear receives the full
+`epochs × (n // batch)` steps, so the zero-budget case cannot occur on any
+path. The `not_scheduled_zero_budget` declaration and the alloc machinery
+are deleted with the re-ruling.
+
+## Pre-fire amendments (2026-10-21, planner rulings)
+
+- [x] (coder) Per-linear full budget: delete the block-pool alloc split;
+  each linear's `_tune_latent_ste` call receives `steps=total_ste`
+  (`epochs × (n // batch)`); the per-linear schedule record lists the
+  full scheduled steps; the `not_scheduled_zero_budget` residual and its
+  note are removed. Update the stage-map `ste` deviation string
+  (`qk_report._STAGE_LINES`): per-layer scheduling follows Figure 3's
+  right panel, each linear consumes the full App. C budget — no split
+  language. Test: a 7-linear block at test budgets gives every linear
+  the full step count; assert no allocation array survives in the
+  record.
+- [x] (coder) Polish gate: `polish = factor_mode == "binary" and ablation
+  != "untuned-signs" and not cfg.paper_faithful`; the lb_admm event keeps
+  recording polish_rounds (0 on the faithful path). Test: paper_faithful
+  config -> polish_rounds 0 recorded and the STE stage receives
+  continuous latents (fixture whose balanced init is not all ±1);
+  non-faithful binary path unchanged (polish_rounds 4).
+- [x] (coder) Faithful zero-crossing semantics: under `cfg.paper_faithful`
+  skip the discrete-pass/scale-only fallback; record
+  `declared: paper_ste` with the measured zero crossings. Test both
+  paths: faithful records the measurement with no rescope marker and no
+  flip pass fired; diagnostic path keeps the ladder (discrete pass at
+  budget>0, scale-only declaration at 0 accepted flips).
+- [x] (coder) Rehearse the whole faithful surface on the tiny Qwen3
+  fixture with PAPER_FAITHFUL=1 SOLVER=admm: full per-linear budgets,
+  polish_rounds 0, declared paper_ste on every linear, empty
+  runtime_deviations, label true with all verdict conditions recorded.
+  Gates: `uv run pytest` full suite, `openspec validate
+  qk-fix-ste-sign-adaptation --strict`, pre-commit on the touched paths.
+
+## Pre-fire implementation notes (coder, 2026-10-21)
+
+Landed on `src/quantibbler/ptq/block_recon.py` (budget + faithful-path
+semantics), `src/quantibbler/qk_report.py` (stage-map `ste` deviation text)
+and `src/quantibbler/ptq/api.py` (Phase-1 hoist, from the sibling change).
+
+- **The pooled split is gone.** `alloc` and its `divmod` are deleted; every
+  scoped linear's `_tune_latent_ste` call takes `steps=total_ste` where
+  `total_ste = max(stage_latent.epochs * (n_rows // batch), 1)`. The `ste`
+  event carries `per_linear` + `total_steps` and NO `allocation` key; each
+  linear's record carries `scheduled_steps` (== `total_steps`) beside
+  `steps`. The `not_scheduled_zero_budget` declaration and the zero-budget
+  branch are removed with the re-ruling: no linear can complete unscheduled.
+- **Polished off, proven by the artifact.** `polish` gained
+  `and not cfg.paper_faithful`; the `lb_admm` event still carries the round
+  count, and `fidelity_verdict` reads it (a nonzero count denies the label).
+  Evidence: `test_scn_paper_faithful_disables_greedy_polish` (greedy_polish
+  spied — zero calls on the faithful path, one per scoped linear on the
+  production path) and `test_scn_paper_faithful_hands_ste_continuous_latents`
+  (the latents reaching STE are NOT all ±1).
+- **Faithful zero crossings.** On `cfg.paper_faithful` the stage declares
+  `paper_ste` unconditionally — no discrete flip pass fires, no scale-only
+  marker appears, and `ste_flip_pass_budget` is inert (asserted with a
+  nonzero budget). The diagnostic path keeps the ladder byte-for-byte.
+- **Rehearsal (real driver, tiny Qwen3, `--paper-faithful --solver admm
+  --max-admm-iter 400 --calibration-seqs 16`):** exit 0, `ppl_ratio
+  0.99999985`, `paper_faithful: true` with all eight verdict conditions true
+  and `runtime_deviations: []`. Per block: `total_steps 1024` (8 epochs × 128
+  rows at batch 1), all seven scoped linears `scheduled_steps 1024`,
+  `steps 1024`, `declared paper_ste`, zero crossings measured on all seven;
+  `polish_rounds 0`; `lb_admm` ×3; `phase1_statistics` executed once with
+  `deviation: null`. Evidence: `test_paper_faithful_run_records_the_algorithm1_stage_map`
+  (real driver run) plus `test_a_faithful_claim_on_the_svd_ablation_is_denied_by_the_computed_verdict`
+  and `test_a_split_tune_geometry_is_named_as_a_runtime_deviation` (the
+  computed verdict denying a claim on each axis).
+
+**Seen and NOT waived, for @planner:** the closed mechanism list does not
+name `max_admm_iter != 400`, so a faithful-flagged run with a shortened
+LB-ADMM schedule (App. C pins 400) still computes `paper_faithful: true`.
+Measured, not theorised: `--solver admm --max-admm-iter 2` on the tiny
+fixture diverges in block 0 (`||Wq||_F/||W||_F = 5.3e-08`), and the same run
+at 400 is clean. The rehearsal therefore pins 400. Adding a seventh
+condition would change the spec's enumeration, which belongs to you.

@@ -123,11 +123,13 @@ Algorithm 1 stage map (lines 2-5, 9-10, 12, 14-17, 19, 20-23, 26-27) is in
   tunable set. The guard's invariant ("the operative call always has >= 1
   in-block layer factorized") therefore holds for every block shape, and the
   skip is recorded, never silent.
-- **Statistics timing.** The block's RobustDiag statistics are now collected
-  once, before the factorization loop, on the pristine block — the same bytes
-  the previous (TuneFP-is-a-no-op) pipeline measured, and the reading closest
-  to Algorithm 1 lines 2-5. Collecting them mid-loop per group would have
-  required a second statistics pass with no algorithmic warrant.
+- **Statistics timing (SUPERSEDED by the pre-fire hoist below).** The block's
+  RobustDiag statistics were collected once, before the factorization loop, on
+  the pristine block — the same bytes the previous (TuneFP-is-a-no-op)
+  pipeline measured. That was still the wrong input: the pristine block was
+  fed the compressed-prefix stream (Algorithm 1 line 9's TUNING input), not
+  the raw calibration set. The Phase-1 hoist replaces the whole per-block pass
+  with one pre-loop whole-model pass (see the pre-fire notes below).
 - **Residual statistic.** `initial_residual_norm` is the RMS
   (`sqrt(mean squared error)`) of the pre-tune objective on the first step's
   batch, recorded alongside the gradient norm. Gradient-zero + residual-zero
@@ -155,3 +157,211 @@ Algorithm 1 stage map (lines 2-5, 9-10, 12, 14-17, 19, 20-23, 26-27) is in
   panel remains contested between readers (planner counts O/G/U/D, sec-eng
   counts G and U). design.md states only the load-bearing facts; the placement
   ruling depends on neither reading.
+
+**Follow-up, 2026-10-21: the geometry the stages ran at is now named too.**
+The stage map proves which STAGES executed; it cannot prove they ran at the
+paper's protocol. [NQ] states ONE sequence length (2048) for calibration and
+evaluation, so a run that slices the calibration rows into shorter tuning
+windows fires every stage with App. C budgets while the protocol's geometry is
+gone — a complete stage map over a deviant geometry is the same green-label
+class as every other defect this week. `qk_report.geometry_deviations()` now
+emits `{kind, detail}` entries for a split tune geometry, a non-protocol
+calibration row count (the protocol is 128 rows = 16 batches x 8), and a
+non-finite eval geometry, and every report path carries them as
+`runtime_deviations` (driven from the shared `_run_identity()`, so the abort
+and stage-failure reports cannot drift from the completion one). Evidence:
+`test_geometry_deviations_name_a_split_tune_geometry_and_row_count` (lean) and
+`test_a_split_tune_geometry_is_named_as_a_runtime_deviation` (real driver run
+with `--tune-seq-len` shorter than `--seq-len`).
+
+**Preflight of the proof-scale launch (measured, not estimated).** One
+decoder-block forward+backward on Qwen3-0.6B, 16 threads, inside the
+`quantibbler-ptq:latest` image: **150.6 ms at (1, 2048)**, 30.7 ms at
+(1, 512), 131.1 ms at (4, 512), 519.9 ms at (4, 2048). With App. C budgets
+(T_pre = T_post = 8 epochs) the block-step counts are 57,344 at bs=1 /
+14,336 at bs=4 over 28 blocks in the whole-sequence geometry, and 229,376 /
+57,344 in the 512-window geometry — so the **tuning stages alone are ~2.0-2.2
+hours** at every combination measured. The faithful run is an hours-long
+launch, not a days-long one. (First, un-warmed measurement of the same call
+read 666 ms; the 150.6 ms figure is a warmed three-step average, and the
+un-warmed number is recorded here so nobody re-cites it as the cost.)
+
+**Measured preflight of the hoist at the protocol's geometry (done, not
+estimated).** The whole-model statistics pass retains its chunk's N^2
+attention graph, so the chunk size is the memory knob once the pass runs the
+model instead of one block. Inside `quantibbler-ptq:latest` at the wrapper's
+32g memcg, one 8 x 2048 batch of token ids through Qwen3-0.6B:
+`chunk_rows=4` was **OOM-KILLED**; `chunk_rows=1` **completed at an 18.47 GB
+cgroup peak**, 42.3 s for the 8 rows / 197 linears (~1.7x margin under the
+cap). `_PHASE1_CHUNK_ROWS` is therefore 1, and the constant carries the
+measurement. At the fire's 16 batches that is ~11 min of Phase-1 wall on top
+of the tuning budget — inside the quoted 13.5-14.5 h. Evidence: the probe is
+`/opt/data/tmp/qk-phase1-probe/probe.py` (run with `CHUNK=4` and `CHUNK=1`);
+the constant is pinned by `test_phase1_chunking_is_bounded_for_real_models`.
+
+## Pre-fire amendments (2026-10-21, planner rulings)
+
+- [x] (coder) Fidelity verdict: reported `paper_faithful` = flag AND
+  `runtime_deviations` empty AND no mechanism deviation (lb_admm
+  polish_rounds > 0, ste discrete flip pass fired, ste scale-only
+  re-scope marker, vacuous-teacher event, stage failure, solver !=
+  admm); each condition evaluated and recorded in the report. Tests per
+  the delta's scenarios (lean where possible, no torch).
+- [x] (coder) Phase-1 statistics hoist: one pre-loop `collect_stats` pass
+  over the pristine model on the raw calibration batches (streamed D-7
+  path); `block_recon` consumes the pre-collected book (no per-block
+  stats collection); update the `_STAGE_LINES` phase1_statistics
+  deviation entry. Update the crystallization note "Statistics timing"
+  (the block weights were pristine but the input stream was the
+  compressed prefix — the hoist removes the input-side deviation). Tests:
+  block loop consumes the Phase-1 book (identity on a fixture);
+  stage-map entry carries no compressed-prefix note.
+- [x] (coder) Size the maximal complete-batch local evaluation window at
+  seq 2048; verify the probe and gate machinery is unchanged on the larger
+  held_out (they consume a slice and a ratio). Record the pinned number here.
+
+**Pinned local quality-gate window: `EVAL_SEQS=18` (NOT full WT2).**
+Measured on the pinned corpus + tokenizer, by running the driver's own sizer:
+WikiText-2's test shard tokenizes to **298,938** tokens = 145 complete
+2,048-token blocks + a 1,978-token remainder. `tokenize_chunks` requires
+`n_blocks >= n_chunks * BATCH` (8), so **18** batches is the largest that fits:
+144 rows = 294,912 tokens and 294,768 scored next-token predictions. This is
+99.310% of complete blocks but **98.653% of source tokens**; it omits one full
+block plus the remainder, so it is neither full-set nor paper-table-comparable.
+The driver refuses 19 (`wikitext yields 145 blocks of 2048; need 152`). Measured
+EVAL_SEQS=14 / 18 / 19 in one run: 14 OK, 18 OK, 19 refused. The probe consumes
+a 2-batch head slice and the gate consumes the ratio, so both keep their pinned
+semantics on the larger held-out set — and the same sizer path is exercised at
+seq 32 by the driver fixture tests.
+
+- [x] (coder) Bug Hunter should-fix: add a separate evaluation record on every
+  report path with evaluator kind, source tokens, full blocks, remainder,
+  selected blocks/tokens, scored predictions, both coverage fractions,
+  selection seed and ordered-index fingerprint, plus
+  `paper_table_comparable: false`. For paper-faithful-flagged runs on this
+  evaluator, fail preflight unless `eval_seqs == full_blocks // BATCH`
+  (18 on the pinned Qwen measurement); diagnostics may use smaller windows
+  but record them honestly. Keep evaluation comparability OUT of
+  `runtime_deviations` and the method-fidelity conjunction — the spec scopes
+  those to method/calibration — and expose the two verdicts side by side.
+  Tests: 14 fails faithful preflight, 18 passes with exact counts/coverage,
+  19 remains the existing overshoot refusal, and completion/abort/stage-failure
+  report shapes all carry the same evaluation record.
+
+  **Built.** `qk_report.evaluation_record()` (torch-free) derives every count
+  from `(source_tokens, seq_len, selected_blocks, batch)` so no field can be
+  passed in inconsistently; `EVAL_EVALUATOR` names the harness. The driver
+  splits `tokenize_chunks` into `_tokenize_blocks` returning
+  `(batches, selection record)` — the record comes from the SAME seeded pass
+  that built the batches, so the fingerprint cannot drift to a second
+  selection — and hashes the ordered picked indices (sha256, 16 hex). It lands
+  on `_run_identity`, so the abort and stage-failure builders inherit it via
+  `dict(identity_fields)`, and the completion literal carries the same object
+  beside `fidelity_conditions`.
+
+  **Preflight** fires before the solve: a faithful-flagged run whose
+  `eval_seqs != full_local_window_batches` fails with the number to use and
+  the coverage it would have published, before any quantization work. It is
+  raised as a `ValueError` (like the sizer's overshoot refusal beside it), not
+  `SystemExit`: the driver's single exit path belongs to the gate's verdict
+  (`test_report_driver_is_wired_to_the_gate` reds a `SystemExit` in `main`),
+  and a config refusal must not imply a completed run.
+
+  **Fixture numbers, measured** (tiny Qwen3 test corpus, seq 32): 6,015 tokens
+  → 188 blocks → max window 23 batches → 184 blocks / 5,888 tokens / 5,704
+  predictions = 97.87% of blocks, 97.50% of tokens. So the fixture exercises the
+  *gapped* case (188 % 8 = 4), not a lucky exact fit, and the three faithful
+  driver tests now pass `--eval-seqs 23` (computed in-test by mirroring the
+  driver's sizer rather than hardcoding, so a corpus change cannot silently
+  desynchronise the preflight).
+
+  Evidence: `test_evaluation_record_states_the_pinned_wikitext_coverage`
+  (298,938 → 145 blocks / 1,978 remainder / 18 max / 98.653% of tokens, lean),
+  `test_full_block_coverage_still_is_not_a_paper_table_row` (comparability is
+  `False` even at 100% coverage),
+  `test_an_undersampled_eval_window_does_not_enter_the_method_verdict`
+  (40 rows at 27.6% leaves `fidelity_verdict` true and
+  `geometry_deviations` empty — the separation, pinned),
+  `test_non_completion_report_shapes_carry_the_evaluation_record`,
+  `test_a_faithful_claim_is_refused_at_preflight_on_an_undersampled_eval_window`
+  (refuses `max-1`, names `max`, no report and no qpk1 left behind),
+  `test_an_eval_window_past_the_corpus_is_still_refused_by_the_sizer`
+  (`max+1` still hits the sizer's overshoot), and the record assertions inside
+  `test_paper_faithful_run_records_the_algorithm1_stage_map`.
+
+- [x] (coder) Hardening — required stages (planner ruling, 2026-10-21;
+  closes sec-eng's named residual after the empty-record repro): the
+  verdict SHALL deny when the stage record is missing a required stage.
+  `fidelity_verdict("admm", [], [], requested=True)` returns true with
+  every condition green today — a green label certifying nothing. Add a
+  fifth `required` column to `_STAGE_LINES` (data, not a parallel
+  constant); mark required exactly the stages the faithful-run test
+  asserts executed: `phase1_statistics`, `capture`, `tune_fp`, `lb_admm`,
+  `ste`, `sign_extract_pack`, `tune_scales_kd`. Derive run-level counts
+  from the same `stages` iteration `fidelity_conditions` already runs via
+  `_stage_pair` (both record shapes); count an invocation only when
+  `info.get("skipped")` is falsy and, for `tune_scales_kd`, only when
+  `artifact` is truthy — a skip-marked event is a recorded skip, not an
+  execution (sec-eng amendment); record one named condition per required
+  stage (`required_<key>_executed`, invocations > 0) in the conditions
+  dict. No new parameters, no stage_map dependency, no new report data —
+  the stage map already carries the evidence. Tests (lean where
+  possible): a requested record with one required stage dropped returns
+  false with that stage's condition named; a tune_fp-only-skipped record
+  (`skipped: "no_still_fp_remainder"`, no genuine fire) leaves
+  `required_tune_fp_executed` false; an fp-mode `tune_scales_kd` event
+  (`artifact` falsy) leaves `required_tune_scales_kd_executed` false; a
+  non-requested diagnostic record legitimately skipping `tune_scales_kd`
+  (fp measurement) is denied by the flag condition, not newly by a
+  required-stage condition; the faithful fixture record (all seven
+  fired) stays green; update condition-key assertions in
+  `test_qk_report.py` and the `fidelity_conditions` docstring.
+  Do not touch `qk-ci-referee/` or `qk-launch-attribution/`.
+
+  **Landed (2026-10-21).** `_STAGE_LINES` carries `required` as its fifth
+  column (all seven rows marked; the comment names the column). The verdict
+  counts executions inside the same `_stage_pair` iteration it already ran,
+  skipping skip-marked events and `tune_scales_kd` payloads whose `artifact`
+  is falsy, and reports one `required_<key>_executed` per marked row with no
+  `requested` gating. Tests added in `tests/test_qk_report.py`: the empty
+  record denies on all seven; a dropped required stage names itself; the two
+  skip-marker directions; a per-block skip does not false-deny a run-level
+  execution; the inventory's column is DATA (a monkeypatched `_STAGE_LINES`
+  moves the condition set with it). The ptq-tier faithful run's exact
+  condition dict gained the seven required keys, all true on the real
+  driver's tiny-fixture record — evidence the tiny fixture fires all seven.
+
+  **Crystallization (a decision the spec left open).** `stage_map`'s own
+  `invocations` / `executed` counting is UNCHANGED: it still counts a
+  skip-marked event as an invocation, because the stage map describes what
+  the driver EMITTED while the spec's "executed means fired, not merely
+  recorded" wording binds the VERDICT. The two can therefore disagree on a
+  skip-marked event, and the verdict is the conservative side. Recorded so
+  that divergence reads as a declared split, not drift; if a future change
+  wants the map stricter, that is a stage-map spec delta, not this task.
+- [ ] (bug-hunter) Verify on landed bytes: both poison directions
+  (dropped required stage → false + named; full faithful record → green),
+  plus the skip-marker directions — a tune_fp-skipped-only record and an
+  fp-mode tune_scales_kd event each leave their condition false; the
+  required column is the only inventory of the set, the empty-record
+  repro now denies, and no diagnostic path is newly denied.
+- [ ] (sec-eng) Re-audit the amended enumeration (the verdict you
+  audited gains required-stage conditions): fail-closed still holds on
+  garbage records, and the new conditions cannot be satisfied vacuously.
+
+### Post-fire follow-ups (2026-10-21)
+
+- [ ] (post-fire card) Resume can only deny, never bless: `stage_events`
+  is an in-process list and nothing persists it, so a faithful fire that
+  crashes in the tail (post `sign_extract_pack`, pre completion) and
+  resumes completes with a session record holding only `phase1` +
+  `tune_scales_kd` — five required-stage conditions false, label false on
+  a legitimate run (honest false-deny; cannot manufacture a vacuous green
+  because resume only ever shrinks the record and the config fingerprint
+  already kills cross-protocol resume). Fix: append-per-event JSONL
+  beside the checkpoints, fingerprint-bound by the existing
+  checkpoint-dir discipline; seed the sink on resume; missing log =
+  today's behavior — never synthesize events. Reading guidance until
+  then: a tail-resumed artifact's `paper_faithful: false` with missing
+  stages named is the resume artifact's shape, not a protocol deviation;
+  the per-block evidence lives in the fingerprinted checkpoints.

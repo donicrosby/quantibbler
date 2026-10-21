@@ -142,3 +142,53 @@ first." Consequence: sequential in-block factorization + the Figure 3
 TuneFP placement are in scope here (the former v1 non-goal is withdrawn);
 the three fix dirs land before any further diagnostic runs; the ladder
 fork fires only after a paper-faithful run exists.
+
+## Amendment (2026-10-21, planner, pre-fire: fidelity verdict + Phase-1 statistics)
+
+- **The label becomes a verdict (sec-eng's ruling, folded).** No unwaived
+  runtime deviation is compatible with `paper_faithful: true`. The
+  reported label is computed from the run's own record: the flag AND
+  `runtime_deviations` empty AND no mechanism-class deviation (polish
+  rounds > 0, a fired STE discrete flip pass, a scale-only re-scope
+  marker, a vacuous-teacher event, a stage failure, or solver != admm).
+  Informed-assumption markers (the TuneFP loss formula) are
+  documentation and do not flip the label. Each condition is recorded, so
+  the label is auditable from the artifact alone. The solver condition
+  follows the paper's letter: Algorithm 1 line 16 is LB-ADMM; the
+  pipeline's `solver=svd` is the measured production ablation and cannot
+  ride the faithful label.
+- **Phase-1 statistics (Algorithm 1 lines 2-5).** The landed stage map
+  names a real deviation: statistics are collected per block with the
+  compressed-prefix stream as input, where the paper collects them once
+  from the pristine model over raw X_cal. (Coder's crystallization note
+  "Statistics timing" calls the collection "pristine" — the block
+  WEIGHTS are pristine at collection time, but the INPUT stream is the
+  compressed prefix; the input is the deviation, and the stage-map string
+  is the accurate reading.) The hoist: one pre-loop `collect_stats` pass
+  (streamed D-7 path) over the pristine model on the raw calibration
+  batches; block reconstruction consumes the pre-collected book; capture
+  (lines 9-10) is teacher capture only. This also removes one fwd+bwd
+  per block from the loop.
+- **Eval window — corrected after Bug Hunter review.** The corpus pins
+  WT2 perplexity and names `lm_eval=0.4.9` ([NQ] Sec 4.1/App. C), but does
+  NOT pin exact test-set coverage or windowing semantics. My earlier
+  "full WT2 / same pedestal as the paper tables" sentence is WITHDRAWN.
+  Measured with the pinned Qwen tokenizer: the test shard is 298,938
+  tokens = 145 complete 2,048-token blocks + a 1,978-token remainder.
+  The local evaluator's largest batch-8 request is `EVAL_SEQS=18`: 144
+  blocks / 294,912 tokens / 294,768 scored predictions — 99.310% of the
+  complete blocks but 98.653% of source tokens. It omits one complete
+  block plus the 1,978-token remainder and is therefore NOT full-set or
+  paper-table-comparable. Ruling: 18 is the maximal local quality-gate
+  window for this fire; the artifact records evaluator kind, all source /
+  selected counts, coverage, seed and ordered-selection fingerprint, and
+  `paper_table_comparable: false`. The method-fidelity verdict is scoped
+  to the quantization method and calibration protocol; evaluation
+  comparability is a separate verdict. A faithful-flagged fire using this
+  local evaluator must use its maximal complete-batch window or fail
+  preflight — 5 batches can no longer ride the proof-scale run.
+- **Ladder note (parked, unchanged).** The stage-trace threshold bands
+  (T1 etc.) were pinned on svd-path traces; the parked ladder re-derives
+  its bands on the faithful (admm) artifact when it un-parks. Bug
+  Hunter's independent `real_floor`/`naive` table is solver-independent
+  (computed from the pinned safetensors) and stands as-is.

@@ -56,6 +56,9 @@ __all__ = [
     "abort_report",
     "stage_failure_report",
     "stage_map",
+    "geometry_deviations",
+    "fidelity_conditions",
+    "fidelity_verdict",
     "provenance",
 ]
 
@@ -270,6 +273,20 @@ def abort_report(exc: Any, identity_fields: dict, history: list) -> dict:
     report["status"] = FAILED
     for key in _ABORT_UNMEASURED:
         report[key] = None
+    # The fidelity claim is a computed verdict on this path too, and a run
+    # that did not reach the end of the protocol cannot carry it: the
+    # stage-failure flag is set, so the label falls however clean the rest of
+    # the record looks. `paper_faithful` in the identity fields is the
+    # REQUESTED flag; it is replaced here by the verdict.
+    label, conditions = fidelity_verdict(
+        report.get("solver"),
+        report.get("runtime_deviations"),
+        report.get("stages"),
+        requested=report.get("paper_faithful"),
+        stage_failure=True,
+    )
+    report["paper_faithful"] = label
+    report["fidelity_conditions"] = conditions
     return report
 
 
@@ -297,8 +314,17 @@ def stage_failure_report(exc: Any, identity_fields: dict, stages: list) -> dict:
     }
     # The fidelity claim is recorded FALSE, never left standing: the run
     # reached a stage whose execution the paper's method requires and it did
-    # not happen.
-    report["paper_faithful"] = False
+    # not happen. `paper_faithful` in the identity fields is the REQUESTED
+    # flag; the verdict below replaces it, with the condition record beside it.
+    label, conditions = fidelity_verdict(
+        report.get("solver"),
+        report.get("runtime_deviations"),
+        stages,
+        requested=report.get("paper_faithful"),
+        stage_failure=True,
+    )
+    report["paper_faithful"] = label
+    report["fidelity_conditions"] = conditions
     report["stages"] = list(stages)
     report["artifact_exported"] = False
     report["status"] = FAILED
@@ -307,20 +333,200 @@ def stage_failure_report(exc: Any, identity_fields: dict, stages: list) -> dict:
     return report
 
 
+def geometry_deviations(seq_len: Any, tune_seq_len: Any, calibration_rows: Any = None) -> list:
+    """Named runtime deviations from [NQ]'s calibration geometry.
+
+    The stage map covers STAGES; this covers the geometry those stages ran at,
+    because a "paper-faithful" claim over a sliced tune window would otherwise
+    be the same class of defect as every other green label over a deviant
+    artifact: the paper's protocol is a sequence length of 2048
+    (``docs/papers/nanoquant-2602.06694v3.md``, "Calibration used 128 samples
+    from the WikiText-2 dataset ... with a sequence length of 2048"), so a run
+    that tunes on shorter windows is NOT running the protocol even when every
+    stage fires with App. C budgets.
+
+    Returns a list of ``{kind, detail}`` entries; empty means the geometry is
+    the protocol's.
+    """
+    out: list[dict] = []
+    eval_len = _as_finite_float(seq_len)
+    tune_len = _as_finite_float(tune_seq_len)
+    if eval_len is None:
+        out.append(
+            {
+                "kind": "unmeasured_eval_geometry",
+                "detail": "the evaluation sequence length is not a finite number",
+            }
+        )
+        return out
+    if tune_len is None or tune_len != eval_len:
+        out.append(
+            {
+                "kind": "tune_geometry_split",
+                "detail": (
+                    f"evaluation runs at seq {eval_len:g} while block reconstruction "
+                    f"tunes on {tune_len:g}-token windows sliced from the same rows — the "
+                    "token count is preserved but the per-step attention context is not "
+                    "the protocol's; [NQ] states one sequence length (2048) for both"
+                ),
+            }
+        )
+    rows = _as_finite_float(calibration_rows)
+    if rows is not None and rows != 128:
+        out.append(
+            {
+                "kind": "calibration_rows",
+                "detail": (
+                    f"{rows:g} calibration rows against the protocol's 128 ([NQ] Sec 3.4/App. C)"
+                ),
+            }
+        )
+    return out
+
+
+def _stage_pair(entry: Any) -> tuple[Any, Any]:
+    """Normalize one stage record to ``(event, info)``.
+
+    The driver carries stages as ``(event, info)`` tuples while the report
+    payload spells them ``{"event": ..., **info}``; the fidelity conditions
+    have to read both shapes so the label is computed off the same record on
+    every path.
+    """
+    if isinstance(entry, dict):
+        return entry.get("event"), entry
+    if isinstance(entry, (tuple, list)) and len(entry) == 2:
+        return entry[0], entry[1]
+    return None, None
+
+
+def fidelity_conditions(
+    solver: Any,
+    runtime_deviations: Any,
+    stages: Any,
+    *,
+    requested: Any,
+    stage_failure: bool = False,
+) -> dict[str, bool]:
+    """The named conditions behind the ``paper_faithful`` verdict.
+
+    The reported label is a COMPUTED verdict, never a forwarded flag
+    (scenarios ``label_flips_on_runtime_deviations`` /
+    ``label_flips_on_mechanism_deviations``): it is the flag AND an empty
+    deviation list AND no mechanism-class deviation AND evidence that every
+    required stage actually executed, and every condition is recorded so a
+    reader can audit the label from the artifact alone. The mechanism list
+    mirrors the spec exactly — greedy-polish rounds, a fired STE discrete flip
+    pass, a STE scale-only re-scope marker, a vacuous-teacher event, a stage
+    failure, and a solver other than LB-ADMM.
+
+    Required-stage execution (scenario
+    ``required_stage_execution_reads_the_same_record``) is read off this same
+    normalized record: the set is the ``required`` column of ``_STAGE_LINES``,
+    never a second list, and one condition per required stage is reported so a
+    missing stage names itself. Nothing here is vacuous — an empty or
+    incomplete record denies every required stage, which is the point: a
+    consistent-but-empty record must not certify anything.
+
+    An EXECUTION is an event that fired, not merely one that was recorded. So
+    a skip-marked event does not count (``tune_fp`` carrying ``skipped`` — the
+    degenerate-block ``no_still_fp_remainder`` path — is a recorded skip), and
+    neither does ``tune_scales_kd`` when its payload says the run is the
+    ``factor_mode='fp'`` measurement, where the driver appends the event
+    unconditionally even though the stage is skipped entirely.
+
+    The count is run-level (a stage that fired anywhere in the run executed),
+    so a per-block legitimate skip cannot false-deny a faithful run.
+
+    Informed-assumption markers (the TuneFP loss formula) are documentation,
+    not deviations, and no condition here reads them.
+    """
+    polish_rounds = 0
+    flip_pass = False
+    rescope = False
+    vacuous = False
+    executions: dict[str, int] = {}
+    for entry in stages or []:
+        event, info = _stage_pair(entry)
+        if event is None:
+            continue
+        fields = info if isinstance(info, dict) else {}
+        skipped = bool(fields.get("skipped"))
+        if not skipped and (event != "tune_scales_kd" or fields.get("artifact")):
+            executions[event] = executions.get(event, 0) + 1
+        if event == "lb_admm" and isinstance(info, dict):
+            try:
+                polish_rounds = max(polish_rounds, int(info.get("polish_rounds") or 0))
+            except (TypeError, ValueError):
+                # An unreadable round count is a deviation-shaped fact: treat
+                # it as polish having happened rather than as zero.
+                polish_rounds = max(polish_rounds, 1)
+        elif event == "ste" and isinstance(info, dict):
+            for rec in (info.get("per_linear") or {}).values():
+                if not isinstance(rec, dict):
+                    continue
+                if "flip_pass" in rec:
+                    flip_pass = True
+                if rec.get("declared") == "scale_only" or rec.get("rescope_marker"):
+                    rescope = True
+        elif event == "tune_fp_vacuous_teacher":
+            vacuous = True
+    conditions = {
+        "paper_faithful_flag": bool(requested),
+        "no_runtime_deviations": not bool(runtime_deviations),
+        "polish_off": polish_rounds == 0,
+        "no_discrete_flip_pass": not flip_pass,
+        "no_scale_only_rescope": not rescope,
+        "no_vacuous_teacher": not vacuous,
+        "no_stage_failure": not bool(stage_failure),
+        "solver_is_admm": solver == "admm",
+    }
+    for key, _lines, _description, _deviation, required in _STAGE_LINES:
+        if required:
+            conditions[f"required_{key}_executed"] = executions.get(key, 0) > 0
+    return conditions
+
+
+def fidelity_verdict(
+    solver: Any,
+    runtime_deviations: Any,
+    stages: Any,
+    *,
+    requested: Any,
+    stage_failure: bool = False,
+) -> tuple[bool, dict[str, bool]]:
+    """``(label, conditions)`` for a run — the label is the conjunction.
+
+    Returns the label alongside the condition record so every report path can
+    carry both: a reader sees WHICH condition denied the claim, not merely
+    that it was denied.
+    """
+    conditions = fidelity_conditions(
+        solver,
+        runtime_deviations,
+        stages,
+        requested=requested,
+        stage_failure=stage_failure,
+    )
+    return all(conditions.values()), conditions
+
+
 #: Every stage the driver can execute, mapped to its [NQ] Algorithm 1 lines.
-#: ``required`` names the stages the paper's method cannot skip; a
-#: ``required`` stage that did not execute, or a stage carrying a
-#: ``deviation``, is exactly what a fidelity claim has to account for.
-_STAGE_LINES: tuple[tuple[str, str, str, str | None], ...] = (
+#:
+#: The last column is the ``required`` marker: the stages the paper's method
+#: cannot skip, so a ``paper_faithful`` claim owes evidence that each one
+#: actually FIRED (scenario ``required_stage_execution_reads_the_same_record``).
+#: It lives here, as a column of the single stage inventory, and never as a
+#: second list beside the verdict, so the stage map and the verdict cannot
+#: drift apart.
+_STAGE_LINES: tuple[tuple[str, str, str, str | None, bool], ...] = (
     (
         "phase1_statistics",
         "2-5",
         "global calibration statistics (RobustDiag preconditioners)",
-        "collected per block from the compressed-prefix stream (Algorithm 1 "
-        "line 9 inputs) instead of once over the FP model on raw X_cal; the "
-        "statistic definition is unchanged",
+        None,
+        True,
     ),
-    ("capture", "9-10", "compressed-prefix inputs X_b and teacher outputs Y_b", None),
+    ("capture", "9-10", "compressed-prefix inputs X_b and teacher outputs Y_b", None, True),
     (
         "tune_fp",
         "12 (Figure 3 placement)",
@@ -328,6 +534,7 @@ _STAGE_LINES: tuple[tuple[str, str, str, str | None], ...] = (
         "placement read from Figure 3 (once per block, after Q/K/V are "
         "factorized) and the internal loss formula is an informed assumption "
         "(the corpus names the call but not its objective)",
+        True,
     ),
     (
         "lb_admm",
@@ -336,16 +543,19 @@ _STAGE_LINES: tuple[tuple[str, str, str, str | None], ...] = (
         "the greedy bit-flip polish (qk-root-cause line of work) is an EXTRA "
         "discrete stage the paper does not describe; its round count travels "
         "in the lb_admm event and is 0 for the untuned-signs ablation",
+        True,
     ),
     (
         "ste",
         "19",
         "TuneLatentSTE: factorized-component refinement",
-        "per-layer scheduling and the T_post split follow Figure 3's right "
-        "panel; the bounded discrete flip pass is a named deviation when its "
-        "budget is nonzero",
+        "per-layer scheduling follows Figure 3's right panel; each scoped "
+        "linear consumes the full [NQ] App. C budget (epochs x (n // batch)) "
+        "on the just-factorized linear; the bounded discrete flip pass is a "
+        "named deviation when its budget is nonzero",
+        True,
     ),
-    ("sign_extract_pack", "20-23", "sign extraction and packing", None),
+    ("sign_extract_pack", "20-23", "sign extraction and packing", None, True),
     (
         "tune_scales_kd",
         "26-27",
@@ -353,6 +563,7 @@ _STAGE_LINES: tuple[tuple[str, str, str, str | None], ...] = (
         "packed binaries are frozen during scale tuning (verified against "
         "TuneScalesKD semantics); skipped entirely when the run is a "
         "measurement (factor_mode='fp' exports no artifact)",
+        True,
     ),
 )
 
@@ -370,12 +581,8 @@ def stage_map(stages: list) -> dict:
     for event in executed:
         counts[event] = counts.get(event, 0) + 1
     out: dict[str, dict] = {}
-    for key, lines, description, deviation in _STAGE_LINES:
+    for key, lines, description, deviation, _required in _STAGE_LINES:
         fired = counts.get(key, 0)
-        if key == "phase1_statistics":
-            # Statistics are collected once per block, at capture time, from
-            # the compressed-prefix stream: the capture count IS the count.
-            fired = counts.get("capture", 0)
         out[key] = {
             "algorithm1_lines": lines,
             "description": description,
@@ -412,4 +619,76 @@ def provenance(solver: str, scale_dtype: str) -> dict:
         "scale_dtype": scale_dtype,
         "regime_artifact": f"qpk1: +-1 bitplanes + {scale_dtype} scales",
         "dtype_note": (f"solver {solver} (float64 compute) / scales {scale_dtype} / artifact qpk1"),
+    }
+
+
+#: The evaluator behind ``ppl_quant_native``. Named in the report so a reader
+#: never has to infer which harness produced the number.
+EVAL_EVALUATOR = "wikitext2_test_blockwise_ppl"
+
+
+def evaluation_record(
+    *,
+    evaluator: str,
+    source_tokens: Any,
+    seq_len: Any,
+    selected_blocks: Any,
+    batch: Any,
+    selection_seed: Any,
+    selection_fingerprint: str,
+) -> dict:
+    """The EVALUATION verdict, recorded beside the method-fidelity verdict.
+
+    [NQ] names WikiText-2 PPL and ``lm_eval=0.4.9`` but the pinned corpus does
+    not define coverage or windowing, so "paper-faithful" cannot mean "the
+    paper's table" — that is a claim about the harness, not about the method.
+    Two consequences, both structural here:
+
+    * The record states exactly how much of the split was scored: source
+      tokens, complete blocks, the dropped remainder, selected blocks/tokens,
+      scored next-token predictions, and both coverage fractions. ``eval_rows``
+      alone records the numerator, which is why an artifact could not prove
+      what it covered.
+    * ``paper_table_comparable`` is ``False`` unconditionally: this evaluator
+      scores ONE batch-aligned window of a shuffled block sample, so its PPL is
+      an internal baseline/quantized ratio, not a table row.
+
+    Comparability deliberately does NOT enter ``runtime_deviations`` or
+    ``fidelity_verdict``: those are scoped to the quantization method and the
+    calibration protocol. The two verdicts sit side by side in the report
+    instead of being folded into one boolean, so a faithful-labelled run whose
+    pedestal is a 27%-coverage sample says so in its own field.
+    """
+    tokens = int(source_tokens)
+    seq = int(seq_len)
+    picked = int(selected_blocks)
+    per_batch = int(batch)
+    full_blocks = tokens // seq if seq > 0 else 0
+    remainder = tokens - full_blocks * seq if seq > 0 else tokens
+    selected_tokens = picked * seq if seq > 0 else 0
+    return {
+        "evaluator": evaluator,
+        "windowing": "one batch-aligned window of a seeded, no-replacement block sample",
+        "source_tokens": tokens,
+        "seq_len": seq,
+        "full_blocks": full_blocks,
+        "remainder_tokens": remainder,
+        "selected_blocks": picked,
+        "selected_tokens": selected_tokens,
+        # Next-token scoring: row ``t`` predicts ``t+1``, so the last position
+        # of each row carries no target.
+        "scored_predictions": picked * (seq - 1) if seq > 0 else 0,
+        "coverage_of_full_blocks": (picked / full_blocks) if full_blocks else None,
+        "coverage_of_source_tokens": (selected_tokens / tokens) if tokens else None,
+        "selection_seed": selection_seed,
+        # Ordered-index hash: which blocks, in which order, without shipping a
+        # 144-element list into the report.
+        "selection_fingerprint": selection_fingerprint,
+        "full_local_window_batches": (full_blocks // per_batch) if per_batch > 0 else 0,
+        "paper_table_comparable": False,
+        "caveat": (
+            f"{max(full_blocks - picked, 0)} complete block(s) and {remainder} trailing "
+            "token(s) are not scored; the PPL here is an internal "
+            "baseline/quantized ratio, not a row of a published table"
+        ),
     }

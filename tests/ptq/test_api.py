@@ -162,6 +162,67 @@ def _apply_to_host(host: nn.Module, qm: QuantizedModel) -> None:
                     module.bias.copy_(torch.from_numpy(np.ascontiguousarray(st.bias)))
 
 
+def test_scn_phase1_statistics_are_collected_once_over_the_pristine_model(monkeypatch):
+    """`phase1_stats_from_pristine_model`: ONE pre-loop whole-model pass.
+
+    The block loop consumes that pre-collected book. The per-block capture
+    used to be the statistics source, and it read the compressed-prefix
+    stream — line 9's TUNING input — instead of the paper's raw calibration
+    set. `collect_stats` is booby-trapped here: any per-block call fails.
+    """
+    from quantibbler.ptq import block_recon as br
+
+    model = _TinyApiModel(seed=11)
+    batches = _calib(seed=12)
+    record: list = []
+
+    def recorder(event: str, **info) -> None:
+        record.append((event, info))
+
+    def explode(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError(
+            "a per-block statistics pass ran: the block loop must consume the "
+            "Phase-1 book, never re-collect from the compressed-prefix stream"
+        )
+
+    monkeypatch.setattr(br, "collect_stats", explode)
+
+    qm = quantize_model(model, batches, _gate_cfg(), recorder=recorder)
+    assert {"lin1", "lin2"} <= set(qm.layers)
+
+    events = [event for event, _ in record]
+    assert events[0] == "phase1_statistics", events[:3]
+    info = record[0][1]
+    # Every nn.Linear of the pristine model is in the book — including the
+    # fp head, which the whole-model pass sees but never quantizes.
+    assert info["num_linears"] == len(info["linears"]) == 3
+    # The float64 reference path stays whole-batch (bit-identical to the
+    # landed single-pass behavior); the streamed chunking is for real models.
+    assert info["chunk_rows"] is None
+    # The capture (lines 9-10) still happens, per block, AFTER the statistics.
+    assert [e for e in events if e == "capture"]
+    assert events.index("phase1_statistics") < events.index("capture")
+
+
+def test_phase1_chunking_is_bounded_for_real_models():
+    """bfloat16-class models stream ONE row per chunk — measured, not chosen.
+
+    The Phase-1 pass runs the whole model, so it retains its chunk's N^2
+    attention graph and the chunk size is the memory knob. Measured inside
+    `quantibbler-ptq:latest` at the wrapper's 32g memcg on a single 8 x 2048
+    batch through Qwen3-0.6B: `chunk_rows=4` was OOM-KILLED; `chunk_rows=1`
+    completed at an 18.47 GB cgroup peak. The float64 executable-spec path
+    stays whole-batch (bit-identical to the landed single-pass behavior).
+    """
+    from quantibbler.ptq import api as api_mod
+
+    assert api_mod._phase1_chunk_rows(_TinyApiModel(seed=1).to(torch.bfloat16)) == 1
+    assert api_mod._phase1_chunk_rows(_TinyApiModel(seed=1)) is None
+    assert api_mod._PHASE1_CHUNK_ROWS == 1, (
+        "the Phase-1 chunk size is a measured memory bound, not a preference"
+    )
+
+
 def test_scn_export_gate_refuses_nonfinite_scales():
     """r137-v4 regression: v4 shipped 72/196 layers with NaN scales to disk
     while the container exited 0. The serialize path is the last chokepoint

@@ -46,6 +46,7 @@ Usage (from the repo root):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import random
 import struct
@@ -97,11 +98,15 @@ from quantibbler.ptq.block_recon import VacuousTeacherError
 from quantibbler.ptq.config import PrefixProbeAbort, PTQConfig, StageHyper
 from quantibbler.qk_report import (
     COLLAPSE_LINE,
+    EVAL_EVALUATOR,
     FAILED,
     MIN_PROBE_DEPTH,
     OK_LINE,
     abort_report,
     dump_report,
+    evaluation_record,
+    fidelity_verdict,
+    geometry_deviations,
     probe_aborts,
     probe_ratio,
     provenance,
@@ -264,14 +269,15 @@ def find_wikitext_shards(split: str) -> list[Path]:
     return shards
 
 
-def tokenize_chunks(
+def _tokenize_blocks(
     tokenizer, text: str, seq_len: int, n_chunks: int, seed: int
-) -> list[torch.Tensor]:
-    """n_chunks deterministic (8, seq_len) token-id batches from `text`.
+) -> tuple[list[torch.Tensor], dict]:
+    """``(batches, selection record)``: the chunks AND how they were chosen.
 
-    The token stream is cut into seq_len blocks, block order is seeded-
-    shuffled (decorrelates calibration/eval chunks without replacement),
-    and chunks are packed BATCH rows at a time.
+    The record is what makes an evaluation auditable (source tokens, complete
+    blocks, and the ordered block indices actually picked); returning it from
+    the same pass that builds the batches keeps the record from drifting to a
+    second, separately-seeded selection.
     """
     ids = tokenizer(text, return_tensors=None, add_special_tokens=False)["input_ids"]
     stream = torch.tensor(ids, dtype=torch.long)
@@ -286,8 +292,26 @@ def tokenize_chunks(
     # Materialize seq_len token blocks FIRST, then seed-shuffled fancy-index
     # picks whole blocks (indexing the 1-D stream would pick loose tokens).
     blocks = stream[: n_blocks * seq_len].view(n_blocks, seq_len)
-    picked = blocks[order[: n_chunks * BATCH]]
-    return [picked[i * BATCH : (i + 1) * BATCH] for i in range(n_chunks)]
+    picked_index = order[: n_chunks * BATCH]
+    picked = blocks[picked_index]
+    batches = [picked[i * BATCH : (i + 1) * BATCH] for i in range(n_chunks)]
+    return batches, {
+        "source_tokens": int(stream.shape[0]),
+        "full_blocks": int(n_blocks),
+        "picked_index": picked_index,
+    }
+
+
+def tokenize_chunks(
+    tokenizer, text: str, seq_len: int, n_chunks: int, seed: int
+) -> list[torch.Tensor]:
+    """n_chunks deterministic (8, seq_len) token-id batches from `text`.
+
+    The token stream is cut into seq_len blocks, block order is seeded-
+    shuffled (decorrelates calibration/eval chunks without replacement),
+    and chunks are packed BATCH rows at a time.
+    """
+    return _tokenize_blocks(tokenizer, text, seq_len, n_chunks, seed)[0]
 
 
 def _positive_int(text: str) -> int:
@@ -393,6 +417,7 @@ def _run_identity(
     calibration_rows: int,
     eval_rows: int,
     ppl_baseline_bf16: Any,
+    evaluation: dict,
 ) -> dict:
     """Report identity fields shared by every exit path.
 
@@ -419,6 +444,15 @@ def _run_identity(
         "ppl_baseline_bf16": ppl_baseline_bf16,
         "paper_faithful": bool(args.paper_faithful),
         "ste_flip_pass_budget": int(args.ste_flip_pass_budget),
+        # Geometry deviations from [NQ]'s protocol (sliced tune windows,
+        # non-protocol row counts): a stage map that is complete while the
+        # geometry is not the protocol's would make "paper-faithful" a green
+        # label over a deviant artifact.
+        "runtime_deviations": geometry_deviations(args.seq_len, tune_seq_len, calibration_rows),
+        # The evaluation verdict, on every exit path: what the pedestal covered
+        # and which harness produced it. Sits beside the method verdict rather
+        # than inside it — see `evaluation_record`.
+        "evaluation": evaluation,
         "regime": {
             "baseline_eval": "bfloat16 (checkpoint native; papers' pedestal)",
             "solver": "float64, per-layer just-in-time (sign margins + parity reference)",
@@ -760,7 +794,10 @@ def main() -> int:
         help="bounded discrete sign-flip proposals per factor per linear "
         "(qk-fix-ste-sign-adaptation fallback 3). 0 disables the pass; any "
         "nonzero value is an EXPLICIT DEVIATION from the paper and is "
-        "recorded as such in the run report",
+        "recorded as such in the run report. INERT under --paper-faithful: "
+        "the paper's path is sign+pack on whatever signs STE produced "
+        "(Algorithm 1 lines 20-23), so the pass never fires and the record "
+        "carries `declared: paper_ste` with the measured crossings",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path, default=Path("artifacts") / "model-qpk1")
@@ -790,7 +827,7 @@ def main() -> int:
         args.calibration_seqs,
         args.seed,
     )
-    held_out = tokenize_chunks(
+    held_out, eval_selection = _tokenize_blocks(
         tokenizer,
         load_wikitext_text(find_wikitext_shards("test")),
         args.seq_len,
@@ -798,6 +835,49 @@ def main() -> int:
         args.seed + 1,
     )
     print(f"      calib {len(calib)} batches, eval {len(held_out)} batches")
+    # The evaluation verdict (qk-fix-tunefp-teacher: "the eval pedestal is the
+    # one geometry the label can't see"). `eval_rows` records the numerator;
+    # this record states what it is a numerator OF, so the artifact can prove
+    # its own coverage and the evaluator is named rather than inferred. It is
+    # recorded beside the method verdict, never folded into it: comparability
+    # is a harness fact, method fidelity is a protocol fact.
+    evaluation = evaluation_record(
+        evaluator=EVAL_EVALUATOR,
+        source_tokens=eval_selection["source_tokens"],
+        seq_len=args.seq_len,
+        selected_blocks=len(eval_selection["picked_index"]),
+        batch=BATCH,
+        selection_seed=args.seed + 1,
+        selection_fingerprint=hashlib.sha256(
+            ",".join(str(i) for i in eval_selection["picked_index"]).encode()
+        ).hexdigest()[:16],
+    )
+    print(
+        f"      eval coverage: {evaluation['selected_blocks']}/"
+        f"{evaluation['full_blocks']} blocks, "
+        f"{evaluation['coverage_of_source_tokens']:.3%} of source tokens "
+        f"(paper_table_comparable={evaluation['paper_table_comparable']})",
+        flush=True,
+    )
+    # PREFLIGHT, before any quantization work: a faithful claim on this
+    # evaluator must use its maximal local window. Anything smaller is a
+    # sample presented as the split, and hours of PTQ should not be spent to
+    # discover that at report time. Raised as a ValueError like the sizer's
+    # overshoot refusal beside it (a usage error, not a run verdict): the
+    # driver's single exit path belongs to the gate's verdict, so a config
+    # refusal fails loudly here instead of implying a completed run.
+    if args.paper_faithful and args.eval_seqs != evaluation["full_local_window_batches"]:
+        raise ValueError(
+            f"--paper-faithful requires the maximal local evaluation window: "
+            f"--eval-seqs {evaluation['full_local_window_batches']} "
+            f"(wikitext test at seq {args.seq_len} yields "
+            f"{evaluation['full_blocks']} blocks = "
+            f"{evaluation['full_local_window_batches']} batches of {BATCH}); "
+            f"got {args.eval_seqs} ({evaluation['selected_blocks']} blocks, "
+            f"{evaluation['coverage_of_source_tokens']:.3%} of source tokens). "
+            "Diagnostics may use a smaller window and will record it; a "
+            "faithful claim may not."
+        )
 
     # --- independent tune geometry (qk-nq-recreation-bar) ----------------
     # `--seq-len` is the EVALUATION protocol (WT2 at 2048 for the bar) and
@@ -904,6 +984,7 @@ def main() -> int:
         calibration_rows=calibration_sequences,
         eval_rows=len(held_out) * BATCH,
         ppl_baseline_bf16=ppl_base,
+        evaluation=evaluation,
     )
 
     try:
@@ -994,6 +1075,17 @@ def main() -> int:
                 {"factor_mode": args.factor_mode, "artifact": measured_artifact},
             )
         )
+        # The fidelity label is a COMPUTED verdict over the run's own record
+        # (qk-fix-tunefp-teacher, scenario `label_flips_on_runtime_deviations` /
+        # `label_flips_on_mechanism_deviations`): the flag AND an empty
+        # deviation list AND no mechanism-class deviation. Every condition is
+        # recorded beside it, so a reader can see which one denied the claim.
+        faithful_label, fidelity_conditions = fidelity_verdict(
+            prov["solver"],
+            identity["runtime_deviations"],
+            stage_events,
+            requested=bool(args.paper_faithful),
+        )
         report = {
             "model": args.model,
             "rank": args.rank,
@@ -1036,8 +1128,17 @@ def main() -> int:
             # Stage record + Algorithm 1 map (qk-fix-tunefp-teacher): every
             # executed stage resolved against lines 0-28 with its deviations
             # named, so "paper-faithful" is auditable from the report alone.
-            "paper_faithful": bool(args.paper_faithful),
+            # `paper_faithful` is the COMPUTED verdict (flag AND no deviation),
+            # with its condition record beside it.
+            "paper_faithful": faithful_label,
+            "fidelity_conditions": fidelity_conditions,
+            # Beside the method verdict, never inside it: evaluation
+            # comparability is a harness fact (coverage, windowing, evaluator),
+            # not a property of the quantization method or calibration
+            # protocol. See `qk_report.evaluation_record`.
+            "evaluation": identity["evaluation"],
             "ste_flip_pass_budget": int(args.ste_flip_pass_budget),
+            "runtime_deviations": identity["runtime_deviations"],
             "stages": [{"event": event, **info} for event, info in stage_events],
             "stage_map": stage_map(stage_events),
             "status": status,

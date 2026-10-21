@@ -603,9 +603,12 @@ def _tune_latent_ste(
     Eq. 10, T_post steps at the stage lr ([NQ] App. C).
 
     Per-layer scheduling (qk-fix-ste-sign-adaptation, Figure 3 right panel):
-    the caller invokes this once per just-factorized linear with its share of
-    the line-19 T_post budget; the block forward is the module as it stands,
-    so every other block parameter is held at its current value.
+    the caller invokes this once per just-factorized linear; the refinement
+    unit is that linear and it consumes the FULL per-linear App. C budget
+    ``epochs x (n // batch)`` (Step-3 prose names "the current target linear
+    layer" singular; Eq. 10's variables are one linear's; App. C attaches the
+    factorized stage's 8 epochs there). The block forward is the module as it
+    stands, so every other block parameter is held at its current value.
 
     Instrumentation (same change, scenarios ``flip_counts_are_recorded`` /
     ``sign_adaptation_is_effective_or_declared``): per-step, per-factor sign
@@ -880,6 +883,41 @@ def extract_and_pack(
     return QuantizedLayerState(name, ub, vb, np.zeros(ub.shape[0]), np.zeros(vb.shape[0]), None)
 
 
+def _block_stats_slice(global_book, name_prefix: str | None, block: nn.Module, cfg: PTQConfig):
+    """This block's share of the Phase-1 statistics book, in linear order.
+
+    Phase 1 (Algorithm 1 lines 2-5) collects per-linear RobustDiag statistics
+    once, over the PRISTINE FP model on the RAW calibration set, before any
+    block is reconstructed. The block loop then consumes that pre-collected
+    book: ``reconstruct_block`` receives the entries for its own scoped
+    linears, aligned element-wise with ``quantizable_linears`` (declaration
+    order), and never re-collects statistics from the compressed-prefix
+    stream (line 9's tuning input is not the statistics source).
+
+    A missing entry is a hard error, not a silent fallback to a local pass: a
+    block quietly computing its own statistics would look identical in the
+    record to one consuming the Phase-1 book.
+    """
+    if global_book is None:
+        return None
+    scope = _scope_filter(_quantizable_names(block), cfg.layer_scope)
+    ordered = [name for name, _ in _linear_children(block) if name in scope]
+    by_name = {entry.name: entry for entry in global_book}
+    out = LayerStatsBook()
+    for local in ordered:
+        full = _full_name(name_prefix, local)
+        entry = by_name.get(full)
+        if entry is None and name_prefix is None:
+            entry = by_name.get(local)
+        if entry is None:
+            raise ValueError(
+                f"Phase-1 statistics book has no entry for {full!r}; the whole-model "
+                "statistics pass and the block loop disagree about the layer inventory"
+            )
+        out.add(entry)
+    return out
+
+
 def reconstruct_block(
     block: nn.Module,
     calibration_batches,
@@ -1051,7 +1089,9 @@ def reconstruct_block(
     # (zero refinement is the ablation's content), while ``fp`` keeps it on
     # continuous latents so the ONLY difference from a binary run is the
     # discretization.
-    polish = cfg.factor_mode == "binary" and cfg.ablation != "untuned-signs"
+    polish = (
+        cfg.factor_mode == "binary" and cfg.ablation != "untuned-signs" and not cfg.paper_faithful
+    )
     refine = cfg.ablation != "untuned-signs"
     facs: dict[str, FactorizedLinear] = {}
     linears_by_name = dict(quantizable_linears)
@@ -1071,16 +1111,18 @@ def reconstruct_block(
         split = 1
     else:
         split = len(quantizable_linears)
-    # --- TuneLatentSTE budget (qk-fix-ste-sign-adaptation): the line-19
-    # T_post budget is split deterministically across the block's factorized
-    # linears — equal split, remainder to the earliest linears in fixed
-    # declaration order — and the per-layer allocation is recorded.
+    # --- TuneLatentSTE budget (qk-fix-ste-sign-adaptation, pre-fire
+    # re-ruling): the refinement unit is the LINEAR — Step-3 prose names "the
+    # current target linear layer" (singular), Eq. 10's optimization variables
+    # are ONE linear's (U, V, s1, s2), and App. C attaches the factorized
+    # stage's 8 epochs to that per-linear refinement. Every scoped linear
+    # therefore consumes the FULL per-linear budget `epochs x (n // batch)` on
+    # the just-factorized linear per Figure 3's right panel; there is no
+    # block-pooled split. The schedule record carries each linear's full
+    # scheduled steps.
     n_rows = int(x_b.shape[0])
     bs_latent = max(1, min(cfg.stage_latent.batch_size, n_rows))
     total_ste = max(cfg.stage_latent.epochs * (n_rows // bs_latent or 1), 1)
-    n_linears = len(quantizable_linears)
-    _base, _rem = divmod(total_ste, n_linears)
-    alloc = [_base + (1 if i < _rem else 0) for i in range(n_linears)]
     ste_records: dict[str, dict] = {}
     tune_fp_record: dict | None = None
     for idx, (entry, (name, linear)) in enumerate(
@@ -1176,63 +1218,57 @@ def reconstruct_block(
         _set_linear(linear, fac, factor_mode=cfg.factor_mode)
 
         # --- Step 3 (line 19): per-layer TuneLatentSTE on the
-        # just-factorized linear, with its deterministic share of T_post.
+        # just-factorized linear, with the FULL per-linear App. C budget.
         # Every other block parameter is held at its current value: the
         # module carries the frozen weights of the previously factorized
         # layers and the untouched fp weights of the later ones.
         if refine:
-            per: dict = {
-                "steps": 0,
-                "flips_u": 0,
-                "flips_v": 0,
-                "per_step_flips": [],
-                "first_flip_step": None,
-                "u_rel_move": 0.0,
-                "v_rel_move": 0.0,
-                "s1_rel_move": 0.0,
-                "s2_rel_move": 0.0,
-                "zero_crossings": None,
-                "declared": "not_scheduled_zero_budget",
-            }
-            if alloc[idx] > 0:
-                rec = _tune_latent_ste(
+            rec = _tune_latent_ste(
+                block,
+                {name: fac},
+                x_b,
+                y_b,
+                cfg,
+                cfg.stage_latent.batch_size,
+                steps=total_ste,
+                label=name,
+            )
+            per = rec["per_linear"][name]
+            if cfg.paper_faithful:
+                # The paper's Stage 2 -> 3 mechanism, to the letter: STE on
+                # the continuous latents for the full budget, then sign+pack
+                # whatever signs result (Algorithm 1 lines 20-23). A
+                # zero-crossing outcome IS the paper's outcome — a
+                # measurement, not a re-scope — so neither the bounded
+                # discrete flip pass nor the scale-only declaration fire on
+                # this path. The measured count travels in the record.
+                per["declared"] = "paper_ste"
+            elif per["zero_crossings"]:
+                # Diagnostic path only: no continuous sign crossing, so fall
+                # back to the bounded discrete flip pass (design alt. 3, an
+                # explicit deviation), and if that also accepts nothing,
+                # declare the linear scale-only under the greppable re-scope
+                # marker. A silent zero-flip completion is impossible here.
+                flip = _discrete_flip_pass(
                     block,
-                    {name: fac},
+                    linear,
+                    name,
+                    fac,
                     x_b,
                     y_b,
-                    cfg,
-                    cfg.stage_latent.batch_size,
-                    steps=alloc[idx],
-                    label=name,
+                    budget=cfg.ste_flip_pass_budget,
+                    factor_mode=cfg.factor_mode,
                 )
-                per = rec["per_linear"][name]
-                if per["zero_crossings"]:
-                    # No continuous sign crossing: fall back to the bounded
-                    # discrete flip pass (design alt. 3, an explicit
-                    # deviation), and if that also accepts nothing, declare
-                    # the linear scale-only under the greppable re-scope
-                    # marker. A silent zero-flip completion is impossible on
-                    # this path.
-                    flip = _discrete_flip_pass(
-                        block,
-                        linear,
-                        name,
-                        fac,
-                        x_b,
-                        y_b,
-                        budget=cfg.ste_flip_pass_budget,
-                        factor_mode=cfg.factor_mode,
-                    )
-                    per["flip_pass"] = flip
-                    if flip["accepted_u"] + flip["accepted_v"] > 0:
-                        per["declared"] = "discrete_flip_pass"
-                    else:
-                        per["declared"] = "scale_only"
-                        per["rescope_marker"] = STE_RESCOPE_MARKER
+                per["flip_pass"] = flip
+                if flip["accepted_u"] + flip["accepted_v"] > 0:
+                    per["declared"] = "discrete_flip_pass"
                 else:
-                    per["declared"] = "paper_ste"
-                _set_linear(linear, fac, factor_mode=cfg.factor_mode)
-            per["allocated_steps"] = int(alloc[idx])
+                    per["declared"] = "scale_only"
+                    per["rescope_marker"] = STE_RESCOPE_MARKER
+            else:
+                per["declared"] = "paper_ste"
+            per["scheduled_steps"] = int(total_ste)
+            _set_linear(linear, fac, factor_mode=cfg.factor_mode)
             ste_records[name] = per
 
         # --- Step 1 (line 12): the single per-block TuneFP pass, at the
@@ -1313,7 +1349,6 @@ def reconstruct_block(
             recorder(
                 "ste",
                 per_linear=ste_records,
-                allocation={name: int(alloc[i]) for i, (name, _) in enumerate(quantizable_linears)},
                 total_steps=total_ste,
                 teacher_source=teacher_source,
                 teacher_fingerprint=teacher_fingerprint,
@@ -1444,6 +1479,7 @@ def reconstruct_model(
     recorder=None,
     checkpoint_dir=None,
     teacher_model: nn.Module | None = None,
+    stats_book=None,
 ) -> list[BlockReconResult]:
     """Phase 2 over every direct child block of ``model``, sequentially.
 
@@ -1474,6 +1510,15 @@ def reconstruct_model(
     refuses on config/code fingerprint mismatch, and both the save and the
     restore are driven by the LIVE block's expected quantizable names
     (qk-fix-fp-resume-guard), never by what an archive happened to contain.
+
+    ``stats_book`` (optional) is the Phase-1 statistics book collected once
+    over the pristine FP model on the raw calibration set (Algorithm 1 lines
+    2-5). When supplied, each block's scoped slice of it is handed to
+    ``reconstruct_block`` and no per-block statistics pass runs at all; the
+    compressed-prefix stream stays the TUNING input (line 9), never the
+    statistics source. When omitted (direct callers) the legacy per-block
+    collection remains, so a caller that has no Phase-1 pass is not silently
+    handed fabricated statistics.
     """
     quantizable = _quantizable_names(model)
     if not quantizable:
@@ -1552,6 +1597,7 @@ def reconstruct_model(
                 cfg,
                 x_b=x_running.clone(),
                 y_b=y_b,
+                stats_book=_block_stats_slice(stats_book, name, block, cfg),
                 recorder=recorder,
                 name_prefix=name,
                 teacher_block=teacher_block,

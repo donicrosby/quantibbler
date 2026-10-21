@@ -19,9 +19,35 @@ import torch
 from torch import nn
 
 from .block_recon import QuantizedLayerState, _quantizable_names, reconstruct_model
+from .calibration import collect_stats
 from .config import PTQConfig
 
 __all__ = ["QuantizedModel", "quantize_model"]
+
+#: Row-chunk size for the Phase-1 statistics pass over a real (non-float64)
+#: model: the backward's retained attention graph is bounded to this many rows
+#: while the per-batch gradient statistic stays the same (the raw float64
+#: gradient is accumulated across chunks and squared once). The float64
+#: reference path (executable-spec fixtures) stays whole-batch, bit-identical
+#: to the landed single-pass behavior.
+#:
+#: MEASURED, and it is ONE row, not a preference. The whole-model pass retains
+#: the N^2 attention graph for its chunk, so the chunk size is the memory knob
+#: at the protocol's 2048-token rows: inside `quantibbler-ptq:latest` at the
+#: wrapper's 32g memcg, a single batch of 8 x 2048 through Qwen3-0.6B with
+#: `chunk_rows=4` was OOM-KILLED, while `chunk_rows=1` completed at an 18.47 GB
+#: cgroup peak (42.3 s for the 8 rows, 197 linears) — ~1.7x margin under the
+#: cap. The pre-hoist per-block pass could afford 4 because one decoder block
+#: retains one layer's graph; the whole model retains all of them.
+_PHASE1_CHUNK_ROWS = 1
+
+
+def _phase1_chunk_rows(model: nn.Module) -> int | None:
+    """Chunk size for the Phase-1 statistics pass, from the solver dtype."""
+    for param in model.parameters():
+        if param.dtype.is_floating_point:
+            return None if param.dtype == torch.float64 else _PHASE1_CHUNK_ROWS
+    return None
 
 
 def quantize_model(
@@ -63,10 +89,21 @@ def quantize_model(
     if not quant_names:
         raise ValueError("model has no quantizable nn.Linear layers")
 
-    # Phase 1 global statistics are NOT computed here: the per-block
-    # statistics passes at reconstruction time are what feed the
-    # preconditioners (see design.md section 11). collect_stats remains
-    # public for the QAT lane's global-pass use.
+    # Phase 1 (Algorithm 1 lines 2-5), hoisted to a real pre-loop pass: ONE
+    # statistics pass over the PRISTINE FP model on the RAW calibration set,
+    # before any block is reconstructed. The block loop then consumes this
+    # pre-collected per-linear book, and the per-block capture no longer
+    # doubles as the statistics source — it was reading the compressed-prefix
+    # stream, which is line 9's TUNING input, not the paper's statistics input.
+    chunk_rows = _phase1_chunk_rows(model)
+    stats_book = collect_stats(model, batches, chunk_rows=chunk_rows)
+    if recorder is not None:
+        recorder(
+            "phase1_statistics",
+            linears=stats_book.layer_names,
+            num_linears=stats_book.num_layers,
+            chunk_rows=chunk_rows,
+        )
 
     # fp teacher, structurally frozen before any block is reconstructed
     # (Phase 3's cached logits must come from the pre-quantization model,
@@ -84,6 +121,7 @@ def quantize_model(
         checkpoint_dir=checkpoint_dir,
         recorder=recorder,
         teacher_model=teacher,
+        stats_book=stats_book,
     )
     layers: dict[str, QuantizedLayerState] = {}
     for result in results:

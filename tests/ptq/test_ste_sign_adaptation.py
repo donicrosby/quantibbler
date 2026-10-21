@@ -162,7 +162,15 @@ def test_scn_zero_flip_completion_is_never_silent():
 # --------------------------------------------------------------------------
 
 
-def test_scn_refinement_covers_every_factorized_linear_with_allocation():
+def test_scn_refinement_covers_every_factorized_linear_with_full_budget():
+    """Every scoped linear gets the FULL per-linear budget — no pooled split.
+
+    The refinement unit is the LINEAR (Step-3 prose "the current target
+    linear layer", Eq. 10's variables, App. C's 8 epochs at batch 1): each
+    scoped linear consumes `epochs x (n // batch)` steps, and the schedule
+    record carries them. The block-pooled equal split this replaced
+    under-budgeted STE 7x against the paper.
+    """
     block = _SevenLinearBlock(seed=41)
     sink: list = []
     cfg = PTQConfig(rank=3, stage_latent=StageHyper(1e-3, 4, 8))
@@ -172,18 +180,15 @@ def test_scn_refinement_covers_every_factorized_linear_with_allocation():
     assert sorted(ste["per_linear"]) == sorted(SEVEN), (
         "refinement did not cover every factorized linear in the block"
     )
-    alloc = ste["allocation"]
-    assert list(alloc) == SEVEN, "the allocation must follow declaration order"
-    total = sum(alloc.values())
-    assert total == ste["total_steps"] > 0
-    base, rem = divmod(total, len(SEVEN))
-    assert [alloc[n] for n in SEVEN] == [base + (1 if i < rem else 0) for i in range(len(SEVEN))], (
-        "the T_post split is not equal-with-remainder-to-the-earliest"
-    )
+    # 8 epochs x (8 rows // batch 4) — the paper's per-linear budget, and it
+    # is what EVERY linear receives.
+    total = ste["total_steps"]
+    assert total == cfg.stage_latent.epochs * (8 // cfg.stage_latent.batch_size)
+    assert "allocation" not in ste, "a block-pooled allocation survived the re-ruling"
     for name in SEVEN:
         rec = ste["per_linear"][name]
-        assert rec["allocated_steps"] == alloc[name]
-        assert rec["steps"] == alloc[name]
+        assert rec["scheduled_steps"] == total, name
+        assert rec["steps"] == total, name
         assert {
             "flips_u",
             "flips_v",
@@ -193,25 +198,120 @@ def test_scn_refinement_covers_every_factorized_linear_with_allocation():
             "s1_rel_move",
             "s2_rel_move",
         } <= set(rec)
-        assert len(rec["per_step_flips"]) == alloc[name]
+        assert len(rec["per_step_flips"]) == total
         assert rec["s1_rel_move"] >= 0.0 and rec["s2_rel_move"] >= 0.0
 
 
-def test_small_budget_allocation_is_deterministic_and_explicit():
-    """A budget smaller than the linear count is recorded, never hidden."""
+def test_full_budget_is_per_linear_not_a_pooled_split():
+    """A per-linear budget smaller than the linear count is NOT divided up."""
     block = _SevenLinearBlock(seed=44)
     sink: list = []
     cfg = PTQConfig(rank=3, stage_latent=StageHyper(1e-3, 4, 1))
     reconstruct_block(block, _calib(8, seed=44), cfg, recorder=_recorder(sink))
     ste = [info for event, info in sink if event == "ste"][0]
-    alloc = ste["allocation"]
-    assert list(alloc) == SEVEN
-    assert sum(alloc.values()) == ste["total_steps"]
+    assert "allocation" not in ste
+    total = ste["total_steps"]
+    assert total == 1 * (8 // 4)  # epochs x (rows // batch), per linear
     for name in SEVEN:
         rec = ste["per_linear"][name]
-        assert rec["allocated_steps"] == alloc[name]
-        if alloc[name] == 0:
-            assert rec["declared"] == "not_scheduled_zero_budget"
+        assert rec["scheduled_steps"] == total
+        assert rec["steps"] == total
+        # The zero-budget "not_scheduled" residual is gone: every linear runs.
+        assert rec["declared"] in {"paper_ste", "discrete_flip_pass", "scale_only"}, name
+
+
+# --------------------------------------------------------------------------
+# The paper-faithful path: polish off, no extra discrete stages, paper_ste
+# --------------------------------------------------------------------------
+
+
+def _faithful_cfg(**kwargs) -> PTQConfig:
+    return PTQConfig(
+        rank=3,
+        stage_latent=StageHyper(1e-8, 4, 8),
+        paper_faithful=True,
+        **kwargs,
+    )
+
+
+def test_scn_paper_faithful_hands_ste_continuous_latents(monkeypatch):
+    """The faithful path must hand STE the Eq. 9 latents, not +-1 polish bits."""
+    from quantibbler.ptq import block_recon as br
+
+    seen: dict[str, torch.Tensor] = {}
+    real = br._tune_latent_ste
+
+    def spy(block, facs, x_b, y_b, cfg, batch_size, *, steps=None, label=""):
+        for name, fac in facs.items():
+            seen[name] = fac.u_latent.detach().clone()
+        return real(block, facs, x_b, y_b, cfg, batch_size, steps=steps, label=label)
+
+    monkeypatch.setattr(br, "_tune_latent_ste", spy)
+    br.reconstruct_block(_SevenLinearBlock(seed=91), _calib(8, seed=91), _faithful_cfg())
+    assert seen, "the faithful run never reached the STE stage"
+    for name, u in seen.items():
+        assert not torch.all(u.abs() == 1.0), (
+            f"{name}: polish-binarized +-1 bits reached STE on the faithful path"
+        )
+
+
+def test_scn_paper_faithful_disables_greedy_polish(monkeypatch):
+    """`paper_faithful_disables_greedy_polish`: the production path is untouched."""
+    from quantibbler.ptq import block_recon as br
+
+    calls: list[int] = []
+    real = br.greedy_polish
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(br, "greedy_polish", spy)
+    sink: list = []
+    br.reconstruct_block(
+        _SevenLinearBlock(seed=91), _calib(8, seed=91), _faithful_cfg(), recorder=_recorder(sink)
+    )
+    assert calls == [], "the faithful path ran the extra-paper greedy polish"
+    lb = [info for event, info in sink if event == "lb_admm"][0]
+    assert lb["polish_rounds"] == 0, "the artifact must PROVE zero polish rounds"
+
+    # The production (non-faithful) binary path keeps the polish unchanged.
+    calls.clear()
+    sink2: list = []
+    br.reconstruct_block(
+        _SevenLinearBlock(seed=91),
+        _calib(8, seed=91),
+        PTQConfig(rank=3, stage_latent=StageHyper(1e-8, 4, 8)),
+        recorder=_recorder(sink2),
+    )
+    assert calls == [1] * len(SEVEN), "the production path must polish every scoped linear"
+    lb2 = [info for event, info in sink2 if event == "lb_admm"][0]
+    assert lb2["polish_rounds"] == PTQConfig().polish_rounds
+
+
+def test_scn_paper_faithful_records_measured_crossings_with_no_rescope():
+    """`sign_adaptation_is_effective_or_declared`: the paper path is exempt.
+
+    [NQ] prescribes sign+pack on whatever signs STE produced (Algorithm 1
+    lines 20-23), so a zero-crossing outcome on the faithful path is a
+    MEASUREMENT, not a re-scope: no discrete flip pass fires, no scale-only
+    marker appears, and `declared` is `paper_ste` on every linear — even when
+    a nonzero flip-pass budget is configured.
+    """
+    sink: list = []
+    block = _SevenLinearBlock(seed=71)
+    cfg = _faithful_cfg(ste_flip_pass_budget=3)
+    reconstruct_block(block, _calib(8, seed=71), cfg, recorder=_recorder(sink))
+    ste = [info for event, info in sink if event == "ste"][0]
+    assert ste["per_linear"], "no per-linear STE record"
+    for name, rec in ste["per_linear"].items():
+        assert rec["declared"] == "paper_ste", name
+        assert "flip_pass" not in rec, name
+        assert "rescope_marker" not in rec, name
+        assert rec["scheduled_steps"] == ste["total_steps"], name
+        # The measurement still travels, so a zero-crossing geometry is on
+        # record rather than hidden by the declaration.
+        assert isinstance(rec["zero_crossings"], bool)
 
 
 # --------------------------------------------------------------------------

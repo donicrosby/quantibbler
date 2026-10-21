@@ -63,10 +63,15 @@ informed-assumption marker, recorded in code and artifacts.
   delta vs pristine) plus teacher provenance and the informed-assumption
   marker.
 - Defaults (T_pre, lr, cosine schedule) stay [NQ] App. C; no budget change.
+- The proof-scale report separates quantization-method fidelity from PPL
+  evaluation comparability. The local fixed-window PPL gate records its
+  exact WT2 coverage and cannot claim parity with the paper's tables; a
+  faithful-flagged fire must use the local evaluator's maximal complete-batch
+  window.
 
 ## Impact
 
-- **Affected specs**: `qk-ptq`, one ADDED requirement only (sibling changes
+- **Affected specs**: `qk-ptq`, ADDED requirements only (sibling changes
   `qk-nq-recreation-bar`, `qk-divergence-guards` etc. carry live deltas under
   the same capability — no MODIFIED/REMOVED, per the parallel-changes rule).
 - **Affected code**: `src/quantibbler/ptq/block_recon.py` (`_tune_fp`, capture
@@ -78,6 +83,9 @@ informed-assumption marker, recorded in code and artifacts.
 - No change to Step 2 (LB-ADMM) or Step 3 (STE) budgets in this change.
 - No stage budget/lr retuning in this change.
 - No change to `factor_mode=fp` behavior (see `qk-fix-fp-resume-guard`).
+- No claim that the local fixed-window token PPL reproduces the paper's
+  table evaluator: [NQ] names WT2 perplexity and `lm_eval=0.4.9`, but the
+  pinned corpus does not specify exact coverage/windowing semantics.
 
 ## User directive (2026-10-21)
 

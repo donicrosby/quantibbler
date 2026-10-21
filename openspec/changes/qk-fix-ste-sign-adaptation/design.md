@@ -118,3 +118,83 @@ sec-eng found two spec defects before build; both folded as rulings:
   paper path; re-binarization accompanies it, never replaces it.
 - **Continuous relaxation (temperature-annealed sigmoid).** Changes the
   forward the kernels contract with; violates "binaries ±1 by construction".
+
+## Amendment (2026-10-21, planner, pre-fire: T_post re-ruling + faithful-path semantics)
+
+Four pre-fire rulings, all read from the corpus on my own bytes. The first
+REVOKES the S2 equal-split budget rule; the scheduling ruling (per-layer,
+Figure 3 right panel) stands.
+
+- **Budget re-ruling — the refinement unit is the LINEAR; full budget per
+  linear.** Evidence the S2 fold predates: Step-3 prose (corpus line 641)
+  names the refinement unit "the current target linear layer" (singular);
+  Eq. 10's optimization variables are ONE linear's (U, V, s1, s2) against
+  the block mapping; App. C (corpus line 3007) attaches the factorized
+  stage's 8 epochs to that per-linear refinement — at batch 1, 8 × 128 =
+  1024 steps per linear. Algorithm 1's line 19 is a block-level CALL
+  because the objective needs the block mapping; the schematic elides the
+  internal per-layer loop exactly as it elides every subroutine's
+  internals (same elision class as the TuneFP placement ruling). Ruling:
+  each scoped linear's TuneLatentSTE consumes the FULL
+  `epochs × (n // batch)` steps; the landed block-pool equal split (~146
+  steps/linear ≈ 1.14 epochs) under-budgets STE 7× against the paper and
+  is REMOVED from the faithful path. The per-layer schedule record
+  survives (each linear records its full scheduled steps). Driver diff:
+  `steps=total_ste` instead of `steps=alloc[idx]`; the alloc array and
+  the zero-budget residual disappear. Bug Hunter's reading was correct;
+  my earlier split ruling predates anyone reading the Step-3 prose
+  closely.
+- **Faithful-path zero-crossing semantics.** The paper's method is: STE 8
+  epochs per linear, then sign+pack whatever signs result (Algorithm 1
+  lines 20-23). A zero-crossing outcome IS the paper's outcome — a
+  measurement, not a re-scope. On the faithful path: no discrete flip
+  pass fires and no scale-only declaration fires; the record carries
+  `declared: paper_ste` with the measured zero-crossing count. The ladder
+  (discrete pass, re-scope marker) remains the diagnostic path's
+  fail-honest machinery. Note: the rehearsal's zero-crossing geometry was
+  measured on the POLISHED path (latents at exactly ±1); the paper's path
+  has never been measured — the faithful run is its first measurement.
+- **Polish off on the faithful path.** The greedy bit-flip polish is an
+  extra-paper discrete stage (named in the stage map); it refolds latents
+  to exactly ±1, making the paper's STE structurally unable to flip
+  signs. The paper's Stage 2 ends at the balanced continuous latents (Eq.
+  9); Stage 3 refines them. Ruling: `polish = factor_mode == "binary" and
+  ablation != "untuned-signs" and not cfg.paper_faithful`; the lb_admm
+  event records polish_rounds 0 so the artifact proves it; export signs
+  the refined latents at lines 20-23. Production runs keep polish
+  (solver quality is a production concern; production-runs.md's
+  svd/polish rulings are untouched).
+- **Solver ruling (launch line).** Algorithm 1 line 16 = LB-ADMM; App. C
+  pins a linear penalty schedule over 400 factorization steps per weight
+  matrix — the pipeline's `lb_admm` implements exactly that (linear rho
+  schedule over `cfg.admm_max_iter`, default 400). The production line's
+  `solver=svd` is the measured ABLATION (lands within ~0.003 cos of ADMM
+  on production layers); an ablation verdict about artifact quality is
+  not a fidelity ruling. The faithful run fires `SOLVER=admm`. Cost:
+  66-83 s per linear × 196 linears ≈ +4 h (in the fire budget below).
+  Production path (svd) untouched.
+
+## Fire pins (pre-fire, 2026-10-21)
+
+- **Launch line:** `RANK=512 SOLVER=admm SEQ_LEN=2048 PAPER_FAITHFUL=1
+  OUT=/opt/data/quantibbler/artifacts/qwen3-0.6B-r512-admm-paperfaithful
+  sh tools/run-ptq-container.sh`. TUNE_SEQ_LEN unset (tune geometry =
+  calibration geometry, Algorithm 1 line 9); STE_FLIP_PASS_BUDGET unset
+  (0); CALIBRATION_SEQS=16 (128 rows = App. C); max-admm-iter default 400
+  (App. C); `EVAL_SEQS=18`, the measured maximal complete-batch window
+  of the local evaluator. It is 144/145 complete blocks (294,912 /
+  298,938 source tokens = 98.653%), not "full WT2" and not asserted
+  paper-table-comparable; the separate evaluation record pins coverage.
+- **Budget:** TuneFP ≈1.0 h (7,168 steps × 519.9 ms measured at (4,2048))
+  + STE ≈8.4 h (200,704 steps × 150.6 ms measured at (1,2048)) + LB-ADMM
+  ≈4 h (66-83 s × 196 linears) + Phase-1 stats and PPL evals — **~14 h
+  wall, quoted as 13.5-14.5 h**.
+- **Label rule (sec-eng, folded):** no unwaived runtime deviation is
+  compatible with `paper_faithful: true`. The reported label is a
+  computed verdict (tunefp delta: the flag AND empty runtime_deviations
+  AND no mechanism deviation), never a forwarded flag.
+  Informed-assumption markers are documentation, not deviations.
+- **Contingency:** only a real memcg OOM at the paper's batch points
+  (measured preflight: (4,2048) = 519.9 ms inside the container) makes a
+  tune-geometry split defensible — and then with the OOM evidence
+  attached to the named deviation and the label false.

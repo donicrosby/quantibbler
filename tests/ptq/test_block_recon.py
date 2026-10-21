@@ -83,6 +83,56 @@ def test_scn_block_loop_order():
     assert captured["targets"][1].shape == x.shape
 
 
+def test_block_loop_consumes_the_phase1_book_entry_for_entry(monkeypatch):
+    """The hoist: one pre-loop pass, and the block loop consumes ITS entries.
+
+    Identity, not equality: a block that quietly recomputed statistics would
+    look the same in the record, so the test watches the objects handed to
+    ``reconstruct_block``.
+    """
+    from quantibbler.ptq import block_recon as br
+    from quantibbler.ptq.block_recon import reconstruct_model
+    from quantibbler.ptq.calibration import collect_stats
+
+    d = 8
+    model = nn.Sequential(_TinyBlock(d, seed=0), _TinyBlock(d, seed=1))
+    batches = _calib(d, seed=4)
+    cfg = PTQConfig(rank=4)
+    book = collect_stats(model, batches)
+    assert sorted(entry.name for entry in book) == ["0.fc1", "0.fc2", "1.fc1", "1.fc2"]
+
+    handed: list = []
+    real = br.reconstruct_block
+
+    def spy(block, calibration_batches, cfg_, **kwargs):  # noqa: ANN001
+        handed.append(kwargs.get("stats_book"))
+        return real(block, calibration_batches, cfg_, **kwargs)
+
+    monkeypatch.setattr(br, "reconstruct_block", spy)
+
+    def explode(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("the block loop collected its own statistics")
+
+    monkeypatch.setattr(br, "collect_stats", explode)
+
+    reconstruct_model(model, batches, cfg, stats_book=book)
+    assert len(handed) == 2, "only the quantizable blocks carry statistics"
+    by_name = {entry.name: entry for entry in book}
+    for prefix, sliced in zip(("0", "1"), handed, strict=True):
+        assert [entry.name for entry in sliced] == [f"{prefix}.fc1", f"{prefix}.fc2"]
+        assert sliced[0] is by_name[f"{prefix}.fc1"]
+        assert sliced[1] is by_name[f"{prefix}.fc2"]
+
+
+def test_block_stats_slice_fails_loudly_when_the_inventory_disagrees():
+    """A missing entry is an error, never a silent local re-collection."""
+    from quantibbler.ptq.block_recon import _block_stats_slice
+    from quantibbler.ptq.calibration import LayerStatsBook
+
+    with pytest.raises(ValueError, match="no entry for"):
+        _block_stats_slice(LayerStatsBook(), "0", _TinyBlock(8, seed=0), PTQConfig(rank=4))
+
+
 def test_scn_ste_refinement():
     """ste_refinement_improves_mse: gradients reach (U, V, s1, s2) with
     straight-through sign passthrough, and block-output MSE decreases over
