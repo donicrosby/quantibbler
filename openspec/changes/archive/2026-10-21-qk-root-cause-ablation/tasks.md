@@ -68,7 +68,7 @@
   constraint is **not** the kill site; the defect is upstream in continuous
   factorization/scale/write-back. No cross-geometry comparison is claimed.
 
-## 5. Rungs 2-3 measurements (coder, sequenced after rung 1 lands)
+## 5. Rungs 2-4 measurements (coder, sequenced after rung 1 lands)
 
 - [x] `untuned-signs` at the same geometry: depth 2 (`layers.1`), prefix PPL
   **1,599,091.605664219** vs fp pedestal **18.88104607051466**, ratio
@@ -85,13 +85,20 @@
 - [x] `layer_scope=mlp` at the same geometry: depth 2 ratio
   **1.8699355654649084x** (ok band), then abort at depth 3 (`layers.2`):
   prefix PPL **1279.2058956388878**, ratio **67.75079573777128x** (marginal
-  depth-2→3 jump 36.23x), wall 480.9 s, status `failed`. Both layer families
-  individually exceed the collapse line, so the defect is not specific to
-  attention or MLP; MLP simply needs one more block to cross it.
-- [ ] Each run's report + probe history recorded in this file; verdicts are
-  measurements — expected `failed`, never tuned against (D-5, design.md).
+  depth-2 to depth-3 multiplier **36.23162048416727x**), wall 480.9 s,
+  status `failed`. Both layer families individually exceed the collapse line,
+  so the defect is not specific to attention or MLP; MLP needs one more block
+  to cross it. The exact announced geometry was already running under planner
+  session `proc_e450f3f44e64`; its report landed at
+  `/opt/data/tmp/rca-rung3-mlp/quantize_report.json`. The announced
+  `/opt/data/tmp/rca-rung4-mlp` target was not fired a second time and does not
+  exist.
+- [x] Every run's report and complete probe history are recorded above;
+  arithmetic and fail-closed provenance were independently audited. Verdicts
+  are measurements -- expected `failed`, never tuned against (D-5, design.md).
 
 ## 6. Orchestrator
 
-- [ ] Strict-validate the change; chain the gates; commit and push per
-  protocol after reviews clear.
+- [x] Strict validation and local gates passed on the landing bytes; commit
+  `8dfab5c` was pushed to `main`, remote HEAD read back exactly, and GitHub
+  Actions run `39536090909` completed **7/7 success**.

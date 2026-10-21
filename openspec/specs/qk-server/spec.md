@@ -1,7 +1,8 @@
 # qk-server Specification
 
 ## Purpose
-TBD - created by archiving change qk-server. Update Purpose after archive.
+
+Define the pure-Rust OpenAI-compatible inference service that fail-closed loads a local qpk1 model directory and serves deterministic completion traffic without Python.
 
 ## Requirements
 

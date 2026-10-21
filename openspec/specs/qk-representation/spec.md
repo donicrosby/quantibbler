@@ -1,7 +1,8 @@
 # qk-representation Specification
 
 ## Purpose
-TBD - created by archiving change qk-representation. Update Purpose after archive.
+
+Define the qpk1 binary stream and model-directory contracts that safely carry factorized linear layers from the Python compressor to pure-Rust consumers.
 
 ## Requirements
 

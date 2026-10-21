@@ -153,6 +153,36 @@ Ablation runs continue to use the existing tune/eval geometry split
 runs follow the launch protocol (announce the launch line first) — the
 unattributable-corpse rule applies even to expected failures.
 
+## Measurement adjudication (2026-10-21)
+
+All four registered rungs completed. Continuous fp factors failed at depth 2
+(108,550.4041x), so signs are not the necessary kill site. Untuned signs failed
+in the same class (84,692.9561x), so refinement is neither necessary nor
+sufficient for the explosion. Attention-only failed at depth 2 (257.5404x),
+while MLP-only was inside the line at depth 2 (1.8699x) and failed at depth 3
+(67.7508x). Both projection families can independently collapse; the selected
+branch is machinery shared by their continuous factorization, scale handling,
+or host write-back. Because fp mode deliberately skipped global scale
+calibration and still failed, that later stage is not a necessary cause of the
+early observed collapse; this does not exonerate it from separate later-stage
+quality risk.
+
+`ratio ** (1/depth)` is only a geometric mean over the observed prefix, not a
+claim of uniform per-block damage. The MLP history demonstrates the distinction:
+the depth-2 ratio is 1.8699355654649084x and the depth-3 ratio is
+67.75079573777128x, an actual adjacent-depth multiplier of
+36.23162048416727x. Existing geometric-mean labels remain aggregate summaries;
+they must not be narrated as each block's measured contribution.
+
+The MLP run's exact announced geometry was already live under planner session
+`proc_e450f3f44e64` and wrote
+`/opt/data/tmp/rca-rung3-mlp/quantize_report.json`; no duplicate run was fired
+for the later announced `/opt/data/tmp/rca-rung4-mlp` path. The next diagnostic
+should measure per-linear norm ratio, directional cosine, and scale magnitude at
+each stage on a failing production-scale block. A scoped-fp rerun tests an
+interaction already downstream of the selected branch but does not identify the
+stage, so it is not added to this completed ladder.
+
 ## Out of scope
 
 - Per-layer rank schedules, solver changes, KD/STBLLM-adjacent objectives.

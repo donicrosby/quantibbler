@@ -1,7 +1,8 @@
 # qk-kernels Specification
 
 ## Purpose
-TBD - created by archiving change qk-kernels. Update Purpose after archive.
+
+Define the shared Rust kernels and parity contracts for packed binary-factor operations used by both the Python compressor and the pure-Rust inference server.
 
 ## Requirements
 
