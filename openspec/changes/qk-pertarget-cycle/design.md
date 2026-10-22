@@ -124,19 +124,32 @@ The `545 passed` figure describes **the host interpreter, not the ptq image**:
   needed `ensurepip`. The 545 number is not reproducible in that container as
   shipped.
 
-## 8. Known flake: the divergence-gate seed lottery — acceptance condition
+## 8. The divergence-gate seed lottery — cause found, band pinned and gated
 
-At rank 3, the `_SevenLinearBlock` fixture family trips the post-balance
-divergence gate on **4 of 24 seeds, in BOTH arms** (4/24 under this rework,
-4/24 on `7db1ab9`, different seed sets). The rate belongs to the fixture, not
-to the placement — but `test_full_budget_is_per_linear_not_a_pooled_split` sat
-on the gate at seed 44 (fine at baseline, tripped under the cycle) and moved to
-**47** with the measurement recorded in the test.
+At rank 3 the `_SevenLinearBlock` fixture family trips the post-balance
+divergence gate on a minority of seeds, in **both** arms (4/24 under this rework
+and 4/24 on the previous placement — the rate is the fixture's, not the
+placement's; the two seed sets differ). `test_full_budget_is_per_linear_not_a_pooled_split`
+sat on that band at seed 44 and moved to **47**, off it.
 
-**Consequence:** any full-suite gate carries a **~1-in-6 false-red rate**.
-Pin the fixture seeds in the CI-referee config, or fix the lottery, **before**
-the rebase/push protocol treats "suite green" as a checkable fact. A gate with
-a known 1-in-6 false-red trains exactly the habit that makes gates theater.
+@slop-remover refused a seed-shopping fix, and was right to. The flake was then
+chased to a cause and closed:
+
+- **Cause: reduction order.** BLAS picks its reduction order from the thread
+  count. `tests/ptq/conftest.py` now pins `torch.set_num_threads(1)`.
+- **Cause: a global draw.** The fixture's `nn.Linear(...)` consumed the GLOBAL
+  stream for a default init the next line overwrote — deterministic values,
+  non-deterministic global stream. The fixture now builds through
+  `_explicit_linear()`, which forks the construction so no global draw escapes.
+  `torch.manual_seed` no longer appears in that file at all.
+- **Proof, not assumption.** The same 24-seed sweep, run in **two separate
+  invocations**, is **byte-identical**: 24 rows, gate trips at **seeds 16 and 18**
+  (2/24), both runs, stderr clean.
+- **The band is owned, not avoided.**
+  `test_the_divergence_gate_fires_on_a_known_band_seed` runs seed 16 and asserts
+  `QuantizationDivergenceError` is raised, so the guard's *firing* is tested — a
+  regression that widens or narrows the band now changes a result. Verified
+  seed-sensitive: seed 47 does not raise.
 
 ## 9. Phantom date: `2026-10-27` — census, and what is *not* established
 
@@ -349,3 +362,29 @@ must-be-absent set is three objects, not two — `4229e8a`, `2a92995`, and the
 **pre-amend** `7daea90`. The box-holds-no-token verdict is false while that
 third one lives as a loose object, which is why the amend has to slot *before*
 the ref work rather than after it.
+
+## 15. Two corrections to my own previous report, from measurement
+
+1. **The band is 2/24 with the seeds named, not "~1 in 6".** The earlier figure
+   came from non-reproducible multi-threaded runs. After the thread pin the
+   measurement reproduces byte-identically, which is what turns it from a rumour
+   into a number.
+2. **The `randn_like` catch was aimed at the wrong artifact, but the instinct was
+   right.** @planner's recipe did draw the global RNG (correct), and the fixture
+   it would have been injected into is the wrong fix (§13) — but the surviving
+   requirement, *every draw generator-explicit*, turned out to be real. It was
+   just located in the **existing** fixture builder rather than in a new
+   injection.
+
+**And the cumulative-cycle criterion (§13) cannot be computed from the two
+residual fields as they stand — measured, not argued.** Per-fire
+`residual_before` is measured at that fire's own student state, and the prefix
+accumulates quantization damage as targets are factorized, so it *rises*
+monotonically across the cycle: 0.25901, 0.50557, 0.62073, 1.16799, 1.47361,
+1.51489. Comparing the first fire's `before` to the last fire's `after` is
+0.25901 -> 1.51400 — a **5.8x increase** — so the criterion as stated would
+red-light every block. The per-fire pair is a valid measurement (tune vs no-tune
+at one student state); the **cross-fire comparison is the invalid step**. A
+genuine cumulative criterion needs a same-prefix counterfactual, which means
+recomputing the factorizations from the untuned weights: SVD-only cost, no
+optimizer steps, but a second pass over the block.

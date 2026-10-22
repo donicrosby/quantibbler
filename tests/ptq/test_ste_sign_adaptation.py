@@ -12,12 +12,14 @@ refinement was inert in the configuration the pipeline actually ran, and a
 zero-flip completion was indistinguishable from a healthy stage.
 """
 
+import pytest
 import torch
 from torch import nn
 
 from quantibbler.ptq.block_recon import (
     STE_RESCOPE_MARKER,
     FactorizedLinear,
+    QuantizationDivergenceError,
     _discrete_flip_pass,
     _set_linear,
     _tune_latent_ste,
@@ -85,6 +87,24 @@ def _calib(d: int = 8, n: int = 4, seq: int = 8, seed: int = 1) -> list[torch.Te
     return [torch.randn(n, seq, d, generator=gen, dtype=torch.float64) for _ in range(2)]
 
 
+def _explicit_linear(seed: int, *, scale: float = 0.3) -> nn.Linear:
+    """The 12<-16 fixture Linear, with every draw generator-explicit.
+
+    ``nn.Linear(...)`` consumes the GLOBAL stream for its default init, which the
+    next line then overwrites: the weight is deterministic while the global RNG
+    state is not, so the fixture silently shifts any later global draw depending
+    on how many of these were built. Forking the construction leaves the global
+    stream untouched, which is what lets a measured number in this file be cited
+    from one CI run to the next. Shape and values are unchanged.
+    """
+    with torch.random.fork_rng():
+        linear = nn.Linear(16, 12, bias=False, dtype=torch.float64)
+    gen = torch.Generator().manual_seed(seed)
+    with torch.no_grad():
+        linear.weight.copy_(torch.randn(12, 16, generator=gen, dtype=torch.float64) * scale)
+    return linear
+
+
 def _recorder(sink: list) -> object:
     def rec(event: str, **info) -> None:
         sink.append((event, info))
@@ -105,11 +125,7 @@ def test_scn_ste_records_its_own_objective_effect():
     declared ``paper_ste`` anyway. The trio — ``residual_before``,
     ``residual_after``, ``gradient_norm`` — is what makes that budget auditable.
     """
-    torch.manual_seed(0)
-    linear = nn.Linear(16, 12, bias=False, dtype=torch.float64)
-    with torch.no_grad():
-        gen = torch.Generator().manual_seed(11)
-        linear.weight.copy_(torch.randn(12, 16, generator=gen, dtype=torch.float64) * 0.3)
+    linear = _explicit_linear(11)
     fac = _fac_from_weight(linear.weight.detach(), rank=6)
     _set_linear(linear, fac)
 
@@ -138,11 +154,7 @@ def test_scn_ste_records_its_own_objective_effect():
 
 def test_scn_paper_ste_crosses_a_near_zero_latent_and_records_counts():
     """Latents AT the decision boundary must cross under the paper's own STE."""
-    torch.manual_seed(0)
-    linear = nn.Linear(16, 12, bias=False, dtype=torch.float64)
-    with torch.no_grad():
-        gen = torch.Generator().manual_seed(3)
-        linear.weight.copy_(torch.randn(12, 16, generator=gen, dtype=torch.float64) * 0.3)
+    linear = _explicit_linear(3)
     fac = _fac_from_weight(linear.weight.detach(), rank=6)
     with torch.no_grad():
         fac.u_latent.data[0, 0] = 1e-9
@@ -431,10 +443,7 @@ def test_scn_flip_pass_is_reproducible():
 
 def test_disabled_flip_pass_makes_no_proposals():
     """budget = 0 disables the pass; the record still names the deviation."""
-    linear = nn.Linear(16, 12, bias=False, dtype=torch.float64)
-    with torch.no_grad():
-        gen = torch.Generator().manual_seed(7)
-        linear.weight.copy_(torch.randn(12, 16, generator=gen, dtype=torch.float64) * 0.3)
+    linear = _explicit_linear(7)
     fac = _fac_from_weight(linear.weight.detach(), rank=6)
     _set_linear(linear, fac)
     gen = torch.Generator().manual_seed(8)
@@ -467,3 +476,24 @@ def test_flip_acceptance_objective_is_the_block_forward():
     # The dimensionally-incoherent layer-local form must not appear anywhere.
     module_src = inspect.getsource(br)
     assert "Wq@x_b" not in module_src and "Wq @ x_b" not in module_src
+
+
+def test_the_divergence_gate_fires_on_a_known_band_seed():
+    """The band this fixture sits in is pinned, named, and actually gated.
+
+    The rank-3 family trips the post-balance divergence gate on a known set of
+    seeds, and pinning the schedule test OFF that band is only half a job: with
+    nothing ON the band, the guard's own firing is untested, so a regression that
+    widens the band would flip no test at all. This test owns the band — it runs
+    a seed measured to trip and asserts the guard fires.
+
+    Measured with ``torch.set_num_threads(1)`` (pinned in this tier's conftest):
+    seeds 16 and 18 of 0..23 trip — 2/24 — byte-identical across two separate
+    invocations. Before the thread pin the same family's failures were *not*
+    reproducible between invocations, which is why the pin lives in conftest and
+    not in a comment here.
+    """
+    block = _SevenLinearBlock(seed=16)
+    cfg = PTQConfig(rank=3, stage_latent=StageHyper(1e-3, 4, 1))
+    with pytest.raises(QuantizationDivergenceError):
+        reconstruct_block(block, _calib(8, seed=16), cfg, recorder=_recorder([]))
