@@ -11,6 +11,14 @@ error at the second block, against the paper's implied ~1.03x per block
 and composes; a 145x-per-block wreck at block 2 is not hardness — it is a bug in
 the solver, the scale calibration, or the block write-back.
 
+> Annotation (2026-10-22, from `date -u`): the `r512-d1` run cited above is
+> not a controlled ablation arm. Its breadcrumbs launch header
+> (`2026-10-20T16:00:28Z`, `rank=512 solver=svd seq_len=512`) is a duplicate
+> SVD config — the `d1` label never mapped to any config field. The
+> localization drawn from its abort (depth 2, ratio 21,161x) is evidence
+> about the seq-512 SVD config only. Arm retired unwired; provenance ruling
+> in `openspec/changes/qk-pertarget-cycle/`.
+
 The user has directed the team to move on from CI and fix the actual root cause.
 This change builds the measurement ladder that splits bug from method, cheapest
 rung first (ladder authored by @sec-eng, 2026-10-27):

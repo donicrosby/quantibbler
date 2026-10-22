@@ -7,6 +7,14 @@ The r512-d1 abort (depth 2, ratio 21,161x) and the all-or-nothing archive
 This change is the measurement harness that locates the defect. It ships no
 fix by itself: it ships the three cheapest ways to *see* which stage is lying.
 
+> Annotation (2026-10-22, from `date -u`): `r512-d1` is not a controlled
+> ablation arm. Its breadcrumbs launch header (`2026-10-20T16:00:28Z`,
+> `rank=512 solver=svd seq_len=512`) is a duplicate SVD config — the `d1`
+> label never mapped to any config field. The abort datum above (depth 2,
+> ratio 21,161x) is therefore the seq-512 SVD config's collapse, not a
+> varied arm's. Arm retired unwired; provenance ruling in
+> `openspec/changes/qk-pertarget-cycle/`.
+
 ## Goals / Non-Goals
 
 - Goals: three knobs (fp factors, untuned signs, layer scope) that run through
