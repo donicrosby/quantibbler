@@ -253,12 +253,16 @@ def test_scn_refinement_covers_every_factorized_linear_with_full_budget():
 def test_full_budget_is_per_linear_not_a_pooled_split():
     """A per-linear budget smaller than the linear count is NOT divided up.
 
-    Seed note: the rank-3 fixture family trips the post-balance divergence gate
-    on ~4 of every 24 seeds (measured 4/24 on this change and 4/24 on the
-    previous placement — the rate is the fixture's, not the placement's; the
-    two sets differ). Seed 44 sits inside that band under the per-target cycle,
-    so this test uses a seed off the gate: it is testing the SCHEDULE, and a
-    fixture that detonates an unrelated guard cannot test anything.
+    Seed note: this fixture family's divergence-gate fires were the ``lb_admm``
+    exit double-rescale (both factors scaled by ``||W~||_F``, so the
+    reconstructible product carried it twice). Pre-fix the family tripped the
+    post-balance gate on 2/24 seeds (16 and 18 of 0..23); with the rescale fixed
+    to split across the pair, ZERO of 0..23 trip and the family sits inside the
+    shipped band. Earlier revisions of this note said "~4 in every 24 seeds and
+    4/24 on the previous placement -- the rate is the fixture's, not the
+    placement's": both halves were the defect, not a property of the family.
+    Seed 47 stays deliberately off-band -- this test is testing the SCHEDULE,
+    and a fixture that detonates an unrelated guard cannot test anything.
     """
     block = _SevenLinearBlock(seed=47)
     sink: list = []
@@ -478,22 +482,33 @@ def test_flip_acceptance_objective_is_the_block_forward():
     assert "Wq@x_b" not in module_src and "Wq @ x_b" not in module_src
 
 
-def test_the_divergence_gate_fires_on_a_known_band_seed():
-    """The band this fixture sits in is pinned, named, and actually gated.
+def test_the_divergence_gate_fires_on_a_band_the_live_block_cannot_meet():
+    """The guard's firing path is exercised against a live reconstruction.
 
-    The rank-3 family trips the post-balance divergence gate on a known set of
-    seeds, and pinning the schedule test OFF that band is only half a job: with
-    nothing ON the band, the guard's own firing is untested, so a regression that
-    widens the band would flip no test at all. This test owns the band — it runs
-    a seed measured to trip and asserts the guard fires.
+    Pinning the schedule test OFF the band is only half a job: with nothing ON
+    the band, the guard's own firing is untested, so a regression that widens it
+    would flip no test at all. This test owns the band from both sides.
 
-    Measured with ``torch.set_num_threads(1)`` (pinned in this tier's conftest):
-    seeds 16 and 18 of 0..23 trip — 2/24 — byte-identical across two separate
-    invocations. Before the thread pin the same family's failures were *not*
-    reproducible between invocations, which is why the pin lives in conftest and
-    not in a comment here.
+    Correction (this test previously claimed seeds 16/18 of the rank-3 family
+    trip the SHIPPED band, 2/24, and asserted that firing). That was measured
+    while ``lb_admm`` rescaled BOTH factors on exit, overshooting the
+    reconstructed product by a full factor of ``||W~||_F``; the 2/24 "bad
+    seeds" were that defect, not a property of the family. With the rescale
+    fixed the family sits inside the shipped band and correctly no longer
+    fires — so the old assertion had been riding the bug it was meant to
+    catch. The guard's firing path is therefore pinned here against a band the
+    live block genuinely cannot meet, and its silence is pinned against a
+    generous one. Both sides run the real block end to end; neither is a mock.
     """
     block = _SevenLinearBlock(seed=16)
-    cfg = PTQConfig(rank=3, stage_latent=StageHyper(1e-3, 4, 1))
+    calib = _calib(8, seed=16)
+
+    # Silence side: a generous band must not fire on an honest reconstruction.
+    generous = PTQConfig(rank=3, stage_latent=StageHyper(1e-3, 4, 1), divergence_band_factor=1e6)
+    assert reconstruct_block(block, calib, generous, recorder=_recorder([])) is not None
+
+    # Firing side: a rank-3 balanced reconstruction of this block cannot have
+    # ||Wq||_F/||W||_F within 1e-4 of 1.0, so a band that tight must fire.
+    tight = PTQConfig(rank=3, stage_latent=StageHyper(1e-3, 4, 1), divergence_band_factor=1.0001)
     with pytest.raises(QuantizationDivergenceError):
-        reconstruct_block(block, _calib(8, seed=16), cfg, recorder=_recorder([]))
+        reconstruct_block(block, calib, tight, recorder=_recorder([]))

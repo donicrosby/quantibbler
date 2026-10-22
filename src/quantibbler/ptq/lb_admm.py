@@ -279,8 +279,10 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
     # and the solve "converges" to mush in a handful of iterations
     # (measured: 4/400 iterations, binary cos 0.02 — every production
     # artifact ever exported had cos ~0.001 per layer). Solving on
-    # W~/||W~||_F and rescaling the factors on exit is exactly
-    # scale-equivariant; fixture-scale targets (||W~||~O(1)) are no-ops.
+    # W~/||W~||_F and rescaling the factors on exit IS scale-equivariant only
+    # because the exit rescale splits the factor across the pair (see the
+    # sqrt below); applying target_scale to each factor overshoots by
+    # target_scale. Fixture-scale targets (||W~||~O(1)) are no-ops.
     target_scale = float(np.linalg.norm(w))
     if not (np.isfinite(target_scale) and target_scale > 0.0):
         target_scale = 1.0  # degenerate all-zero target: keep legacy behavior
@@ -346,11 +348,17 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
     else:
         prev_res = trace.residuals[-1] if trace.residuals else prev_res
 
+    # The entry normalization divides the TARGET by target_scale exactly
+    # once, but a rank factorization W ~ U V^T has TWO factors: scaling both
+    # by target_scale scales the reconstructible matrix by target_scale^2 and
+    # overshoots by a full factor of ||W~||_F. Split it across the pair so the
+    # product carries it once -- the equivariance the entry comment claims.
+    factor_scale = float(np.sqrt(target_scale))
     return ADMMResult(
-        U=u * target_scale,
-        V=v * target_scale,
-        P_u=(u + lu) * target_scale,
-        P_v=(v + lv) * target_scale,
+        U=u * factor_scale,
+        V=v * factor_scale,
+        P_u=(u + lu) * factor_scale,
+        P_v=(v + lv) * factor_scale,
         n_iter=len(trace.residuals),
         converged=converged,
         trace=trace,
