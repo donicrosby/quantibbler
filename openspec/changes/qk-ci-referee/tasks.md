@@ -435,11 +435,15 @@ poison forms returned `rc=0`, i.e. the pin missed them).
   left **untouched**.
 - [x] (coder) First main run recorded above: **`39514036948`, 7/7 green**, read
   back per job from the GitHub API — the run's own job list, not a relay.
-- [ ] (orchestrator + @user) **PR-shaped proof — deliberately UNCHECKED.** The
-  in-the-wild evidence that a PR run's abort leg *executes* rather than skips is
-  the post-landing `pr-proof-abort-leg` branch plus one no-op PR (one user click).
-  Its run id closes @sec-eng's runner-semantics premise and @bug-hunter's
-  in-the-wild trigger negatives. Nothing local can settle it.
+- [x] (orchestrator + @user) **PR-shaped proof — WAIVED by @user (2026-10-27).**
+  The branch was cut and pushed (`pr-proof-abort-leg`, one empty commit), then
+  deleted again: the user ruled CI sufficient ("Can we move on to fixing the
+  actual root cause") before the click landed. Run 9 (`39519807660`) settled
+  **7/7 success** on `08c2a29` — second straight all-green. The
+  runner-semantics premise for `pull_request` events remains documented-but-
+  unmeasured: the in-file pins hold, `push` semantics are proven by two 7/7
+  runs, and the PR-trigger negatives are established only by the amended
+  shape and the docs, not by a live run. Re-opening is one branch + one click.
 - **Honesty boundary:** the battery and the mirror proof show the PINS reject
   mutations *in the file*. Runner trigger/skip semantics stay a runner fact: the
   7/7 establishes them for `push`, and the no-op PR is what establishes them for
