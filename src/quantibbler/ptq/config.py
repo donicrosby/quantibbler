@@ -124,7 +124,16 @@ class PTQConfig:
             divergence (6.3e4) with ~6x margin.
         admm_max_iter: K, the ADMM iteration cap ([NQ] App. C: 400).
         rho_start / rho_end: linear penalty schedule endpoints over K
-            iterations (assumption A-2: 1e-2 -> 1e+2).
+            iterations. [NQ] App. C :3008 prescribes the linear SCHEDULE
+            SHAPE only -- the endpoints are an implementation choice, not a
+            paper-pinned value. They are calibrated for the NORMALIZED
+            regime: the target is divided by its own Frobenius norm at ADMM
+            entry (per [NQ] Step 2), so the data term is O(1) and an endpoint
+            of 1e2 lets the consensus term dominate it 100x, crushing the
+            latents onto the binary proxy before the continuous fit
+            converges (measured: converged=False at 400/400 with the warm
+            start destroyed, 0.84 -> 0.32 cos). 1e-1 caps the consensus term
+            at <=10% of the data term.
         admm_lam: ridge lambda of Eq. 4 (assumption A-3: 1e-6).
         admm_epsilon: consensus-residual early-stop tolerance (assumption
             A-4: 1e-7, relative form of design section 2).
@@ -157,7 +166,7 @@ class PTQConfig:
     # spends 66-83 s/layer at rank 512. Off = SVD init, balance, polish.
     solver: Literal["admm", "svd"] = "admm"
     rho_start: float = 1e-2
-    rho_end: float = 1e2
+    rho_end: float = 1e-1
     admm_lam: float = 1e-6
     admm_epsilon: float = 1e-7
     stage_pre: StageHyper = field(default_factory=lambda: StageHyper(1e-4, 4, 8))

@@ -11,6 +11,27 @@ instead of erroring at collection. Run the full tier with:
 
 from __future__ import annotations
 
+import os
+
+# BLAS threading is a reproduction parameter, not a default. OpenBLAS picks its
+# reduction order from the thread count, and THIS variable must be set before
+# the library loads, so it lives at module scope -- an assignment inside a
+# pytest hook runs after numpy may already be imported and would not re-thread
+# an already-loaded OpenBLAS. Companion to _pin_determinism()'s
+# torch.set_num_threads(1).
+#
+# Lane history: the 32-core host lane ran these tiny r x r Cholesky solves and
+# the SVID power iterations with up to 32 OpenBLAS threads (pure
+# oversubscription tax, ~385s for the suite) while the cgroup-limited image
+# lane ran 4. Both now pin 1, so identical seeds give identical residuals
+# lane-to-lane.
+#
+# Known, deliberate gap: the production wrapper sets OPENBLAS_NUM_THREADS=16
+# (tools/run-ptq-container.sh) as a perf choice, so test numerics and
+# production numerics use different BLAS reduction orders by construction.
+# Recording that in the run fingerprint is a separate schema change.
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+
 
 def pytest_ignore_collect(collection_path, config):  # noqa: ANN001, ARG001
     try:

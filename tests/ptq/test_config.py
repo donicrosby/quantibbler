@@ -22,7 +22,12 @@ def test_scn_config_defaults():
     # ADMM: K = 400 with linear penalty schedule ([NQ] App. C), endpoints A-2.
     assert cfg.admm_max_iter == 400
     assert cfg.rho_start == pytest.approx(1e-2)
-    assert cfg.rho_end == pytest.approx(1e2)
+    # rho_end is an implementation choice, not a paper-pinned endpoint: [NQ]
+    # App. C :3008 prescribes the linear schedule SHAPE only. Lowered from 1e2
+    # to 1e-1 because the solve runs in the normalized regime (target divided
+    # by its Frobenius norm at entry), where 1e2 let the consensus term
+    # dominate the O(1) data term 100x and destroy the warm start.
+    assert cfg.rho_end == pytest.approx(1e-1)
     assert cfg.rho_end > cfg.rho_start > 0
     assert cfg.admm_lam == pytest.approx(1e-6)  # A-3
     assert cfg.admm_epsilon == pytest.approx(1e-7)  # A-4

@@ -9,6 +9,7 @@ from quantibbler.ptq.config import PTQConfig
 from quantibbler.ptq.lb_admm import (
     DEFAULT_SCALE_FLOOR,
     _cholesky_solve,
+    _rho_end,
     lb_admm,
     magnitude_balance,
     svid_proxy,
@@ -88,9 +89,21 @@ def test_scn_admm_consensus_convergence():
     # sign(0) = +1 convention on the third column.
     assert np.all(zc[:, 2] > 0)
     s0 = np.where(z == 0.0, 1.0, np.sign(z))
-    for j in range(z.shape[1]):
-        proj = s0[:, j] * ((s0[:, j] @ z[:, j]) / (s0[:, j] @ s0[:, j]))
-        assert np.allclose(zc[:, j], proj)
+    # Two-sided optimum ([NQ] :592), replacing the retired column-only closed
+    # form this block used to assert verbatim. The optimum's magnitude profile
+    # is rank-1 (the top rank-1 of |z|), and it is strictly closer to z than
+    # the column-only variant in the paper's own objective -- which is what
+    # discriminates the two, since a column-only fit cannot satisfy rank-1
+    # unless |z| has a constant row vector.
+    col_only = (
+        s0
+        * np.array([(s0[:, j] @ z[:, j]) / (s0[:, j] @ s0[:, j]) for j in range(z.shape[1])])[
+            None, :
+        ]
+    )
+    assert np.linalg.norm(z - zc) < np.linalg.norm(z - col_only)
+    live = np.abs(zc)[:, :2]  # column 2 is the all-zero (dead) one
+    assert np.linalg.matrix_rank(live, tol=1e-9 * float(np.abs(live).max())) == 1
     # In-run proxies preserved sign structure at every recorded check.
     for preserved in res.trace.svid_sign_preserved:
         assert preserved
@@ -174,3 +187,23 @@ def test_scn_warm_start_svd_flaky_fallback_and_nan_guard():
     w_bad[3, 5] = np.nan
     with pytest.raises(ValueError, match="non-finite"):
         _warm_start(np.ascontiguousarray(w_bad), 8, np.dtype("float64"))
+
+
+def test_rho_end_override_is_explicit_and_fail_closed(monkeypatch):
+    """QK_RHO_END is an override, not a second default.
+
+    Attribution runs depend on a run meaning what its provenance says it ran, so
+    both directions need pinning: unset must leave cfg.rho_end untouched, and a
+    malformed value must raise rather than silently reverting to the default.
+    """
+    cfg = PTQConfig(rank=4, rho_end=1e-1)
+
+    monkeypatch.delenv("QK_RHO_END", raising=False)
+    assert _rho_end(cfg) == 1e-1
+
+    monkeypatch.setenv("QK_RHO_END", "1e2")
+    assert _rho_end(cfg) == 1e2
+
+    monkeypatch.setenv("QK_RHO_END", "not-a-float")
+    with pytest.raises(ValueError, match="QK_RHO_END must be a float"):
+        _rho_end(cfg)

@@ -25,6 +25,7 @@ All computation is float64 by default; float32 only via an explicit config
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -159,40 +160,96 @@ def _cholesky_solve(h: np.ndarray, b: np.ndarray, trace: ADMMTrace | None = None
     return x, jittered
 
 
+def _top_rank1(mag: np.ndarray, *, steps: int = 100, tol: float = 1e-14):
+    """Top singular triplet of a NON-NEGATIVE matrix, deterministically.
+
+    ``mag`` is ``|P|``, so it is entrywise non-negative and the Perron-
+    Frobenius theorem puts the leading singular vectors in the non-negative
+    orthant. Power iteration from the all-ones vector therefore converges to
+    the leading pair without any sign ambiguity, and a planted rank-1 matrix
+    is recovered in a single step. Returns ``(sigma, u, v)`` with unit ``u``
+    and ``v``; an all-zero input returns ``(0.0, None, None)``.
+
+    An explicit top-rank-1 solve rather than a full ``np.linalg.svd``: the
+    proxy is called twice per ADMM iteration (up to 800 times per layer), so a
+    dense SVD of the ``d_out x r`` latents would dominate the whole solve.
+    Same optimum, O(d_out * r) per step.
+    Bound, recorded rather than hidden: the stopping rule watches the singular
+    value only (``|sigma_new - sigma| <= tol * sigma``). ``sigma`` converges
+    faster than the singular vectors, so on a near-degenerate spectrum the
+    vectors can still be short of their limit when the value has settled, and
+    the cap (100 steps) binds with the vectors unconverged. The result stays
+    deterministic -- fixed start, fixed cap -- but in exact-tie cases it is a
+    slightly suboptimal projection rather than the optimum. For the planted
+    rank-1 fixtures and the latents this proxy actually sees, the spectrum is
+    well separated and one to a few steps reach machine precision.
+    """
+    n = mag.shape[1]
+    v = np.full(n, 1.0 / np.sqrt(n), dtype=np.float64)
+    u = mag @ v
+    sigma = float(np.linalg.norm(u))
+    if not np.isfinite(sigma) or sigma <= 0.0:
+        return 0.0, None, None
+    u = u / sigma
+    for _ in range(steps):
+        v_new = mag.T @ u
+        nv = float(np.linalg.norm(v_new))
+        if nv <= 0.0:
+            break
+        v_new = v_new / nv
+        u_new = mag @ v_new
+        nu = float(np.linalg.norm(u_new))
+        if nu <= 0.0:
+            break
+        u_new = u_new / nu
+        moved = abs(nu - sigma)
+        u, v, sigma = u_new, v_new, nu
+        if moved <= tol * max(nu, 1.0):
+            break
+    return sigma, u, v
+
+
 def svid_proxy(z: np.ndarray) -> np.ndarray:
-    """SVID operator (Eq. 6, assumption A-5): column-wise sign-structure-
-    preserving proxy.
+    """SVID operator (Eq. 6): the OPTIMAL two-sided rank-1 that preserves the
+    sign structure.
 
-    For each column of the consensus matrix: the sign pattern of the input
-    is preserved (sign(0) = +1) and the values are the least-squares fit ON
-    that pattern,
+    [NQ] :592 defines SVID as "the optimal rank-1 approximation that preserves
+    the sign structure". With ``S = sign(P)`` (sign(0) = +1) and ``S**2 = 1``
+    entrywise,
 
-        s    = sign(z)                      (sign(0) = +1)
-        out  = s ⊙ (sᵀ z / ||s||²)          (projection onto the sign pattern)
+        min_{g,h} || P - S o (g h^T) ||_F  ==  min_{g,h} || |P| - g h^T ||_F
 
-    Design note (A-5 has two defensible readings): design.md's "renormalize
-    to preserve the column norm" variant (out ← out · ||z||/||out||) was
-    implemented and measured to DESTABILIZE the consensus loop (gate logit
-    delta diverging past 1e9); the plain projection keeps the proxy in the
-    same scale class as the continuous variables and converges. A-5's
-    semantics here: the LS projection. A constant-magnitude ±c column
-    (the first wiring) discards per-entry magnitudes entirely and wrecks
-    reconstruction (~0.99 relative error on an exact rank-r target).
+    because ``S o P = |P|``, so the optimum is the top rank-1 of ``|P|``: take
+    the leading singular triplet ``(sigma, u1, v1)`` of ``|P|``, split it as
+    ``g = u1 * sqrt(sigma)`` and ``h = v1 * sqrt(sigma)``, and return
+    ``Z = S o (g h^T)``.
 
-    Output is float64, same shape as the input.
+    This replaces a column-only proxy that fixed the row vector at 1 (one
+    scalar per column). That variant is optimal only inside its restricted
+    class; the old docstring recorded three column-only variants tried and the
+    two-sided optimum was never among them. The "A-5" label retires with it --
+    the paper has exactly one SVID definition and this is it.
 
-    Dead columns (all-zero input) receive the positive
-    ``DEFAULT_SCALE_FLOOR`` so sign(0) = +1 holds and no output value is
-    ever zero (A-11, matching kernels.sign_estimate).
+    Output is float64, same shape as the input. Signs of the input survive with
+    sign(0) = +1, and no output entry is ever zero: dead columns (all-zero
+    input) are clamped to the positive ``DEFAULT_SCALE_FLOOR`` (matching
+    kernels.sign_estimate), and isolated exact zeros of the rank-1 fit get the
+    same floor so the sign convention holds on every entry.
     """
     zf = np.asarray(z, dtype=np.float64)
     signs = np.sign(zf)
     signs[signs == 0.0] = 1.0  # sign(0) = +1 (A-11 convention)
-    s = signs.astype(np.float64)
-    num = np.einsum("ij,ij->j", s, zf)  # sign(z)ᵀ z per column
-    den = np.einsum("ij,ij->j", s, s)  # ||sign(z)||² per column
-    safe_den = np.where(den > 0.0, den, 1.0)
-    out = s * (num / safe_den)[None, :]
+
+    sigma, u1, v1 = _top_rank1(np.abs(zf))
+    if u1 is None:
+        out = np.zeros_like(zf)
+    else:
+        root = np.sqrt(sigma)
+        out = signs * np.outer(u1 * root, v1 * root)
+
+    # No output value is ever zero (sign(0) = +1 must hold on every entry).
+    out = np.where(out == 0.0, DEFAULT_SCALE_FLOOR, out)
+
     # Dead columns (all-zero input) would be exactly zero, which carries no
     # sign; clamp them to the positive floor so sign(0) = +1 holds and no
     # output value is ever zero (A-11, matching kernels.sign_estimate).
@@ -248,6 +305,28 @@ def _warm_start(w: np.ndarray, r: int, dt: np.dtype) -> tuple[np.ndarray, np.nda
     u0 = u_mat[:, :r] * np.sqrt(s_vec[:r])
     v0 = vt_mat[:r].T * np.sqrt(s_vec[:r])
     return np.ascontiguousarray(u0, dtype=dt), np.ascontiguousarray(v0, dtype=dt)
+
+
+def _rho_end(cfg: PTQConfig) -> float:
+    """`cfg.rho_end`, with a diagnostic env override for attribution runs.
+
+    [NQ] App. C :3008 prescribes the rho schedule SHAPE but not its endpoints,
+    so isolating the two-sided SVID fix from the endpoint cap needs two runs
+    differing in exactly one number. A config default cannot express "this run
+    used the previous endpoint", and there is no CLI flag for it, so the
+    override is an env var -- the same pattern as the QK_RHO_CAP diagnostic.
+
+    Fail-closed on a malformed value: silently falling back to the default
+    would produce a run whose provenance claims an override it never applied.
+    """
+    raw = os.environ.get("QK_RHO_END")
+    if raw is None:
+        return cfg.rho_end
+    try:
+        return float(raw)
+    except ValueError:
+        msg = f"QK_RHO_END must be a float, got {raw!r}"
+        raise ValueError(msg) from None
 
 
 def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
@@ -307,10 +386,11 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
     converged = False
     prev_res = np.inf
     denom = max(cfg.admm_max_iter - 1, 1)
+    rho_end = _rho_end(cfg)
     for k in range(cfg.admm_max_iter):
         # Linear penalty schedule spanning [rho_start, rho_end] across the
         # K iterations (A-2).
-        rho = float(cfg.rho_start + (cfg.rho_end - cfg.rho_start) * k / denom)
+        rho = float(cfg.rho_start + (rho_end - cfg.rho_start) * k / denom)
         shift = rho + cfg.admm_lam
 
         # Continuous update, Eq. 5 via stabilized Cholesky (Lemma 2 SPD).

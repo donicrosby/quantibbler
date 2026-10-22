@@ -147,6 +147,14 @@ set -- docker run --rm \
     --solver "$SOLVER" \
     --checkpoint-dir /out/checkpoints \
     --out /out
+# The container is a fresh environment and -e is an allowlist, so a
+# diagnostic override set only on the calling shell would be silently
+# dropped: pass 1 of an attribution run would reproduce pass 2 and the two
+# artifacts would be indistinguishable. Passed through only when set, so
+# the default path is untouched. See lb_admm._rho_end.
+if [ -n "${QK_RHO_END:-}" ]; then
+  set -- "$@" -e "QK_RHO_END=$QK_RHO_END"
+fi
 
 # The split knob is appended only when it was set. Passing it unconditionally
 # would make the wrapper the author of the tuning geometry - and an empty
