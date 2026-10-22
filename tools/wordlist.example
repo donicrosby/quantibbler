@@ -1,0 +1,7 @@
+# secret-fence wordlist — UNTRACKED, never commit this file.
+# One extended-regex per line; lines starting with # are ignored.
+# Examples ship SYNTHETIC entries only. The real site strings are typed
+# once, at land time, into the untracked file on the box — never into any
+# file that could be copied, templated, or committed.
+FAKE-CANARY://
+SHA256:FAKEFINGERPRINTPREFIX

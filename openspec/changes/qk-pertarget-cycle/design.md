@@ -441,3 +441,64 @@ wired against a fixture with nothing to do:
 Verification: `tools/ci/driver_smoke.py --out ...` rc=0 with the gate wired;
 `tests/ptq + test_ci_referee + test_qk_report + test_run_ptq_wrapper` **295
 passed**.
+
+## 17. The ADMM/SVD split, read off both arms
+
+Both arms already exist on disk at the production rank (`r512-svd`,
+`r512-admm-paperfaithful`), so the first read needed no re-solve: dequantize each
+arm's packed solution and compare against the FP weights
+(`Qwen/Qwen3-0.6B`, snapshot `c1899de2...`, `model.layers.{0,1}.*`),
+`W_recon = (Ub*s1) @ (Vb*s2)^T`.
+
+| `layers.0` linear | svd cos | admm cos | | `layers.1` linear | svd cos | admm cos |
+|---|---|---|---|---|---|---|
+| q_proj | 0.740 | 0.383 | | q_proj | 0.769 | 0.312 |
+| k_proj | 0.803 | 0.405 | | k_proj | 0.809 | 0.346 |
+| v_proj | 0.748 | 0.409 | | v_proj | 0.771 | 0.436 |
+| o_proj | 0.667 | 0.163 | | o_proj | 0.740 | 0.368 |
+| gate_proj | 0.691 | 0.290 | | gate_proj | 0.677 | 0.256 |
+| up_proj | 0.649 | 0.375 | | up_proj | 0.659 | 0.341 |
+| down_proj | 0.661 | 0.413 | | down_proj | 0.673 | 0.410 |
+| **mean** | **0.708** | **0.348** | | **mean** | **0.728** | **0.353** |
+
+**It is not a compounding defect. It is a consistent one.** The mean gap goes
+0.360 -> 0.376 in cosine; the per-linear gaps move both ways (q_proj widens
+0.357 -> 0.457, o_proj narrows 0.504 -> 0.372). The defect is present at full
+strength in block 0 and does not grow.
+
+**The scale read is the finding.** Per linear, median `|s1| / |s2|` and the
+decade span across `s1 ++ s2`:
+
+| arm | median s1/s2 (range over 14 linears) | decade span |
+|---|---|---|
+| svd | **0.95 - 1.02** | 0.7 - 3.5 |
+| admm | **1.5e-14 - 1.3e-16** | **12.7 - 17.2** |
+
+The plain truncated-SVD ablation produces a **magnitude-balanced** factorization
+(median ratio ~1.0 on every linear, both blocks). The LB-ADMM arm does not — by
+thirteen to seventeen decades — and the extreme lives at the failure site
+(`layers.1.mlp.gate_proj`, 17.15 decades, the layer the run aborted on). The
+ablation satisfies the property the method is *named for* and the method's own
+output does not. That is byte-level evidence for scale imbalance as the bridge
+between per-linear quality and end-to-end damage, and it points the ranked
+mechanisms at the balancing step, not at the forward pass.
+
+Related, and not cosmetic: on the previous day's fp16 scale storage, a factor
+sitting 1e-16 below its partner **flushes to zero**, and the 8,204 large entries
+@sec-eng measured go to `inf`. The fp32 storage flip is load-bearing.
+
+**Provenance caveat — the `r512-svd` arm, carried with the datum (@planner's
+instruction, @sec-eng's recovery):** *recovered — report geometry + artifact
+window + bytes-proven solver; header lost to truncation-era wrapper.* Its
+breadcrumbs header does not exist; the wrapper truncated the log on every launch
+until the append fix landed 16:17Z Oct 20, ~17 h after this run ended
+(2026-10-19T20:03-22:29Z from artifact mtime minus `wall_seconds`), and the
+report predates the `solver` field. Solver identity rests on the dequant being
+self-validating: if the convention were wrong the arm would not land at exactly
+truncated-SVD quality, and it does. **Its 524,894x ratio may not anchor a causal
+claim until a config line is recovered.**
+
+**One correction to my own method, for the record:** the `r512-d1` arm I reported
+as byte-identical to `r512-svd` is a tautology, not a discovery — `d1` never
+mapped to any config field, so both directories are the same SVD run. The arm is
+retired; @slop-remover annotated the two docs that cited it as a controlled datum.
