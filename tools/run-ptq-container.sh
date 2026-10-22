@@ -124,6 +124,24 @@ echo "run-ptq-container: model=$MODEL rank=$RANK solver=$SOLVER seq_len=$SEQ_LEN
   "paper_faithful=${PAPER_FAITHFUL:-0} ste_flip_pass_budget=${STE_FLIP_PASS_BUDGET:-0}" \
   "eval_seqs=$EVAL_SEQS out=$OUT" >&2
 
+mkdir -p "$OUT" 2>/dev/null || true
+# Launch provenance, written into the artifact directory BEFORE the container
+# starts. The summary above goes to stderr, and stderr does not travel with the
+# artifact -- a run's provenance has to outlive the terminal it was launched
+# from. `rho_end_override` is here for the same reason the report records
+# rho_end_source: an attribution pass must be identifiable from its own
+# directory, not from somebody's scrollback.
+{
+  printf 'model=%s\nrank=%s\nsolver=%s\nseq_len=%s\ntune_seq_len=%s\n' \
+    "$MODEL" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-}"
+  printf 'calibration_seqs=%s\neval_seqs=%s\nfactor_mode=%s\nablation=%s\n' \
+    "$CALIBRATION_SEQS" "$EVAL_SEQS" "${FACTOR_MODE:-}" "${ABLATION:-}"
+  printf 'layer_scope=%s\npaper_faithful=%s\nste_flip_pass_budget=%s\n' \
+    "${LAYER_SCOPE:-}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}"
+  printf 'rho_end_override=%s\nsolver_probe=%s\nopenblas_num_threads=%s\nlaunched_at=%s\n' \
+    "${QK_RHO_END:-unset}" "${QK_SOLVER_PROBE:-unset}" "${OPENBLAS_NUM_THREADS:-16}" "$(date -u +%FT%TZ)"
+} > "$OUT/launch.env" 2>/dev/null || echo "warning: could not write $OUT/launch.env" >&2
+
 set -- docker run --rm \
   --name quantibbler-ptq-run \
   --memory 32g --memory-swap 32g \

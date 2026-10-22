@@ -655,7 +655,7 @@ def test_report_driver_is_wired_to_the_gate():
     assert "qpk1: +-1 bitplanes + float16 scales" not in src
     assert "scales fp16" not in src
     # Provenance is emitted from the run's own arguments.
-    assert "provenance(args.solver, args.scale_dtype)" in src
+    assert "provenance(" in src and "rho_end_source=_rho_end_source" in src
 
 
 _SCRATCH_DEFAULT = "str(_SANDBOX_SCRATCH) if _SANDBOX_SCRATCH.is_dir() else tempfile.gettempdir()"
@@ -891,7 +891,7 @@ def test_driver_probe_knobs_are_parser_owned_and_threshold_free():
 
 
 _DRIVER_SRC = _DRIVER.read_text()
-_PROVENANCE_ANCHOR = "    prov = provenance(args.solver, args.scale_dtype)\n"
+_PROVENANCE_ANCHOR = "    prov = provenance(\n"
 _RETURN_LINE = "    return verdict_exit_code(status)\n"
 _ABORT_ANCHOR = "    except PrefixProbeAbort as exc:\n"
 #: The end of the abort branch's builder call: unique because the completion

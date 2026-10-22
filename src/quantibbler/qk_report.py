@@ -622,7 +622,13 @@ def stage_map(stages: list) -> dict:
     return out
 
 
-def provenance(solver: str, scale_dtype: str) -> dict:
+def provenance(
+    solver: str,
+    scale_dtype: str,
+    *,
+    rho_end: float | None = None,
+    rho_end_source: str | None = None,
+) -> dict:
     """Report provenance fields derived from the ACTUAL run arguments.
 
     The driver used to hardcode ``regime.artifact`` as
@@ -635,6 +641,13 @@ def provenance(solver: str, scale_dtype: str) -> dict:
     """
     return {
         "solver": solver,
+        # The penalty endpoint is run-defining and has no CLI flag, so it
+        # arrives by environment. Recording the value alone would be half the
+        # story: two attribution runs differ in exactly this number, and a row
+        # that says 1e-1 without saying whether config or environment authored
+        # it cannot be audited. Value AND source, or the field lies by omission.
+        "rho_end": rho_end,
+        "rho_end_source": rho_end_source,
         "scale_dtype": scale_dtype,
         "regime_artifact": f"qpk1: +-1 bitplanes + {scale_dtype} scales",
         "dtype_note": (f"solver {solver} (float64 compute) / scales {scale_dtype} / artifact qpk1"),

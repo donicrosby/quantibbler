@@ -965,7 +965,19 @@ def main() -> int:
     # provenance is computed before the pipeline so the abort report can
     # carry the same identity fields as the completion report: an aborted
     # run must be as self-describing as a finished one.
-    prov = provenance(args.solver, args.scale_dtype)
+    # The effective rho endpoint comes from QK_RHO_END or the config default --
+    # resolved from the same helper the solver calls, so the report cannot
+    # disagree with the run it describes.
+    from quantibbler.ptq.config import PTQConfig as _PTQConfig
+    from quantibbler.ptq.lb_admm import rho_end_provenance as _rho_prov
+
+    _rho_end_value, _rho_end_source = _rho_prov(_PTQConfig().rho_end)
+    prov = provenance(
+        args.solver,
+        args.scale_dtype,
+        rho_end=_rho_end_value,
+        rho_end_source=_rho_end_source,
+    )
 
     # --- stage record (qk-fix-tunefp-teacher / qk-fix-ste-sign-adaptation) --
     # The pipeline reports every stage through this recorder; the JSON-safe
