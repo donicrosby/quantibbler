@@ -160,6 +160,17 @@ and `src/quantibbler/ptq/api.py` (Phase-1 hoist, from the sibling change).
   and `test_a_split_tune_geometry_is_named_as_a_runtime_deviation` (the
   computed verdict denying a claim on each axis).
 
+> **Annotation (coder, 2026-10-22 — author date per the repo clock; see
+> `qk-pertarget-cycle/design.md` §9 on the phantom `2026-10-27`).** The
+> rehearsal above was emitted under the **pre-re-rule Figure-3 reading** (one
+> TuneFP pass per block, post-Q/K/V). Its `paper_faithful: true` and its "all
+> eight verdict conditions true" describe the verdict machinery *as it then
+> stood*, and the reading they certified has since been overruled (ruling (a),
+> `qk-pertarget-cycle`). The number is **not retracted** — it honestly records
+> what the instruments said at the time — but it is not evidence about the
+> per-target cycle, and the branch's own corrected machinery now contradicts
+> it. Annotate, don't rewrite: this is what was believed then.
+
 **Seen and NOT waived, for @planner:** the closed mechanism list does not
 name `max_admm_iter != 400`, so a faithful-flagged run with a shortened
 LB-ADMM schedule (App. C pins 400) still computes `paper_faithful: true`.
@@ -167,3 +178,11 @@ Measured, not theorised: `--solver admm --max-admm-iter 2` on the tiny
 fixture diverges in block 0 (`||Wq||_F/||W||_F = 5.3e-08`), and the same run
 at 400 is clean. The rehearsal therefore pins 400. Adding a seventh
 condition would change the spec's enumeration, which belongs to you.
+
+> **Annotation (coder, 2026-10-22 — repo-clock author date; see
+> `qk-pertarget-cycle` §9).** "Still computes `paper_faithful: true`" above is a
+> statement about the closed mechanism list **under the pre-re-rule Figure-3
+> reading**, which is what the verdict was computed against. The *observation*
+> stands (`max_admm_iter != 400` is not named by the closed list); the *label*
+> it grants no longer describes this branch's machinery. Still open for
+> @planner, unchanged.

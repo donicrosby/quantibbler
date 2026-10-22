@@ -435,7 +435,21 @@ poison forms returned `rc=0`, i.e. the pin missed them).
   left **untouched**.
 - [x] (coder) First main run recorded above: **`39514036948`, 7/7 green**, read
   back per job from the GitHub API — the run's own job list, not a relay.
-- [x] (orchestrator + @user) **PR-shaped proof — WAIVED by @user (2026-10-27).**
+- [x] (orchestrator + @user) **PR-shaped proof — WAIVED by @user (recorded
+  date `2026-10-27`; **unverified** — see the correction immediately below).**
+  > **Date correction (coder, 2026-10-22).** `2026-10-27` is five to six days
+  > *after* every commit that records it: this line was authored 2026-10-22
+  > 03:46 UTC and the string is impossible relative to the repository's own
+  > clock. It is **not** a typo here — it is one of **33** occurrences across
+  > 20+ records in this repo (`AGENTS.md:69`,
+  > `crates/quantibbler-kernels/tests/cubek_cpu_reference_parity.rs:63,:74,:468`,
+  > and the `qk-nq-recreation-bar`, `qk-ci-referee`, `qk-flash-attention` and
+  > archived change dirs), so it is a per-lane convention error. Whether the
+  > clock or the string is wrong is @planner/@user's call, and the true date is
+  > **not recoverable from the repository** — so I am not inventing a
+  > replacement. Census and the shortest proof (commit `f438177`, authored
+  > 2026-10-20 20:33, recording a "decision 2026-10-27"): see
+  > `qk-pertarget-cycle/design.md` §9.
   The branch was cut and pushed (`pr-proof-abort-leg`, one empty commit), then
   deleted again: the user ruled CI sufficient ("Can we move on to fixing the
   actual root cause") before the click landed. Run 9 (`39519807660`) settled

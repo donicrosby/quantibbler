@@ -157,6 +157,16 @@ fork fires only after a paper-faithful run exists.
   follows the paper's letter: Algorithm 1 line 16 is LB-ADMM; the
   pipeline's `solver=svd` is the measured production ablation and cannot
   ride the faithful label.
+
+> **Annotation (coder, 2026-10-22 — repo-clock author date; see
+> `qk-pertarget-cycle` §9 on the phantom `2026-10-27`).** This amendment's
+> mechanism list — in particular the **vacuous-teacher event** it names — was
+> defined against the **pre-re-rule Figure-3 reading**. Under ruling (a)
+> (`qk-pertarget-cycle`) the first TuneFP of a block no longer fires at all, so
+> that vacuity case becomes production-unreachable rather than routine. The
+> condition **stays** as a fail-closed safety net; the reading it was written
+> against does not.
+
 - **Phase-1 statistics (Algorithm 1 lines 2-5).** The landed stage map
   names a real deviation: statistics are collected per block with the
   compressed-prefix stream as input, where the paper collects them once

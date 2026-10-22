@@ -194,6 +194,15 @@ Figure 3 right panel) stands.
   computed verdict (tunefp delta: the flag AND empty runtime_deviations
   AND no mechanism deviation), never a forwarded flag.
   Informed-assumption markers are documentation, not deviations.
+
+> **Annotation (coder, 2026-10-22 — repo-clock author date; see
+> `qk-pertarget-cycle` §9 on the phantom `2026-10-27`).** The mechanism list in
+> this label rule was written against the **pre-re-rule Figure-3 reading** (one
+> TuneFP pass per block, post-Q/K/V). The rule's *shape* — the label is a
+> computed verdict from the run's own record, never a forwarded flag — is
+> unaffected and still holds. Only the reading it was evaluated against is
+> overruled (ruling (a), `qk-pertarget-cycle`).
+
 - **Contingency:** only a real memcg OOM at the paper's batch points
   (measured preflight: (4,2048) = 519.9 ms inside the container) makes a
   tune-geometry split defensible — and then with the OOM evidence
