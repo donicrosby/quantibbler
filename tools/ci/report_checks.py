@@ -20,9 +20,18 @@ import json
 import math
 from typing import Any
 
-from quantibbler.qk_report import COLLAPSE_LINE, DEGRADED, FAILED, OK, exit_code
+from quantibbler.qk_report import (
+    COLLAPSE_LINE,
+    DEGRADED,
+    FAILED,
+    OK,
+    STEPS_EFFECT_EPS,
+    exit_code,
+)
 
 ABORT_FIELDS = ("block", "depth", "prefix_ppl", "fp_prefix_ppl", "ratio", "line")
+#: The evidence a long-running stage must leave behind per fire.
+STAGE_EVIDENCE_FIELDS = ("residual_before", "residual_after", "gradient_norm")
 _VALID_STATUSES = (OK, DEGRADED, FAILED)
 
 
@@ -80,6 +89,83 @@ def smoke_findings(payload_text: str, rc: int, expect: dict) -> list[str]:
         got = report.get(key)
         if got != want:
             problems.append(f"provenance {key}: report says {got!r}, the run asked for {want!r}")
+    # NOT wired to ``stage_evidence_findings`` yet, deliberately: the gate is
+    # unit-tested against real-shaped records, but the smoke leg's own artifact
+    # has not been measured against ``STEPS_EFFECT_EPS``, and the tiny fixture
+    # is a near-converged regime (measured on the sibling 3-block fixture: a
+    # full 256-step TuneFP budget moved the capture residual 3.96e-06 ->
+    # 4.38e-06, i.e. UP). Wiring a gate that fires on the plumbing-only fixture
+    # would be a false alarm, and the fixture-honesty rule is that the fixture
+    # gets a live objective rather than the threshold moving. Measure the smoke
+    # artifact first, then wire.
+    return problems
+
+
+def stage_evidence_findings(payload_text: str) -> list[str]:
+    """Every stage record that cannot show its own work. Empty == evidence held.
+
+    TuneFP and TuneLatentSTE now carry ``residual_before``/``residual_after``
+    (full-capture objective) and ``gradient_norm`` (first step's backward) per
+    fire, so "did this stage do anything?" is answered from the artifact
+    instead of inferred. The reduction test uses the shared
+    ``STEPS_EFFECT_EPS``: a record whose objective did not measurably move is an
+    inert stage however many steps it booked. The shape this rejects is real —
+    the rehearsal recorded a full TuneFP budget as ``1.9e-04 -> 1.9e-04`` and
+    every gate passed it, because the flip counters alone cannot distinguish an
+    effective stage from an inert one.
+    """
+    try:
+        report = load_report(payload_text)
+    except ReportError as exc:
+        return [f"the report is not acceptable: {exc}"]
+
+    stages = report.get("stages")
+    if not isinstance(stages, list):
+        return [f"the report carries no stage list: {stages!r}"]
+
+    problems: list[str] = []
+
+    def _check(kind: str, label: Any, rec: Any) -> None:
+        if not isinstance(rec, dict):
+            problems.append(f"{kind} record {label!r} is not an object")
+            return
+        missing = [f for f in STAGE_EVIDENCE_FIELDS if not _finite(rec.get(f))]
+        if missing:
+            problems.append(
+                f"{kind} record {label!r} is missing a finite {missing}: "
+                "the stage cannot show its own work"
+            )
+            return
+        before, after = rec["residual_before"], rec["residual_after"]
+        if after > before * (1.0 - STEPS_EFFECT_EPS):
+            problems.append(
+                f"{kind} record {label!r} moved its objective {before!r} -> "
+                f"{after!r}, short of the shared STEPS_EFFECT_EPS "
+                f"{STEPS_EFFECT_EPS!r}: an inert stage"
+            )
+
+    for entry in stages:
+        if isinstance(entry, dict):
+            event, info = entry.get("event"), entry
+        elif isinstance(entry, (list, tuple)) and len(entry) == 2:
+            event, info = entry
+        else:
+            continue
+        if not isinstance(info, dict):
+            continue
+        if event == "ste":
+            per = info.get("per_linear")
+            if not isinstance(per, dict) or not per:
+                problems.append("ste stage carries no per_linear rows to audit")
+                continue
+            for name, rec in per.items():
+                _check("ste", name, rec)
+        elif event == "tune_fp":
+            if info.get("skipped"):
+                # A recorded skip is not an executed stage: the per-target
+                # cycle legitimately has no pass on a block with one linear.
+                continue
+            _check("tune_fp", info.get("label") or "tune_fp", info)
     return problems
 
 

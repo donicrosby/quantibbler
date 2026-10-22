@@ -1,8 +1,8 @@
 """qk-fix-tunefp-teacher: the Figure 3 TuneFP placement, pristine-pinned teacher.
 
 Scenarios under test: ``teacher_is_captured_before_tuning``,
-``tunefp_fires_once_per_block_after_attention_factorization``,
-``vacuous_teacher_fails_closed``, ``tune_fp_effect_is_recorded_honestly``,
+``tunefp_fires_per_target_cycle``, ``vacuous_teacher_fails_closed``,
+``tune_fp_effect_is_recorded_honestly``,
 ``teacher_cache_is_memory_only_and_recovered_on_resume``.
 
 The measured defect this file pins shut: the only production call site passed
@@ -70,6 +70,31 @@ class _ScopedBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.mlp["gate_proj"](torch.tanh(self.self_attn["q_proj"](x)))
+
+
+class _ThreeLinearBlock(nn.Module):
+    """Three targets, so the per-target cycle and the once-per-block reading
+    disagree on the TuneFP count (N-1 = 2 vs 1) — the discriminator."""
+
+    def __init__(self, d: int = 8, seed: int = 5) -> None:
+        super().__init__()
+        gen = torch.Generator().manual_seed(seed)
+        self.self_attn = nn.ModuleDict({"q_proj": nn.Linear(d, d, dtype=torch.float64)})
+        self.mlp = nn.ModuleDict(
+            {
+                "gate_proj": nn.Linear(d, d, dtype=torch.float64),
+                "up_proj": nn.Linear(d, d, dtype=torch.float64),
+            }
+        )
+        with torch.no_grad():
+            for m in (*self.self_attn.values(), *self.mlp.values()):
+                m.weight.copy_(torch.randn(d, d, generator=gen, dtype=torch.float64) * 0.4)
+                m.bias.zero_()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.self_attn["q_proj"](x)
+        h = self.mlp["gate_proj"](torch.tanh(h))
+        return self.mlp["up_proj"](torch.tanh(h))
 
 
 class _DetachedStudent(nn.Module):
@@ -206,62 +231,86 @@ def test_scn_diagnostic_run_records_the_vacuous_event_and_continues():
 
 
 # --------------------------------------------------------------------------
-# tunefp_fires_once_per_block_after_attention_factorization (Figure 3)
+# tunefp_fires_per_target_cycle (Figure 3, re-ruled): N-1 passes, N refinements
 # --------------------------------------------------------------------------
 
 
-def test_scn_tunefp_fires_once_after_attention_factorization():
-    block = _ScopedBlock(8, seed=3)
+def test_scn_tunefp_fires_per_target_cycle():
+    """Figure 3's per-target cycle: TuneFP N-1 times, STE N times.
+
+    The falsified once-per-block reading fired TuneFP exactly ONCE on this
+    block; the cycle fires it once per target after the first. The count is
+    therefore the discriminator between the two readings, and it is why this
+    test could not stay green through the rework.
+    """
+    block = _ThreeLinearBlock(8, seed=5)
     sink: list = []
     reconstruct_block(
         block,
-        _calib(8, seed=11),
+        _calib(8, seed=17),
         PTQConfig(rank=4, stage_pre=StageHyper(1e-3, 4, 2)),
         recorder=_recorder(sink),
     )
     names = [event for event, _ in sink]
-    assert names.count("tune_fp") == 1, "TuneFP must fire exactly once per block"
-    assert names.index("tune_fp") < names.index("lb_admm") < names.index("ste")
-    info = [i for e, i in sink if e == "tune_fp"][0]
-    assert info["factorized_in_block"] == 1
-    assert info["tunable"] == ["mlp.gate_proj"], (
-        "the tunable set at the Figure 3 placement is exactly the still-FP remainder"
+    tune = [info for event, info in sink if event == "tune_fp"]
+    assert len(tune) == 2, (
+        f"the per-target cycle fires TuneFP N-1 times (N=3 targets here); got {len(tune)}"
     )
-    assert info["gradient_norm"] is not None and info["gradient_norm"] > 0.0, (
-        "with Q/K/V factorized the objective cannot be identically zero"
+    assert [len(t["tunable"]) for t in tune] == [2, 1], (
+        "each pass tunes exactly the still-FP remainder at that point in the cycle"
     )
+    assert [t["factorized_in_block"] for t in tune] == [1, 2], (
+        "the pass must see the targets already frozen ahead of it"
+    )
+    assert set(tune[1]["tunable"]) < set(tune[0]["tunable"]), (
+        "the still-FP remainder must shrink as targets are factorized"
+    )
+    assert all(t["gradient_norm"] is not None and t["gradient_norm"] > 0.0 for t in tune), (
+        "with >= 1 in-block linear factorized the objective cannot be identically zero"
+    )
+    # STE fires N times: every factorization is refined, target 1 included.
+    ste = [info for event, info in sink if event == "ste"]
+    assert len(ste) == 1
+    assert len(ste[0]["per_linear"]) == 3, (
+        "every factorized linear gets its refinement, target 1 included"
+    )
+    assert names.index("capture") < names.index("tune_fp")
+    assert names.index("lb_admm") < names.index("ste")
 
 
-def test_no_tunefp_call_site_precedes_the_attention_factorization():
-    """Shape pin: exactly one call site, and it lives INSIDE the layer loop."""
+def test_tunefp_call_site_precedes_the_targets_own_factorization():
+    """Shape pin: one call site, inside the loop, BEFORE the target is frozen.
+
+    Loop membership alone proves nothing — the falsified once-per-block
+    placement also lived inside the loop — so the pin is the ORDERING against
+    the target's own ``_set_linear`` write. A pin that only asserted
+    membership would have stayed green straight through this rework, which is
+    the same failure mode as the suite that certified the detonated fire.
+    """
     src = MODULE_PATH.read_text()
     tree = ast.parse(src)
-    call_lines: list[int] = []
-    loop_depths: dict[int, int] = {}
 
-    def visit(node: ast.AST, depth: int) -> None:
-        for child in ast.iter_child_nodes(node):
-            child_depth = depth + (
-                1 if isinstance(child, (ast.For, ast.AsyncFor, ast.While)) else 0
-            )
-            if isinstance(child, ast.Call) and getattr(child.func, "id", None) == "_tune_fp":
-                call_lines.append(child.lineno)
-                loop_depths[child.lineno] = child_depth
-            visit(child, child_depth)
+    def calls(node: ast.AST, fname: str) -> list[int]:
+        return [
+            n.lineno
+            for n in ast.walk(node)
+            if isinstance(n, ast.Call) and getattr(n.func, "id", None) == fname
+        ]
 
-    visit(tree, 0)
-    assert len(call_lines) == 1, (
-        f"the legacy pre-loop TuneFP call site must be gone; found {call_lines}"
+    module_tune = calls(tree, "_tune_fp")
+    assert len(module_tune) == 1, f"expected exactly one _tune_fp call site; found {module_tune}"
+    loop = next(
+        (n for n in ast.walk(tree) if isinstance(n, ast.For) and calls(n, "_tune_fp")),
+        None,
     )
-    assert loop_depths[call_lines[0]] >= 1, (
-        "the TuneFP call site must sit inside the factorization loop (Figure 3 placement)"
+    assert loop is not None, "the TuneFP call site must sit inside the factorization loop"
+    set_lines = calls(loop, "_set_linear")
+    assert set_lines, "the loop must freeze each linear it factorizes"
+    assert module_tune[0] < min(set_lines), (
+        "the per-target cycle tunes the still-FP remainder BEFORE factorizing the "
+        f"target: _tune_fp at {module_tune[0]} must precede the loop's first "
+        f"_set_linear at {min(set_lines)}"
     )
-    loop_head = next(
-        n.lineno
-        for n in ast.walk(tree)
-        if isinstance(n, ast.For) and "enumerate(" in ast.unparse(n.iter)
-    )
-    assert call_lines[0] > loop_head
 
 
 # --------------------------------------------------------------------------

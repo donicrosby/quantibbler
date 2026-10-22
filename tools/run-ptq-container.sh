@@ -191,4 +191,27 @@ printf '=== run %s rank=%s solver=%s seq_len=%s tune_seq_len=%s paper_faithful=%
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-unset}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "$OUT" \
   >> /opt/data/tmp/quantibbler-breadcrumbs.log
 
+
+# Host-side stall watchdog (post-23:10Z hardening): the 17:16 attempt hung
+# 4.8 h at the memory ceiling with the in-process breadcrumb writer silenced
+# along with it, so anything inside the container shares that fate. This one
+# runs OUTSIDE, watches for total line-silence in the breadcrumbs log
+# (heartbeats gap ~5 s; stage markers legitimately gap ~21 min), and injects
+# its alerts into that same forensic tail + $OUT/watchdog.log. Alert-only by
+# default; WATCHDOG_KILL_AFTER_MIN opts into docker stop after sustained
+# stall. WATCHDOG=0 disables. DRY_RUN exited above, so a dry run never
+# launches one.
+WATCHDOG="${WATCHDOG:-1}"
+WATCHDOG_STALL_MIN="${WATCHDOG_STALL_MIN:-15}"
+WATCHDOG_KILL_AFTER_MIN="${WATCHDOG_KILL_AFTER_MIN:-0}"
+if [ "$WATCHDOG" = "1" ]; then
+  nohup sh "$REPO/tools/qkb-stall-watchdog.sh" \
+    --breadcrumbs /opt/data/tmp/quantibbler-breadcrumbs.log \
+    --container quantibbler-ptq-run \
+    --stall-min "$WATCHDOG_STALL_MIN" \
+    --kill-after-min "$WATCHDOG_KILL_AFTER_MIN" \
+    --log "$OUT/watchdog.log" >>"$OUT/watchdog.log" 2>&1 &
+  echo "watchdog: pid=$! stall=${WATCHDOG_STALL_MIN}m kill_after=${WATCHDOG_KILL_AFTER_MIN}m log=$OUT/watchdog.log" >&2
+fi
+
 exec "$@"

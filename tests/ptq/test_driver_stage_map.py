@@ -171,14 +171,32 @@ def test_paper_faithful_run_records_the_algorithm1_stage_map(
     assert mapped["phase1_statistics"]["invocations"] == 1
     assert mapped["phase1_statistics"]["deviation"] is None
     assert "compressed-prefix" not in json.dumps(mapped["phase1_statistics"])
-    # One TuneFP pass per block, never a vacuous one.
-    assert mapped["tune_fp"]["invocations"] == mapped["capture"]["invocations"]
+    # Per-target cycle (Figure 3, re-ruled): TuneFP fires once per target
+    # AFTER the first — target 1 is factorized first, because a pass before it
+    # has nothing factorized and is therefore bitwise-vacuous. So the count is
+    # (factorized linears) - (blocks), and it is DERIVED from the packed layer
+    # lists rather than pinned to a literal. The once-per-block reading this
+    # replaced asserted `== capture.invocations`.
+    packed = [stage for stage in report["stages"] if stage["event"] == "sign_extract_pack"]
+    factorized = sum(len(stage["layers"]) for stage in packed)
+    assert factorized, "no packed layer lists to derive the cycle count from"
+    assert mapped["tune_fp"]["invocations"] == factorized - mapped["capture"]["invocations"]
     assert mapped["tune_fp"]["vacuous_events"] == 0
     # ... and the extra-paper discrete stages never fired on this path.
     assert mapped["ste"]["discrete_flip_pass"] is False
     # Deviations that remain are NAMED in the record, not silent.
     assert "polish" in mapped["lb_admm"]["deviation"]
     assert "informed assumption" in mapped["tune_fp"]["deviation"]
+    # The stage map's own reading was falsified by the 64,151x fire: both cells
+    # must describe the per-target cycle now, and the overruled reading must not
+    # survive anywhere in them.
+    assert "PER-TARGET" in mapped["tune_fp"]["deviation"], (
+        "the tune_fp stage-map cell still carries the overruled placement reading"
+    )
+    assert "once per block" not in mapped["tune_fp"]["deviation"]
+    assert "per-target" in mapped["ste"]["deviation"], (
+        "the ste stage-map cell still carries the overruled scheduling reading"
+    )
 
     tune = [stage for stage in report["stages"] if stage["event"] == "tune_fp"]
     assert tune
@@ -189,7 +207,28 @@ def test_paper_faithful_run_records_the_algorithm1_stage_map(
         assert stage["teacher_source"] == "frozen_reference_copy"
         assert isinstance(stage["teacher_fingerprint"], str) and stage["teacher_fingerprint"]
         assert stage["tunable"], "TuneFP had no still-FP remainder to tune"
-        assert stage["weight_delta_rel"] > 0.0, "the fp weights never moved (Step 1 inert)"
+    # The per-target cycle fires N-1 times, so the fires are SMALLER than the
+    # once-per-block reading's single pass, and the late ones carry a
+    # single-target remainder on a fixture whose block output is already fit to
+    # ~1e-4. There Adam's update underflows to exactly zero (the step falls
+    # below the float32 ulp of the parameter), so "every fire moved the weights"
+    # is not the invariant. The invariant is TuneFP's own guard distinction: a
+    # fire with a LIVE gradient must move the weights, and a fire that moved
+    # nothing must have had a dead one — gradient-zero with a residual on the
+    # board would be a detached student, not an underflow.
+    assert any(stage["weight_delta_rel"] > 0.0 for stage in tune), (
+        "not one TuneFP fire moved the fp weights: Step 1 is inert run-wide"
+    )
+    for stage in tune:
+        if stage["weight_delta_rel"] == 0.0:
+            assert stage["gradient_norm"] < 1e-9, (
+                f"a fire with a live gradient ({stage['gradient_norm']!r}) moved "
+                "nothing: an inert stage, not an update underflow"
+            )
+        else:
+            assert stage["gradient_norm"] > 0.0, (
+                "the weights moved with an identically-zero gradient"
+            )
 
     # The teacher capture names its provenance, and the teacher tensors were
     # never persisted (memory-only cache).

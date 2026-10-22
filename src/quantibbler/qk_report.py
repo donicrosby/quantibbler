@@ -42,6 +42,7 @@ import numpy as np
 
 __all__ = [
     "COLLAPSE_LINE",
+    "STEPS_EFFECT_EPS",
     "OK_LINE",
     "MIN_PROBE_DEPTH",
     "FAILED",
@@ -71,6 +72,20 @@ _FP16_REFERENCE_PPL = 6.10  # the FP16 baseline both are measured against
 # tests/test_qk_report.py asserts the arithmetic of both edges.
 COLLAPSE_LINE: float = float(math.ceil(_STBLLM_COLLAPSE_PPL / _FP16_REFERENCE_PPL))
 OK_LINE: float = float(math.ceil(_LITTLEBIT2_FUNCTIONAL_PPL / _FP16_REFERENCE_PPL))
+
+# Minimum relative reduction of a stage's own objective for the stage to count
+# as having done work: a record whose ``residual_after`` is not at least this
+# much below its ``residual_before`` is an inert stage, however many steps it
+# booked. One constant, shared by the report gate and the stage tests — a
+# second threshold anywhere would be a hand-tuned re-pin (the same rule
+# ``COLLAPSE_LINE`` already carries).
+#
+# The measured pair this exists to reject: the rehearsal recorded
+# ``1.9e-04 -> 1.9e-04`` on a full TuneFP budget — display-identical, i.e. no
+# measurable work — and every gate in the pipeline passed it. Real runs clear
+# it by two orders of magnitude (the fatal fire's TuneFP moved
+# ``0.3184 -> 0.1973``, 38%).
+STEPS_EFFECT_EPS: float = 1e-3
 
 FAILED = "failed"
 DEGRADED = "degraded"
@@ -429,7 +444,8 @@ def fidelity_conditions(
 
     An EXECUTION is an event that fired, not merely one that was recorded. So
     a skip-marked event does not count (``tune_fp`` carrying ``skipped`` — the
-    degenerate-block ``no_still_fp_remainder`` path — is a recorded skip), and
+    per-target cycle's ``block_carries_no_second_target`` path on a block with
+    fewer than two quantizable linears — is a recorded skip), and
     neither does ``tune_scales_kd`` when its payload says the run is the
     ``factor_mode='fp'`` measurement, where the driver appends the event
     unconditionally even though the stage is skipped entirely.
@@ -529,11 +545,14 @@ _STAGE_LINES: tuple[tuple[str, str, str, str | None, bool], ...] = (
     ("capture", "9-10", "compressed-prefix inputs X_b and teacher outputs Y_b", None, True),
     (
         "tune_fp",
-        "12 (Figure 3 placement)",
+        "12 (Figure 3 per-target cycle)",
         "TuneFP: error-propagation mitigation",
-        "placement read from Figure 3 (once per block, after Q/K/V are "
-        "factorized) and the internal loss formula is an informed assumption "
-        "(the corpus names the call but not its objective)",
+        "placement read from Figure 3 as a PER-TARGET-LINEAR cycle: tune the "
+        "still-FP remainder, factorize the target, refine the target, with "
+        "target 1 factorized first so the pass fires N-1 times per block (the "
+        "earlier once-per-block reading was falsified by the 64,151x fire); "
+        "the internal loss formula is an informed assumption (the corpus "
+        "names the call but not its objective)",
         True,
     ),
     (
@@ -549,10 +568,10 @@ _STAGE_LINES: tuple[tuple[str, str, str, str | None, bool], ...] = (
         "ste",
         "19",
         "TuneLatentSTE: factorized-component refinement",
-        "per-layer scheduling follows Figure 3's right panel; each scoped "
-        "linear consumes the full [NQ] App. C budget (epochs x (n // batch)) "
-        "on the just-factorized linear; the bounded discrete flip pass is a "
-        "named deviation when its budget is nonzero",
+        "per-target scheduling follows Figure 3's per-target cycle; each "
+        "scoped linear consumes the full [NQ] App. C budget (epochs x "
+        "(n // batch)) on the just-factorized linear; the bounded discrete "
+        "flip pass is a named deviation when its budget is nonzero",
         True,
     ),
     ("sign_extract_pack", "20-23", "sign extraction and packing", None, True),

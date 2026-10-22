@@ -226,6 +226,37 @@ def _healthy_report(**overrides) -> str:  # noqa: ANN003
         "artifact_exported": True,
         "status": "ok",
         "wall_seconds": 48.2,
+        # Stage evidence (real-shaped): both long stages carry the trio, so a
+        # healthy report is one that can show its stages did work.
+        "stages": [
+            {"event": "capture", "capture_index": 0},
+            {
+                "event": "tune_fp",
+                "label": "layers.0",
+                "tunable": ["mlp.gate_proj"],
+                "factorized_in_block": 1,
+                "steps": 8,
+                "gradient_norm": 0.071,
+                "residual_before": 0.3184,
+                "residual_after": 0.1973,
+                "vacuous": False,
+            },
+            {
+                "event": "ste",
+                "total_steps": 8,
+                "per_linear": {
+                    "mlp.gate_proj": {
+                        "steps": 8,
+                        "gradient_norm": 0.52,
+                        "residual_before": 0.3184,
+                        "residual_after": 0.2901,
+                        "flips_u": 0,
+                        "flips_v": 0,
+                        "zero_crossings": True,
+                    }
+                },
+            },
+        ],
     }
     report.update(overrides)
     return json.dumps(report, allow_nan=False)
@@ -300,6 +331,49 @@ def test_smoke_contract_flags_every_broken_shape(payload, rc, expected):  # noqa
     )
     findings = report_checks.smoke_findings(text, rc, SMOKE_EXPECT)
     assert any(expected in finding for finding in findings), (expected, findings)
+
+
+@pytest.mark.parametrize(
+    ("poison", "expected"),
+    [
+        # The rehearsal's own shape: a full budget that moved nothing.
+        ({"residual_before": 1.9e-04, "residual_after": 1.9e-04}, "inert stage"),
+        ({"residual_after": 0.9}, "inert stage"),
+        ({"residual_after": None}, "cannot show its own work"),
+        ({"gradient_norm": "0.1"}, "cannot show its own work"),
+    ],
+)
+def test_stage_evidence_gate_rejects_a_stage_that_cannot_show_its_work(  # noqa: ANN001
+    poison, expected
+):
+    report = json.loads(_healthy_report())
+    for entry in report["stages"]:
+        if entry.get("event") == "tune_fp":
+            entry.update(poison)
+    findings = report_checks.stage_evidence_findings(json.dumps(report, allow_nan=False))
+    assert any(expected in finding for finding in findings), (expected, findings)
+
+
+def test_stage_evidence_gate_audits_ste_rows_not_only_tunefp():
+    report = json.loads(_healthy_report())
+    for entry in report["stages"]:
+        if entry.get("event") == "ste":
+            entry["per_linear"]["mlp.gate_proj"]["residual_after"] = 0.3184
+    findings = report_checks.stage_evidence_findings(json.dumps(report, allow_nan=False))
+    assert any("ste record" in f and "inert stage" in f for f in findings), findings
+
+
+def test_stage_evidence_gate_ignores_a_recorded_skip():
+    """A skipped TuneFP is not an executed stage: the per-target cycle has no
+    pass on a block carrying fewer than two quantizable linears."""
+    report = json.loads(_healthy_report())
+    for entry in report["stages"]:
+        if entry.get("event") == "tune_fp":
+            entry.clear()
+            entry.update(
+                {"event": "tune_fp", "skipped": "block_carries_no_second_target", "steps": 0}
+            )
+    assert report_checks.stage_evidence_findings(json.dumps(report, allow_nan=False)) == []
 
 
 def test_smoke_and_abort_assertions_reject_non_finite_json_constants():
