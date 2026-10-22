@@ -1,0 +1,38 @@
+#!/bin/sh
+# Pre-push secret fence. BARE SH, ZERO PYTHON DEPS on purpose: this box's venvs
+# demonstrably lack pre_commit, and a fence that needs a framework fails open
+# exactly where it must fail closed. A nonzero exit blocks the push.
+#
+# TWO FACES, both pinned. The original leak lived in a tracked file AND in a
+# commit message body; a tree-only scan sees one face, which is why face 2 is
+# driven from the refs git hands us on stdin rather than left opt-in.
+#
+# Refuse (never pass) when the fence script or the wordlist is missing: an absent
+# site list is a BLIND face, not a green one.
+set -u
+REPO="$(git rev-parse --show-toplevel)"
+FENCE="$REPO/tools/secret-fence.sh"
+WL="${SECRET_FENCE_WORDLIST:-$REPO/.git-secret-fence-wordlist}"
+if [ ! -r "$FENCE" ]; then
+  echo "pre-push fence: $FENCE missing/unreadable -- REFUSING (fail-closed)" >&2
+  exit 1
+fi
+if [ ! -r "$WL" ]; then
+  echo "pre-push fence: no wordlist at $WL -- REFUSING (blind face is not a green)" >&2
+  exit 1
+fi
+rc=0
+# Face 1: the tree as recorded at HEAD.
+out=$(SECRET_FENCE_WORDLIST="$WL" sh "$FENCE" --repo "$REPO" 2>&1) || rc=1
+printf '%s\n' "$out"
+# Face 2: per pushed ref, every commit message and diff in the outgoing range.
+# stdin lines are: <local ref> <local sha> <remote ref> <remote sha>.
+while read -r lref lsha rref rsha; do
+  [ -n "${lsha:-}" ] || continue
+  case "${rsha:-}" in
+    ""|0000000000000000000000000000000000000000) continue ;;
+  esac
+  out=$(SECRET_FENCE_WORDLIST="$WL" sh "$FENCE" --repo "$REPO" --range "${rsha}..${lsha}" 2>&1) || rc=1
+  printf '%s\n' "$out"
+done
+exit "$rc"

@@ -103,6 +103,22 @@ if [ "$EXECUTE" = "1" ]; then
 fi
 
 FAIL=0
+
+echo "--- gates: push fence wired into THIS clone ---"
+HYG_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+FENCE_SRC="$HYG_ROOT/tools/git-hooks/pre-push"
+FENCE_DST="$HYG_ROOT/.git/hooks/pre-push"
+if [ ! -r "$FENCE_SRC" ]; then
+  echo "  FAIL: tracked hook source $FENCE_SRC is missing (nothing to install from)"; FAIL=1
+elif [ ! -x "$FENCE_DST" ]; then
+  echo "  FAIL: $FENCE_DST is missing or not executable -- the push path is UNFENCED"; FAIL=1
+elif ! cmp -s "$FENCE_SRC" "$FENCE_DST"; then
+  echo "  FAIL: installed hook differs from the tracked source -- DRIFT, and an"
+  echo "        outdated fence fails open where it must fail closed"; FAIL=1
+else
+  echo "  ok: push fence installed, executable, byte-identical to the tracked source"
+fi
+
 for sha in $ABSENT; do
   if git cat-file -t "$sha" >/dev/null 2>&1; then
     echo "  FAIL: $sha still present in fire tree"; FAIL=1

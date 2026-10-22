@@ -175,6 +175,26 @@ fi
 # DRY_RUN=1 prints the exact command line (copy-pasteable) and stops: the launch
 # is checkable without spending 32g of host RAM and without stealing the
 # container name a real run needs.
+# --- push fence: clone-local hooks need re-installing per clone -----------------
+# A git hook is untracked by construction, so the tracked source in
+# tools/git-hooks/ is copied into this clone on every launch. The copy is
+# BYTE-COMPARED, not merely presence-checked, so drift is caught rather than
+# tolerated; publication-hygiene.sh refuses (nonzero) if the installed hook is
+# missing, non-executable, or differs from the tracked source.
+#
+# core.hooksPath is deliberately NOT used: setting it makes git ignore .git/hooks
+# entirely, which would orphan the pre-commit framework hook this box relies on.
+# That trades one silent disarm for another.
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+FENCE_SRC="$REPO_ROOT/tools/git-hooks/pre-push"
+FENCE_DST="$REPO_ROOT/.git/hooks/pre-push"
+if [ -r "$FENCE_SRC" ] && { [ ! -f "$FENCE_DST" ] || ! cmp -s "$FENCE_SRC" "$FENCE_DST"; }; then
+  mkdir -p "$REPO_ROOT/.git/hooks"
+  cp "$FENCE_SRC" "$FENCE_DST"
+  chmod 755 "$FENCE_DST"
+  echo "push fence: installed/refreshed $FENCE_DST from the tracked source"
+fi
+
 if [ "$DRY_RUN" != "0" ]; then
   for arg in "$@"; do printf "'%s' " "$arg"; done
   echo
