@@ -319,11 +319,22 @@ def _rho_end(cfg: PTQConfig) -> float:
     Fail-closed on a malformed value: silently falling back to the default
     would produce a run whose provenance claims an override it never applied.
     """
+    return rho_end_provenance(cfg.rho_end)[0]
+
+
+def rho_end_provenance(default: float) -> tuple[float, str]:
+    """Effective ``rho_end`` and where it came from: ``"env"`` or ``"config"``.
+
+    The value alone is not enough to audit a run. Two attribution passes differ
+    in exactly this number, and neither the report nor the launch line is
+    guaranteed to survive beside the artifact -- so the source travels with the
+    value, and a run cannot be silently mislabelled about which arm it was.
+    """
     raw = os.environ.get("QK_RHO_END")
     if raw is None:
-        return cfg.rho_end
+        return default, "config"
     try:
-        return float(raw)
+        return float(raw), "env"
     except ValueError:
         msg = f"QK_RHO_END must be a float, got {raw!r}"
         raise ValueError(msg) from None

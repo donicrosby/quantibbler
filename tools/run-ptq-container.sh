@@ -147,6 +147,15 @@ set -- docker run --rm \
 if [ -n "${QK_RHO_END:-}" ]; then
   set -- "$@" -e "QK_RHO_END=$QK_RHO_END"
 fi
+# QK_SOLVER_PROBE enables the read-only per-linear diagnostic
+# (block_recon._record_solver_probe) that writes the attribution numbers. These
+# are docker flags, so they belong here, not after the image.
+if [ -n "${QK_SOLVER_PROBE:-}" ]; then
+  set -- "$@" -e "QK_SOLVER_PROBE=$QK_SOLVER_PROBE"
+fi
+if [ -n "${QK_SOLVER_PROBE_PATH:-}" ]; then
+  set -- "$@" -e "QK_SOLVER_PROBE_PATH=$QK_SOLVER_PROBE_PATH"
+fi
 # ...and the container command continues the same argument list.
 set -- "$@" \
   quantibbler-ptq:latest \

@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import os
 import time
 from pathlib import Path  # checkpoint resume: accept str or Path
@@ -106,6 +107,95 @@ class VacuousTeacherError(RuntimeError):
             f"{gradient_norm!r}, initial residual norm {initial_residual_norm!r} — a "
             "run claiming paper fidelity cannot continue on a stage that did not execute"
         )
+
+
+SOLVER_PROBE_ENV = "QK_SOLVER_PROBE"
+SOLVER_PROBE_PATH_ENV = "QK_SOLVER_PROBE_PATH"
+SOLVER_PROBE_DEFAULT_PATH = "/out/solver_probe.jsonl"
+
+
+def _record_solver_probe(name, w, bal, res, cfg) -> None:
+    """Append one JSONL row per solved linear: the solver's own numbers.
+
+    Diagnostic, read-only, OFF by default -- with QK_SOLVER_PROBE unset this
+    returns before touching an array, so a default run is unchanged.
+
+    Why it exists: the attribution probe needs per-linear cos and the solve's
+    iteration count, and NOTHING in this tree records either. Every ``cos`` in
+    the solver path is the cosine LR schedule; ``n_iter``/``converged`` live on
+    ADMMResult and are dropped; the PTQ stage prints nothing per block. And
+    stage records only reach disk in the end-of-run report, so a per-layer
+    probe that is stopped early -- which a per-layer probe must be -- leaves no
+    numbers at all. Hence JSONL appended as each linear solves.
+
+    Both cos numbers are recorded deliberately, because they answer different
+    questions and the gap between them is measured history: the SVD arm split
+    raw 0.84 / pack 0.45, and a single number would have hidden that the pack
+    stage, not the solve, is the bottleneck.
+
+      cos_raw  = cos(W, U V^T)                              [NQ] Eq. 9 state
+      cos_pack = cos(W, s1 o (sign(U) sign(V)^T) o s2^T)    [NQ] Eq. 10 packed
+
+    Both against the ORIGINAL (un-preconditioned) FP weight W, never W~, per
+    the stage-boundary pin. The effective rho_end and its source ride along, so
+    a probe row can never be mislabelled about which arm produced it.
+    """
+    if not os.environ.get(SOLVER_PROBE_ENV):
+        return
+
+    from .lb_admm import rho_end_provenance
+
+    u = np.asarray(bal.U, dtype=np.float64)
+    v = np.asarray(bal.V, dtype=np.float64)
+    s1 = np.asarray(bal.s1, dtype=np.float64)
+    s2 = np.asarray(bal.s2, dtype=np.float64)
+    wf = np.asarray(w, dtype=np.float64)
+
+    def _cos(recon: np.ndarray) -> float:
+        num = float(np.sum(wf * recon))
+        den = float(np.linalg.norm(wf) * np.linalg.norm(recon))
+        return num / den if den > 0.0 else float("nan")
+
+    recon_raw = u @ v.T
+    recon_pack = (s1[:, None] * (np.sign(u) @ np.sign(v).T)) * s2[None, :]
+    nw = float(np.linalg.norm(wf))
+
+    def _rel(recon: np.ndarray) -> float:
+        return float(np.linalg.norm(wf - recon)) / nw if nw > 0.0 else float("nan")
+
+    value, source = rho_end_provenance(cfg.rho_end)
+    row = {
+        "name": name,
+        "solver": cfg.solver,
+        "rho_end": value,
+        "rho_end_source": source,
+        "n_iter": getattr(res, "n_iter", None),
+        "converged": getattr(res, "converged", None),
+        "w_fro": nw,
+        "wq_raw_fro": float(np.linalg.norm(recon_raw)),
+        "wq_pack_fro": float(np.linalg.norm(recon_pack)),
+        "cos_raw": _cos(recon_raw),
+        "cos_pack": _cos(recon_pack),
+        "rel_raw": _rel(recon_raw),
+        "rel_pack": _rel(recon_pack),
+        "rank": int(u.shape[1]),
+        "ts": time.time(),
+    }
+    path = os.environ.get(SOLVER_PROBE_PATH_ENV) or SOLVER_PROBE_DEFAULT_PATH
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+    except OSError as exc:
+        # The numbers ARE the deliverable of a probe run: a probe that cannot
+        # write them has measured nothing, so fail loudly rather than return.
+        raise RuntimeError(f"solver probe enabled but cannot write {path}: {exc}") from exc
+    print(
+        f"[solver_probe:{name}] solver={row['solver']} rank={row['rank']} "
+        f"n_iter={row['n_iter']} converged={row['converged']} "
+        f"cos_raw={row['cos_raw']:.6f} cos_pack={row['cos_pack']:.6f} "
+        f"rel_raw={row['rel_raw']:.6f} rel_pack={row['rel_pack']:.6f}",
+        flush=True,
+    )
 
 
 def _weights_fingerprint(module: nn.Module) -> str:
@@ -1189,6 +1279,7 @@ def reconstruct_block(
             r = min(cfg.rank, len(s_svd))
             p_u = np.ascontiguousarray(u_svd[:, :r] * np.sqrt(s_svd[:r]))
             p_v = np.ascontiguousarray(vt_svd[:r, :].T * np.sqrt(s_svd[:r]))
+            res = None  # no iterate to report; the probe row records that
         else:
             res = lb_admm(w_tilde, cfg)
             p_u, p_v = res.P_u, res.P_v
@@ -1205,6 +1296,7 @@ def reconstruct_block(
             w,
             cfg,
         )
+        _record_solver_probe(name, w, bal, res, cfg)
         # Greedy bit-flip polish (r137 root-cause line of work): the
         # continuous stages never perform a discrete move on the packed
         # binaries (measured: 4,096 STE steps flip zero sign bits), so the
