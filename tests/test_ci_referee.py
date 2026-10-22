@@ -226,6 +226,9 @@ def _healthy_report(**overrides) -> str:  # noqa: ANN003
         "artifact_exported": True,
         "status": "ok",
         "wall_seconds": 48.2,
+        # A faithful claim, so the EFFECT half of the stage gate applies to this
+        # report and not just the presence half.
+        "paper_faithful": True,
         # Stage evidence (real-shaped): both long stages carry the trio, so a
         # healthy report is one that can show its stages did work.
         "stages": [
@@ -337,8 +340,8 @@ def test_smoke_contract_flags_every_broken_shape(payload, rc, expected):  # noqa
     ("poison", "expected"),
     [
         # The rehearsal's own shape: a full budget that moved nothing.
-        ({"residual_before": 1.9e-04, "residual_after": 1.9e-04}, "inert stage"),
-        ({"residual_after": 0.9}, "inert stage"),
+        ({"residual_before": 1.9e-04, "residual_after": 1.9e-04}, "shows no measurable effect"),
+        ({"residual_after": 0.9}, "shows no measurable effect"),
         ({"residual_after": None}, "cannot show its own work"),
         ({"gradient_norm": "0.1"}, "cannot show its own work"),
     ],
@@ -360,7 +363,29 @@ def test_stage_evidence_gate_audits_ste_rows_not_only_tunefp():
         if entry.get("event") == "ste":
             entry["per_linear"]["mlp.gate_proj"]["residual_after"] = 0.3184
     findings = report_checks.stage_evidence_findings(json.dumps(report, allow_nan=False))
-    assert any("ste record" in f and "inert stage" in f for f in findings), findings
+    assert any("ste cycle" in f and "shows no measurable effect" in f for f in findings), findings
+
+
+def test_stage_evidence_effect_floor_is_a_fidelity_requirement():
+    """Shape is checked everywhere; the effect floor only where fidelity is claimed.
+
+    A non-faithful run executes deliberately short budgets (the driver's
+    non-faithful ``stage_pre`` is ``epochs=0`` — one step of the paper's 256), so
+    its stages genuinely cannot demonstrate effect and are not findings. Asserting
+    the floor there would red-light correct behavior and make the gate a
+    false-alarm machine, which is the failure mode a gate cannot have.
+    """
+    report = json.loads(_healthy_report())
+    for entry in report["stages"]:
+        if entry.get("event") == "tune_fp":
+            entry["residual_after"] = entry["residual_before"]
+        for rec in (entry.get("per_linear") or {}).values():
+            rec["residual_after"] = rec["residual_before"]
+    text = json.dumps(report, allow_nan=False)
+    assert report_checks.stage_evidence_findings(text), "a faithful claim must be caught"
+
+    report["paper_faithful"] = False
+    assert report_checks.stage_evidence_findings(json.dumps(report, allow_nan=False)) == []
 
 
 def test_stage_evidence_gate_ignores_a_recorded_skip():

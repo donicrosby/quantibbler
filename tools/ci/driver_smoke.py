@@ -9,11 +9,11 @@ report it produced: ``status`` present, strictly parseable, process exit equal t
 arguments (assertions live in ``tools/ci/report_checks.py`` so they are unit
 tested in the lean tier).
 
-PLUMBING ONLY — this job makes no detection and no abort-path claim. The fixture
-is random-init, so its next-token distribution is already uniform (measured
-rank-1 quantized ratio 1.0000006; zeroing a whole block's ``o_proj`` moves its PPL
-by 3 ppm): quantization damage has no structure to destroy here. Detection comes
-from the weights-cached abort leg on a real checkpoint.
+PLUMBING ONLY — this job makes no detection and no abort-path claim. Detection
+comes from the weights-cached abort leg on a real checkpoint. The fixture's init
+scale, however, is load-bearing for the *stage-evidence* gate wired into
+``smoke_findings``: a fixture whose stages have nothing to do cannot demonstrate
+that the gate is wired without false-alarming. See ``build_fixture``.
 """
 
 from __future__ import annotations
@@ -42,10 +42,19 @@ MAX_ADMM_ITER = 2
 CORPUS_SENTENCE = "the quick brown fox jumps over the lazy dog . "
 
 BANNER = """\
-driver smoke: PLUMBING ONLY. Random-init fixture, uniform next-token
-distribution (measured rank-1 quantized ratio 1.0000006; a zeroed o_proj moves
-PPL 3 ppm) — this proves the gate's code path runs end-to-end offline and that
-the report and the exit code agree. No detection claim, no abort claim.
+driver smoke: PLUMBING ONLY. Fixed-seed fixture with generator-explicit draws.
+This proves the gate's code path runs end-to-end offline and that the report and
+the exit code agree. No detection claim, no abort claim — those belong to the
+weights-cached abort leg.
+
+The fixture is built at a scale where rank-r factorization is genuinely lossy
+(measured: TuneFP capture residual 2.2-8.9 across the three blocks, STE net
+effect 45x the STEPS_EFFECT_EPS floor). That is a requirement, not a detail: the
+stage-evidence gate CANNOT be wired against a fixture whose stages have nothing
+to do, because a gate that fires on plumbing is a false-alarm machine. The old
+0.02 init made the block output nearly input-independent (quantized rank-1 ratio
+1.0000006; zeroing a whole block's o_proj moved PPL 3 ppm) and put the TuneFP
+residual at 3.77e-06 — five orders below the unit fixture's.
 """
 
 
@@ -112,7 +121,11 @@ def build_fixture(directory: Path) -> Path:
         tokenizer_file=str(directory / "tokenizer.json"), eos_token="<|endoftext|>"
     )
 
-    torch.manual_seed(0)
+    # All draws in this fixture are generator-explicit. ``torch.manual_seed()``
+    # at module scope plus ``torch.randn_like()`` consumed the GLOBAL stream, so
+    # the fixture's values depended on how many draws preceded it, and the
+    # construction draw was invisible to every reader of this function.
+    gen = torch.Generator().manual_seed(0)
     config = Qwen3Config(
         vocab_size=VOCAB,
         hidden_size=64,
@@ -127,10 +140,20 @@ def build_fixture(directory: Path) -> Path:
         eos_token_id=fast.eos_token_id,
         bos_token_id=fast.eos_token_id,
     )
-    model = Qwen3ForCausalLM(config)
+    with torch.random.fork_rng():
+        model = Qwen3ForCausalLM(config)
+    # Init scale, and why 0.4 rather than the old 0.02.
+    #
+    # At 0.02 the fixture's block output was very nearly independent of its own
+    # input, so every fidelity stage had nothing to do and nothing could be shown
+    # to have done anything: the TuneFP capture residual measured 3.77e-06, five
+    # orders below the unit fixture's 0.259, and a threshold low enough to accept
+    # this fixture would accept an inert stage too. That is what made the
+    # artifact gate unwireable. Rebuilt at the unit fixture's scale, rank-r
+    # factorization is genuinely lossy and the stages have a live objective.
     with torch.no_grad():
         for param in model.parameters():
-            param.copy_(torch.randn_like(param) * 0.02)
+            param.copy_(torch.randn(param.shape, generator=gen, dtype=param.dtype) * 0.4)
     model.save_pretrained(directory)
     fast.save_pretrained(directory)
     return directory

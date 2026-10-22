@@ -91,9 +91,9 @@ honestly, then wire `stage_evidence_findings` into the smoke leg. Until then
 **an inert STE record in a real run fails nothing** — the records are auditable
 post-hoc, but the gate is not yet a gate.
 
-**Update, after measurement: the ruled test shape does not survive contact with
-the fixture — see §13.** The gate's *threshold* is settled; its *shape* is not,
-and the smoke fixture's degeneracy has a cause other than the one assumed.
+**Update: LANDED.** The gate is implemented, wired into `smoke_findings`, and
+proven to detect on a real artifact — see §16. The threshold is settled, the shape
+is settled, and the fixture was rebuilt rather than the floor moved.
 
 ## 6. Stale verdict claims riding this branch — annotations landed
 
@@ -388,3 +388,56 @@ at one student state); the **cross-fire comparison is the invalid step**. A
 genuine cumulative criterion needs a same-prefix counterfactual, which means
 recomputing the factorizations from the untuned weights: SVD-only cost, no
 optimizer steps, but a second pass over the block.
+
+## 16. The gate landed: shape (a), wired, and proven to detect on a real artifact
+
+@planner ruled **shape (a)** — net per-fire reduction, floor unchanged at
+`STEPS_EFFECT_EPS = 1e-3` — and the fixture rebuilt. Both are in, and the two
+halves of the gate are deliberately **not** the same check:
+
+1. **Presence, everywhere.** Every fire carries a finite trio. No budget is too
+   small to report where it started and where it ended.
+2. **Effect, per cycle, only where the run claims paper fidelity.** The net of the
+   cycle's same-prefix deltas must clear `STEPS_EFFECT_EPS` times the cycle's
+   largest starting residual. STE is grouped **per block**, not per linear: the
+   floor is about the cycle's joint effect, and one linear's row is a fraction of
+   it.
+
+Why (2) is fidelity-scoped rather than unconditional: the driver's **non-faithful**
+`stage_pre` is `epochs=0`, which leaves TuneFP a **one-step budget out of the
+paper's 256**. A non-faithful run therefore cannot demonstrate stage effect by
+construction, and asserting the floor there would red-light correct behaviour —
+a gate that fires on plumbing is a false-alarm machine, which is the one failure
+mode a gate cannot have. Measured on the real smoke artifact with the gate
+wired: **non-faithful, no findings; the same artifact relabelled
+`paper_faithful: true`, 3 findings** (TuneFP cycles on `layers.0/1/2` netting
+`0.0`, `0.00195`, `0.0` against bars of `0.0089`, `0.0055`, `0.0056`). That is
+the detector proving it detects, on an artifact rather than on a synthetic
+poison.
+
+**The honest limit, stated in the gate's own docstring:** it is a **no-op
+detector, not a counterfactual.** It cannot see a tuning that helps one fire
+exactly as much as it hurts another. Shape (c) — the same-solver counterfactual
+that would measure TuneFP's marginal effect on the admm geometry — is priced at
+**+7.1 h** on the faithful run (918 s x 28) and stays a plan-level decision, not
+a gate.
+
+**Fixture rebuilt** (`tools/ci/driver_smoke.py`), because the gate cannot be
+wired against a fixture with nothing to do:
+
+- Init scale `0.02 -> 0.4`, the unit fixture's scale. Measured effect: the TuneFP
+  capture residual went from `3.77e-06` to `2.2 - 8.9` across the three blocks,
+  and STE's net effect is 45x the floor. The old fixture's own banner was right
+  about why it was inert: at 0.02 the block output was nearly input-independent.
+- **Every draw generator-explicit.** `torch.manual_seed(0)` plus
+  `torch.randn_like(param)` consumed the GLOBAL stream, so the fixture's values
+  depended on how many draws preceded them — @slop-remover's surviving clause,
+  honoured on the fixture that exists rather than on a perturbation.
+- The banner and module docstring were rewritten with the measured numbers: the
+  old text advertised the very measurement that made the fixture unfit ("zeroing
+  a whole block's o_proj moves its PPL by 3 ppm"), and leaving it would have made
+  the file lie about the fixture it now builds.
+
+Verification: `tools/ci/driver_smoke.py --out ...` rc=0 with the gate wired;
+`tests/ptq + test_ci_referee + test_qk_report + test_run_ptq_wrapper` **295
+passed**.

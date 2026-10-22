@@ -43,25 +43,32 @@
 
 ## OPEN — acceptance conditions before re-fire
 
-- [ ] (coder) **Wire the artifact gate — BLOCKED on a spec decision, measured.**
-      The ruled test shape (`residual_after <= residual_before * (1 - EPS)` per
-      fire) fails on the very fixture it would hang on: the last TuneFP fire
-      reduces 5.86e-04 against a 1e-3 floor, and the decay is monotonic in
-      remainder size (design.md §13). Threshold right, shape wrong — three
-      candidate shapes listed there for @planner. `stage_evidence_findings()` is
-      complete, unit-tested, shares the one constant — and is called by
-      nothing. It cannot be wired today: the tiny fixture's TuneFP moved its
-      residual **up** (`3.96e-06 -> 4.38e-06`), every effect measure below
-      `STEPS_EFFECT_EPS`. Until this lands, **an inert STE record in a real run
-      fails nothing.** The fixture gets a live objective; the threshold does
-      not move. (design.md §5)
-- [ ] (planner / coder) **Give the smoke fixture a live objective** so its
-      `tune_fp` and `ste` records clear `STEPS_EFFECT_EPS` honestly. This is a
-      fixture-shape decision, hence planner.
-- [ ] (planner) **Pin the divergence-gate fixture seeds** (or fix the lottery)
-      in the CI-referee config. A full-suite gate carries a **~1-in-6
-      false-red rate** today; "suite green" is not yet a checkable fact.
-      (design.md §8)
+- [x] (coder) **Artifact gate LANDED and wired.** Shape (a), @planner's ruling:
+      presence of the finite trio everywhere, plus a per-cycle net-reduction test
+      against `STEPS_EFFECT_EPS` **on runs claiming paper fidelity** — STE grouped
+      per block, not per linear. Non-faithful runs are shape-checked only, because
+      the driver's non-faithful `stage_pre` is `epochs=0` and leaves TuneFP one
+      step of the paper's 256: asserting the floor there would red-light correct
+      behaviour. Proven on a real artifact, not a synthetic poison: the smoke
+      report is clean as-is, and 3 findings when relabelled `paper_faithful: true`.
+      Stated limit, in the gate's docstring: no-op detector, not a counterfactual.
+- [x] (coder) **Smoke fixture rebuilt** (`tools/ci/driver_smoke.py`): init scale
+      0.02 -> 0.4 (the unit fixture's), all draws generator-explicit. Measured:
+      TuneFP capture residual 3.77e-06 -> 2.2-8.9, STE net 45x the floor. Banner
+      and docstring rewritten with the measured numbers.
+- [ ] (planner) **[DROPPED — superseded] Give the smoke fixture a live
+      objective.** Done as the rebuild above rather than as a perturbation; the
+      perturbation reading would have needed a product hook, which the no-knob
+      spec point forbids.
+- [ ] (planner) **Decide shape (c)** — the same-solver counterfactual, priced at
+      +7.1 h on the faithful run (918 s x 28: 21.8 -> 28.9 h). The only shape that
+      measures TuneFP's marginal effect on the admm geometry; a plan-level
+      decision, not a gate.
+- [x] (coder) **Divergence-gate flake closed by cause.** `torch.set_num_threads(1)`
+      pinned in `tests/ptq/conftest.py`; the fixture's global `nn.Linear` draw made
+      generator-explicit; the band is **2/24, seeds 16 and 18**, byte-identical
+      across two separate invocations; a band-owning test asserts the guard fires
+      on seed 16. (design.md §8)
 - [ ] (planner / user) **Rule on the phantom date.** 33 records date their own
       events after the commits that record them, relative to the repo's own
       clock. Clock wrong, or string wrong? Mechanical once decided; two of the

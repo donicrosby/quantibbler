@@ -89,30 +89,43 @@ def smoke_findings(payload_text: str, rc: int, expect: dict) -> list[str]:
         got = report.get(key)
         if got != want:
             problems.append(f"provenance {key}: report says {got!r}, the run asked for {want!r}")
-    # NOT wired to ``stage_evidence_findings`` yet, deliberately: the gate is
-    # unit-tested against real-shaped records, but the smoke leg's own artifact
-    # has not been measured against ``STEPS_EFFECT_EPS``, and the tiny fixture
-    # is a near-converged regime (measured on the sibling 3-block fixture: a
-    # full 256-step TuneFP budget moved the capture residual 3.96e-06 ->
-    # 4.38e-06, i.e. UP). Wiring a gate that fires on the plumbing-only fixture
-    # would be a false alarm, and the fixture-honesty rule is that the fixture
-    # gets a live objective rather than the threshold moving. Measure the smoke
-    # artifact first, then wire.
+    problems.extend(stage_evidence_findings(payload_text))
     return problems
 
 
 def stage_evidence_findings(payload_text: str) -> list[str]:
     """Every stage record that cannot show its own work. Empty == evidence held.
 
-    TuneFP and TuneLatentSTE now carry ``residual_before``/``residual_after``
+    TuneFP and TuneLatentSTE carry ``residual_before``/``residual_after``
     (full-capture objective) and ``gradient_norm`` (first step's backward) per
-    fire, so "did this stage do anything?" is answered from the artifact
-    instead of inferred. The reduction test uses the shared
-    ``STEPS_EFFECT_EPS``: a record whose objective did not measurably move is an
-    inert stage however many steps it booked. The shape this rejects is real —
-    the rehearsal recorded a full TuneFP budget as ``1.9e-04 -> 1.9e-04`` and
-    every gate passed it, because the flip counters alone cannot distinguish an
-    effective stage from an inert one.
+    fire, so "did this stage do anything?" is answered from the artifact instead
+    of inferred. The shape this rejects is real: a rehearsal recorded a FULL
+    TuneFP budget as ``1.9e-04 -> 1.9e-04`` and every gate passed it, because the
+    flip counters alone cannot distinguish an effective stage from an inert one.
+
+    Two checks, and they are not the same check:
+
+    1. **Presence.** Every fire carries a finite trio. No budget is too small to
+       report what it started from and what it ended at.
+    2. **Effect,** per cycle, and **only where the run claims paper fidelity.**
+       The net of the cycle's same-prefix deltas must clear ``STEPS_EFFECT_EPS``
+       times the cycle's largest starting residual. Two things make this the
+       right shape rather than a per-fire floor:
+
+       - The per-fire deltas are *same-prefix* comparisons and are the only ones
+         that are comparable: ``residual_before`` rises across a cycle as the
+         prefix acquires quantization damage (measured 0.259 -> 1.515 on the unit
+         fixture), so comparing residual *levels* across fires measures
+         accumulated damage, not this stage's effect.
+       - A run that is not claiming fidelity runs deliberately short budgets
+         (the driver's non-faithful stage_pre is ``epochs=0``, one step of the
+         paper's 256). Those records are honest and are not findings; the effect
+         floor is a fidelity requirement, and on a non-faithful run asserting it
+         would red-light correct behavior.
+
+       This is a **no-op detector, not a counterfactual**: it cannot see a
+       tuning that helps one fire exactly as much as it hurts another. It answers
+       "did this stage do anything measurable anywhere in its cycle".
     """
     try:
         report = load_report(payload_text)
@@ -124,6 +137,8 @@ def stage_evidence_findings(payload_text: str) -> list[str]:
         return [f"the report carries no stage list: {stages!r}"]
 
     problems: list[str] = []
+    faithful = report.get("paper_faithful") is True
+    cycles: dict[tuple[str, Any], list[tuple[float, float]]] = {}
 
     def _check(kind: str, label: Any, rec: Any) -> None:
         if not isinstance(rec, dict):
@@ -136,13 +151,9 @@ def stage_evidence_findings(payload_text: str) -> list[str]:
                 "the stage cannot show its own work"
             )
             return
-        before, after = rec["residual_before"], rec["residual_after"]
-        if after > before * (1.0 - STEPS_EFFECT_EPS):
-            problems.append(
-                f"{kind} record {label!r} moved its objective {before!r} -> "
-                f"{after!r}, short of the shared STEPS_EFFECT_EPS "
-                f"{STEPS_EFFECT_EPS!r}: an inert stage"
-            )
+        cycles.setdefault((kind, label), []).append(
+            (float(rec["residual_before"]), float(rec["residual_after"]))
+        )
 
     for entry in stages:
         if isinstance(entry, dict):
@@ -158,14 +169,28 @@ def stage_evidence_findings(payload_text: str) -> list[str]:
             if not isinstance(per, dict) or not per:
                 problems.append("ste stage carries no per_linear rows to audit")
                 continue
-            for name, rec in per.items():
-                _check("ste", name, rec)
+            # Grouped per BLOCK, not per linear: the cycle's joint effect is
+            # what the floor is about, and one linear's row is a fraction of it.
+            for rec in per.values():
+                _check("ste", info.get("label") or "block", rec)
         elif event == "tune_fp":
             if info.get("skipped"):
-                # A recorded skip is not an executed stage: the per-target
-                # cycle legitimately has no pass on a block with one linear.
+                # A recorded skip is not an executed stage: the per-target cycle
+                # legitimately has no pass on a block with one linear.
                 continue
             _check("tune_fp", info.get("label") or "tune_fp", info)
+
+    if faithful:
+        for (kind, label), rows in cycles.items():
+            net = sum(b - a for b, a in rows)
+            bar = STEPS_EFFECT_EPS * max(b for b, _ in rows)
+            if net < bar:
+                problems.append(
+                    f"{kind} cycle {label!r} netted {net!r} over {len(rows)} fire(s) "
+                    f"against a STEPS_EFFECT_EPS bar of {bar!r} on a faithful run: "
+                    "the stage shows no measurable effect (no-op detector, not a "
+                    "counterfactual)"
+                )
     return problems
 
 
