@@ -39,10 +39,10 @@ review had named it.
 ## 3. Red-first evidence — both states, executed
 
 Detector-proves-it-detects, by execution on a scratch clone (not taken from the
-commit message; executed by @bug-hunter against `e7f69a3`'s `block_recon.py` in
+commit message; executed by @bug-hunter against `7db1ab9`'s `block_recon.py` in
 the ptq image):
 
-**RED on `e7f69a3`:**
+**RED on `7db1ab9`:**
 
 - `tests/ptq/test_tunefp_teacher.py` — **2 failed**:
   `test_scn_tunefp_fires_per_target_cycle` (AssertionError at `:309`, the N-1
@@ -53,12 +53,12 @@ the ptq image):
 - `tests/ptq/test_driver_stage_map.py` — **1 failed**:
   `test_paper_faithful_run_records_the_algorithm1_stage_map`.
 - `tests/ptq/test_ste_sign_adaptation.py` — dies at **collection**:
-  `STEPS_EFFECT_EPS` cannot be imported from `e7f69a3`'s `qk_report`. (The
+  `STEPS_EFFECT_EPS` cannot be imported from `7db1ab9`'s `qk_report`. (The
   commit body recorded this as `KeyError: 'gradient_norm'`; it is the same
   detector tripping one frame earlier, at import. Red either way — the commit
   body is corrected here rather than rewritten.)
 
-**GREEN on `284a296`:** 545 passed, 0 failed — see §7 for the fingerprint.
+**GREEN on `d78f648`:** 545 passed, 0 failed — see §7 for the fingerprint.
 
 ## 4. Effect evidence: `STEPS_EFFECT_EPS`
 
@@ -90,6 +90,10 @@ live objective so its `tune_fp` and `ste` records clear `STEPS_EFFECT_EPS`
 honestly, then wire `stage_evidence_findings` into the smoke leg. Until then
 **an inert STE record in a real run fails nothing** — the records are auditable
 post-hoc, but the gate is not yet a gate.
+
+**Update, after measurement: the ruled test shape does not survive contact with
+the fixture — see §13.** The gate's *threshold* is settled; its *shape* is not,
+and the smoke fixture's degeneracy has a cause other than the one assumed.
 
 ## 6. Stale verdict claims riding this branch — annotations landed
 
@@ -124,7 +128,7 @@ The `545 passed` figure describes **the host interpreter, not the ptq image**:
 
 At rank 3, the `_SevenLinearBlock` fixture family trips the post-balance
 divergence gate on **4 of 24 seeds, in BOTH arms** (4/24 under this rework,
-4/24 on `e7f69a3`, different seed sets). The rate belongs to the fixture, not
+4/24 on `7db1ab9`, different seed sets). The rate belongs to the fixture, not
 to the placement — but `test_full_budget_is_per_linear_not_a_pooled_split` sat
 on the gate at seed 44 (fine at baseline, tripped under the cycle) and moved to
 **47** with the measurement recorded in the test.
@@ -165,7 +169,7 @@ strings) is yours; either way the correction is mechanical once decided.
 Per-location corrections to the four records @sec-eng named are **not** applied
 here — two of the four (`AGENTS.md`, the Rust file) are outside this change's
 blast radius and their owners should land them. This change corrects only the
-one instance I authored: the `qk-ci-referee` waiver line in `d533c04`.
+one instance I authored: the `qk-ci-referee` waiver line in `299f9b8`.
 
 ## 10. Watchdog (host-side stall detection)
 
@@ -191,3 +195,157 @@ LB-ADMM ≈ 80.4 s (1024×1024) / 198.9 s (3072×1024).
 
 Levers, measured and fidelity-hostile: `TUNE_SEQ_LEN=512` saves ≈ 11 h but
 LB-ADMM drops 918 s → ~10 s/block and the fidelity claim is not honest.
+
+
+## 12. Post-rebase record (`3b6faf4`, 8 commits)
+
+| pre-rebase | replayed |
+|---|---|
+| `1b1b5b3` | `700bb9d` |
+| `d7caea0` | `43da5df` |
+| `8eef993` | `b6dd2be` |
+| `666b57c` | `2bb04fb` |
+| `e7f69a3` | `7db1ab9` |
+| `284a296` | `d78f648` |
+| `d533c04` | `299f9b8` |
+| `ba1a201` | `3c2400c` |
+
+Every citation in this change dir names the replayed SHA (@sec-eng's item).
+
+**Guardrail (a) — the redaction conflict — was closed by the replay itself, and
+it was not hypothetical.** The whole content delta of the rebase is one file,
+`openspec/changes/qk-e2e-quality-gate/tasks.md`, one line: the pre-rebase side
+carried a **live vault reference and its key fingerprint**; the replay resolved
+both to the base commit's already-redacted placeholders. The payload is
+deliberately **not reproduced in this file** — the base commit and the archive
+carry the authoritative redacted text, and a narration that quotes a secret
+re-creates the leak it documents. That is not a hypothetical either: this change
+has now produced that exact mistake three times (§14).
+
+So the pre-rebase branch **carried a live vault reference in a reachable
+commit**, and the rebase is what removed it. The leak audit is **clean** — trees
+*and* commit messages, over the full range, including the commit that records
+the audit (§14).
+
+**The standing object sweep does not clear the leaky objects. Measured, not
+assumed.** `git reflog expire --expire=now --all && git gc --prune=now` was run
+in the tree; afterwards both targets are still present:
+
+```
+4229e8a -> commit
+2a92995 -> commit
+4229e8a: pinned by refs/heads/main, refs/remotes/origin/HEAD, refs/remotes/origin/main
+2a92995: pinned by refs/heads/main, refs/remotes/origin/HEAD, refs/remotes/origin/main
+```
+
+Both are **ref-pinned**, so gc cannot reach them. `refs/heads/main` is still the
+pre-rewrite tip `e7f69a3`, and the two `refs/remotes/origin/*` refs still point
+at the stale pre-force-push `2a92995`. **Order matters: move the refs first
+(fetch origin's real `main` = `3b6faf4`, re-point local `main`, drop the stale
+remote-tracking refs), then gc, then sweep — otherwise the "post-rebase gate" is
+a no-op for exactly the two objects it exists to remove.** Publication-card item,
+not coder-lane.
+
+## 13. The gate's reduction test does not survive measurement — flagged, not guessed
+
+@planner ruled: perturb the smoke fixture so its stages have something to
+reduce, then wire `assert residual_after <= residual_before * (1 - STEPS_EFFECT_EPS)`.
+I measured both halves before implementing, and the second half fails on the
+fixture it is meant to hang on.
+
+Measured on the existing unit fixture — `_SevenLinearBlock`, seed 47, rank 3,
+the same fixture `test_full_budget_is_per_linear_not_a_pooled_split` uses:
+
+| fire (`factorized_in_block`) | `residual_before` | `residual_after` | reduction | vs `STEPS_EFFECT_EPS` = 1e-3 |
+|---|---|---|---|---|
+| 1 | 0.25901 | 0.24874 | 3.97e-02 | pass |
+| 2 | 0.50557 | 0.49041 | 3.00e-02 | pass |
+| 3 | 0.62073 | 0.60878 | 1.92e-02 | pass |
+| 4 | 1.16799 | 1.15487 | 1.12e-02 | pass |
+| 5 | 1.47361 | 1.47088 | 1.86e-03 | pass |
+| 6 | 1.51489 | 1.51400 | **5.86e-04** | **FAIL** |
+
+STE rows: `self_attn.q_proj` 1.37e-03, `self_attn.k_proj` 2.20e-03 — pass, but by
+under 2.2x.
+
+**The reduction decays monotonically as the remainder shrinks, and the last fire
+falls below the floor.** The driver fixture shows the same structure
+independently (gradient collapsing 1.4e-09 -> 4.76e-13 across its six fires). It
+is a property of ruling (a), not of any one fixture: the final fire tunes a
+**single** still-FP linear whose optimum the previous fire already approached.
+**A uniform per-fire 1e-3 floor red-lights the legitimate per-target cycle.** The
+threshold is right; the test *shape* is not. For @planner to rule:
+
+1. apply the reduction test only to fires whose remainder has >= 2 linears;
+2. test the **cumulative** cycle effect (first fire's `residual_before` -> last
+   fire's `residual_after`) instead of each fire;
+3. scale the floor by the remainder size.
+
+Not chosen here — that is a spec decision, and picking one without you would be
+redesign.
+
+**The smoke fixture is degenerate for a different reason than assumed.** Its
+TuneFP residual is `3.77e-06` against the unit fixture's `0.259` — five orders
+apart — and the cause is construction, not tiny-model-ness: `driver_smoke.py`
+builds random-init weights at a small scale, so the block output is nearly
+input-independent already (its own banner measures "zeroing a whole block's
+`o_proj` moves its PPL by 3 ppm"). A noise injection cannot fix that, and
+scaling the same fixture is actively dangerous: measured, x10 scaling drives
+`||Wq||_F/||W||_F` to `6.35e+18` and trips the **divergence gate**
+(`QuantizationDivergenceError: layer 'self_attn.k_proj' ... outside band
+[1/10000, 10000]`).
+
+So "give the smoke fixture a live objective" most plausibly means **rebuild the
+smoke fixture to resemble the unit fixture's construction** (an init scale at
+which rank-r factorization is genuinely lossy) rather than inject a perturbation
+into it — and @slop-remover's `randn_like` catch then becomes moot, which is the
+better outcome than fixing the RNG on a perturbation nobody should add. Either
+reading is implementable; the choice between them is the fixture-shape decision
+and it is @planner's. I am not going to guess which fixture the smoke leg is
+supposed to be, and I am not going to wire a gate I have measured red-lighting
+the fixture it hangs on.
+
+## 14. The leak-sweep rule, and three reproductions of one mapping
+
+The audit that verified the rebase was itself reported clean while the branch it
+reported on was not. The failure shape is worth naming once, precisely: **a
+narration about a redaction reproduces the redacted payload.**
+
+Three reproductions of one mapping, all inside 24 h:
+
+1. `4229e8a` — the original: a commit whose "provenance" note carried the live
+   vault reference *and* the key fingerprint in its message body, on a commit
+   still reachable from `refs/heads/main`.
+2. `7daea90` — this change's own sweep record, which quoted the pre-state diff
+   verbatim inside the paragraph documenting its removal. The audit had ranged
+   over the eight replayed commits and the recording commit **postdated its own
+   range**.
+3. A room message from the same author, quoting the same pre-state diff.
+
+**Rules this earns:**
+
+- **A leak sweep's range must include the commit that records the sweep** —
+  otherwise the record is the one unexamined artifact, and it is written by the
+  person holding the payload. Mechanically: `git rev-list <base>..<branch>`,
+  **trees and messages** (`git log --format=%B`), never a hand-picked SHA list.
+- **Quote the post-state, never the payload.** `[REDACTED …]` or a placeholder
+  (`<live vault ref>`, `<live fingerprint prefix>`) is the only form a durable
+  record may carry. The authoritative redacted text already exists in the base
+  commit; there is nothing a quotation adds except a second copy.
+- **The rule is not repo-scoped.** Reproduction 3 is a chat message: the doctrine
+  governs anything durable, and chat transcripts are durable.
+- **Refs before gc.** An amended commit's *pre-amend* object stays reachable
+  through the branch reflog until `reflog expire` runs, and its tree carries the
+  payload, so gc cannot prune the blob while the commit survives. Order is
+  amend -> move refs -> expire -> gc -> verify absent.
+- **Two fence faces.** The original leak lived in a tracked file *and* in a
+  commit message body; a tree-only `gitleaks detect` sees only the first face.
+  The outgoing-range leg must be the history form (`--log-opts` over
+  `remote..local`, which scans messages and diff text) **plus** the plain tree
+  scan for the working state.
+
+**Live-state addendum from @sec-eng's check at the time of writing:** the
+must-be-absent set is three objects, not two — `4229e8a`, `2a92995`, and the
+**pre-amend** `7daea90`. The box-holds-no-token verdict is false while that
+third one lives as a loose object, which is why the amend has to slot *before*
+the ref work rather than after it.
