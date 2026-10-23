@@ -65,6 +65,29 @@ def test_probe_records_both_cosines_and_the_arm(tmp_path, monkeypatch):
     assert rows[-1]["rho_end"] == 1e2 and rows[-1]["rho_end_source"] == "env"
 
 
+def test_probe_row_carries_the_compute_dtype(tmp_path, monkeypatch):
+    """Two arms differing only in precision must not be indistinguishable.
+
+    Same provenance-gap class as an unlabelled rho_end, and sharper here: an
+    fp32 row's cos is not comparable to an fp64 row's, so a row that omits the
+    dtype actively invites exactly that comparison. Stated rather than implied
+    -- the fp64 default rides along so a reader never has to infer it.
+    """
+    w, bal, res = _planted()
+    path = tmp_path / "probe.jsonl"
+    monkeypatch.setenv("QK_SOLVER_PROBE", "1")
+    monkeypatch.setenv("QK_SOLVER_PROBE_PATH", str(path))
+    monkeypatch.delenv("QK_RHO_END", raising=False)
+    monkeypatch.delenv("_fp_w", raising=False)
+
+    block_recon._record_solver_probe("planted", w, bal, res, PTQConfig(rank=4))
+    block_recon._record_solver_probe(
+        "planted", w, bal, res, PTQConfig(rank=4, compute_dtype="float32")
+    )
+    rows = [json.loads(x) for x in path.read_text().strip().splitlines()]
+    assert [r["compute_dtype"] for r in rows] == ["float64", "float32"]
+
+
 def test_probe_raises_rather_than_measuring_nothing(tmp_path, monkeypatch):
     w, bal, res = _planted()
     monkeypatch.setenv("QK_SOLVER_PROBE", "1")

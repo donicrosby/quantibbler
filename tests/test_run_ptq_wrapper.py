@@ -30,6 +30,7 @@ _KNOBS = (
     "LAYER_SCOPE",
     "PAPER_FAITHFUL",
     "STE_FLIP_PASS_BUDGET",
+    "COMPUTE_DTYPE",
     "DRY_RUN",
 )
 
@@ -104,6 +105,27 @@ def test_tune_knob_is_passthrough_and_never_wrapper_chosen():
     assert "'--tune-seq-len' '512'" in split.stdout
     assert "'--seq-len' '2048'" in split.stdout  # eval geometry untouched
     assert "tune_seq_len=512" in split.stderr
+
+
+def test_compute_dtype_knob_is_passthrough_and_recorded():
+    """Precision is run identity, not a wrapper default.
+
+    Unset must mean UNSET on the command line -- the driver's own float64
+    default is the reference path -- while the announce, the launch.env and the
+    breadcrumb trail all state the effective value, because two arms whose
+    records differ only in precision cannot be told apart afterwards.
+    """
+    unset = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048", OUT="/tmp/nq-dtype")
+    assert unset.returncode == 0, unset.stderr
+    assert "'--compute-dtype'" not in unset.stdout
+    assert "compute_dtype=float64" in unset.stderr
+
+    fp32 = _launch(
+        RANK="512", SOLVER="svd", SEQ_LEN="2048", OUT="/tmp/nq-dtype", COMPUTE_DTYPE="float32"
+    )
+    assert fp32.returncode == 0, fp32.stderr
+    assert "'--compute-dtype' 'float32'" in fp32.stdout
+    assert "compute_dtype=float32" in fp32.stderr
 
 
 def test_dry_run_announces_nothing_it_need_not_and_the_advisories_it_must():

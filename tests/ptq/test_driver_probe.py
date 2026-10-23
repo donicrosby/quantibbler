@@ -164,6 +164,38 @@ def _run_driver(
     )
 
 
+def test_compute_dtype_flag_is_live_and_reaches_the_solve(
+    offline_corpus, tiny_model, tmp_path, monkeypatch
+):  # noqa: ANN001
+    """fp32 must be launchable, not merely plumbed.
+
+    A knob is worthless if the flag is accepted and then ignored -- which is
+    precisely what a hardcoded ``compute_dtype="float64"`` in the config builder
+    looks like from the outside, and why the driver flag alone proves nothing.
+    So this fires the real driver on the tiny model at float32 with the solver
+    probe on, and reads the dtype back off a per-linear row: flag -> config ->
+    solve -> artifact. The probe row is the only place the solve's own dtype is
+    observable, which is the reason that field exists.
+    """
+    out_dir = tmp_path / "out-fp32"
+    monkeypatch.setenv("QK_SOLVER_PROBE", "1")
+    # The probe's default path is the CONTAINER path (/out/solver_probe.jsonl) and
+    # it raises rather than silently measuring nothing when that is unwritable --
+    # correct fail-closed behaviour, and why a local driver invocation must
+    # redirect it.
+    monkeypatch.setenv("QK_SOLVER_PROBE_PATH", str(out_dir / "solver_probe.jsonl"))
+    proc = _run_driver(offline_corpus, tiny_model, out_dir, extra=["--compute-dtype", "float32"])
+    assert proc.returncode == 0, (proc.returncode, proc.stdout[-3000:], proc.stderr[-3000:])
+
+    probe = out_dir / "solver_probe.jsonl"
+    assert probe.exists(), "the probe was enabled but no row was written"
+    rows = [json.loads(x) for x in probe.read_text().strip().splitlines()]
+    assert rows, "a run that solved nothing cannot evidence the knob"
+    assert {r["compute_dtype"] for r in rows} == {"float32"}, sorted(
+        {r["compute_dtype"] for r in rows}
+    )
+
+
 @pytest.mark.parametrize(
     ("flag", "value"),
     [

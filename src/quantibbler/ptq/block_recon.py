@@ -185,6 +185,11 @@ def _record_solver_probe(name, w, bal, res, cfg) -> None:
     row = {
         "name": name,
         "solver": cfg.solver,
+        # The dtype the solve actually ran in. Two arms whose rows differ only
+        # in precision are otherwise indistinguishable -- the same provenance
+        # gap as an unlabelled rho_end, and worse here, because an fp32 row's
+        # cos is not comparable to an fp64 row's.
+        "compute_dtype": cfg.compute_dtype,
         "rho_end": value,
         "rho_end_source": source,
         "n_iter": getattr(res, "n_iter", None),

@@ -361,7 +361,7 @@ def quantized_config(
     return PTQConfig(
         seed=args.seed,
         rank=args.rank,
-        compute_dtype="float64",
+        compute_dtype=args.compute_dtype,
         scale_dtype=args.scale_dtype,
         admm_max_iter=args.max_admm_iter,
         solver=args.solver,
@@ -798,6 +798,20 @@ def main() -> int:
         "the paper's path is sign+pack on whatever signs STE produced "
         "(Algorithm 1 lines 20-23), so the pass never fires and the record "
         "carries `declared: paper_ste` with the measured crossings",
+    )
+    parser.add_argument(
+        "--compute-dtype",
+        default="float64",
+        choices=("float64", "float32"),
+        help="solver compute dtype for the per-layer factorization (consumed by "
+        "lb_admm and block_recon). float64 is the default and the only value a "
+        "faithful run gets for free; float32 is an opt-in accelerator -- ~2x on "
+        "the BLAS-bound ADMM solve -- whose Cholesky stability on real weights is "
+        "characterized by the layers.0 A/B, not assumed. It is recorded in "
+        "launch.env and in every solver-probe row, so an fp32 artifact is "
+        "identifiable from its own directory rather than from someone's "
+        "scrollback: two arms whose rows are indistinguishable are the same "
+        "provenance gap as an unlabelled rho_end.",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path, default=Path("artifacts") / "model-qpk1")

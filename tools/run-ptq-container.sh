@@ -122,6 +122,7 @@ echo "run-ptq-container: model=$MODEL rank=$RANK solver=$SOLVER seq_len=$SEQ_LEN
   "tune_seq_len=${TUNE_SEQ_LEN:-unset} calibration_seqs=$CALIBRATION_SEQS" \
   "factor_mode=${FACTOR_MODE:-binary} ablation=${ABLATION:-none} layer_scope=${LAYER_SCOPE:-all}" \
   "paper_faithful=${PAPER_FAITHFUL:-0} ste_flip_pass_budget=${STE_FLIP_PASS_BUDGET:-0}" \
+  "compute_dtype=${COMPUTE_DTYPE:-float64}" \
   "eval_seqs=$EVAL_SEQS out=$OUT" >&2
 
 mkdir -p "$OUT" 2>/dev/null || true
@@ -136,8 +137,8 @@ mkdir -p "$OUT" 2>/dev/null || true
     "$MODEL" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-}"
   printf 'calibration_seqs=%s\neval_seqs=%s\nfactor_mode=%s\nablation=%s\n' \
     "$CALIBRATION_SEQS" "$EVAL_SEQS" "${FACTOR_MODE:-}" "${ABLATION:-}"
-  printf 'layer_scope=%s\npaper_faithful=%s\nste_flip_pass_budget=%s\n' \
-    "${LAYER_SCOPE:-}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}"
+  printf 'layer_scope=%s\npaper_faithful=%s\nste_flip_pass_budget=%s\ncompute_dtype=%s\n' \
+    "${LAYER_SCOPE:-}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "${COMPUTE_DTYPE:-float64}"
   printf 'rho_end_override=%s\nsolver_probe=%s\nopenblas_num_threads=%s\nlaunched_at=%s\n' \
     "${QK_RHO_END:-unset}" "${QK_SOLVER_PROBE:-unset}" "${OPENBLAS_NUM_THREADS:-16}" "$(date -u +%FT%TZ)"
   # The commit and the tree state are part of the run's identity: a run
@@ -196,6 +197,13 @@ set -- "$@" \
 # The split knob is appended only when it was set. Passing it unconditionally
 # would make the wrapper the author of the tuning geometry - and an empty
 # `--tune-seq-len` is not a value the driver accepts.
+# Same rule as TUNE_SEQ_LEN: the wrapper passes the precision only when it was
+# asked for, so the wrapper is never the author of the run's numerics. The
+# driver default (float64) is what launch.env records when it is unset.
+if [ -n "${COMPUTE_DTYPE:-}" ]; then
+  set -- "$@" --compute-dtype "$COMPUTE_DTYPE"
+fi
+
 if [ -n "$TUNE_SEQ_LEN" ]; then
   set -- "$@" --tune-seq-len "$TUNE_SEQ_LEN"
 fi
@@ -252,8 +260,8 @@ mkdir -p /opt/data/tmp "$(dirname "$OUT")"
 # killed run leaves behind: `: >` destroyed it on every launch, including the
 # one that died (`tail` from the *failed* run is the useful line, not the new
 # run's first sample).
-printf '=== run %s rank=%s solver=%s seq_len=%s tune_seq_len=%s paper_faithful=%s ste_flip_pass_budget=%s out=%s ===\n' \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-unset}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "$OUT" \
+printf '=== run %s rank=%s solver=%s seq_len=%s tune_seq_len=%s paper_faithful=%s ste_flip_pass_budget=%s compute_dtype=%s out=%s ===\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-unset}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "${COMPUTE_DTYPE:-float64}" "$OUT" \
   >> /opt/data/tmp/quantibbler-breadcrumbs.log
 
 
