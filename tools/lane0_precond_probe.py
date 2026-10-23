@@ -888,6 +888,12 @@ class MemTelemetry:
         self.device = device
         self.interval = interval
         self.phase = "startup"
+        # The host-visible peak. torch's caching-allocator counters read zero
+        # once PYTORCH_NO_CUDA_MEMORY_CACHING is on -- so the allocator's
+        # max_memory_reserved is NOT the acceptance number for this lane, and
+        # reading it as one would clear a run that peaked at 50GB.
+        self.peak_used = 0
+        self.peak_phase = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -911,10 +917,14 @@ class MemTelemetry:
         if not torch.cuda.is_available():
             return
         free_b, total_b = torch.cuda.mem_get_info()
+        used = int(total_b - free_b)
+        if used > self.peak_used:
+            self.peak_used = used
+            self.peak_phase = self.phase
         self.write_sample(
             int(torch.cuda.memory_reserved()),
             int(torch.cuda.memory_allocated()),
-            int(total_b - free_b),
+            used,
             int(free_b),
         )
 
@@ -1042,37 +1052,79 @@ def build_real_arms(
             raise RuntimeError(f"device={device!r} requested but no accelerator is available")
         model = model.to(device)
     wanted = tuple((block, name) for _, block, name in probe_set)
+    trunk = model.get_decoder() if hasattr(model, "get_decoder") else model.model
 
-    # Arm A: the shipped construction, in the configuration the pipeline runs it.
+    # Arm A: the shipped construction, in the shape production runs it.
     #
-    # This was calling collect_stats(model, batches) with chunk_rows unset, and
-    # the comment claimed "verbatim -- same call the pipeline makes". That was
-    # false in the one way that mattered: block_recon.py:1268-1269 gives the
-    # real-model (bf16) path chunk_rows=4, and documents chunk_rows=None as the
-    # fp64 reference path that "retains attention graphs for every row at once
-    # (~15GB on a 28-layer bf16 trunk) and OOMs under container caps" -- plus,
-    # on the list/concatenate branch, every linear's full float64 activation for
-    # the whole batch. At (8, 2048) over 28 layers that is tens of GB, and it
-    # runs BEFORE the intended arm. The shipped arm is what drained the host.
-    #
-    # chunk_rows=4 is not a new number: it is the value production uses, and
-    # tests/ptq/test_capture_chunking.py already pins that it preserves the
-    # statistic (the docstring's "raw f64 grads accumulated across chunks,
-    # squared once per batch").
+    # Production feeds collect_stats the CAPTURED BLOCK INPUTS and runs it on one
+    # block (block_recon.py:1261/1269), so the 151936-way head is never in that
+    # graph. This used to call collect_stats(model, batches) -- the whole model,
+    # head included -- under a comment claiming it was "verbatim -- same call the
+    # pipeline makes". Measured on the instrumented rehearsal: 50.1 GB peak, in
+    # Arm A, of which ~10 GB was fp32 logits at (8, 2048, 151936) and ~20 GB a
+    # fp64 cast of the same, per batch. That head is not in production's path at
+    # all. The statistic is unchanged; what changed is that we no longer pay for
+    # a shape the pipeline never runs.
+    block_indices = sorted({block for block, _ in wanted})
+
+    # The capture runs the MODEL's own forward, in row chunks, and only reads the
+    # block inputs off a hook. Calling the decoder directly would mean
+    # reproducing position_embeddings and cache_position by hand -- the trap the
+    # checkpoint wrapper already documents -- and running the model unchunked
+    # would put (8, 2048, 151936) of logits in memory to capture activations that
+    # never needed them. Row-chunking is exact: attention is causal and per
+    # sequence, so splitting rows cannot change a block's inputs.
+    from quantibbler.ptq.block_recon import CAPTURE_CHUNK_ROWS  # noqa: PLC0415
+
+    collected: dict[int, list[Any]] = {idx: [] for idx in block_indices}
+
+    def _collect(mod, inp, idx: int = 0) -> None:  # noqa: ANN001
+        collected[idx].append(inp[0].detach())
+
+    handles = [trunk.layers[idx].register_forward_pre_hook(_collect) for idx in block_indices]
+    try:
+        if telemetry is not None:
+            telemetry.phase = "capture"
+        with torch.no_grad():
+            for batch in batches:
+                moved = batch.to(device) if device is not None else batch
+                for lo in range(0, moved.shape[0], CAPTURE_CHUNK_ROWS):
+                    model(moved[lo : lo + CAPTURE_CHUNK_ROWS])
+                    release_device_memory(device)
+    finally:
+        for handle in handles:
+            handle.remove()
+    captured = {
+        idx: (torch.cat(chunks, dim=0) if chunks else None) for idx, chunks in collected.items()
+    }
+    release_device_memory(device)
+
     if telemetry is not None:
         telemetry.phase = "stats_shipped"
-    book = collect_stats(model, batches, chunk_rows=SHIPPED_CHUNK_ROWS)
     shipped: dict[tuple[int, str], dict[str, Any]] = {}
-    for entry in book:  # LayerStatsBook is iterable; _entries is private
-        for block, name in wanted:
-            if entry.name.endswith(f"layers.{block}.{name}"):
-                shipped[(block, name)] = {
-                    "d_in_raw": np.asarray(entry.d_in_raw, dtype=np.float64),
-                    "d_out_raw": np.asarray(entry.d_out_raw, dtype=np.float64),
-                    "percentile": None,
-                    "grad_fallback": None,
-                }
-    release_device_memory(device)
+    # LayerBlock is production's own block adapter (quantize_hf_model.py:141):
+    # modern decoder layers do not compute rotary themselves, so a bare layer
+    # cannot be called on activations at all. Imported, not rebuilt -- a hand-rolled
+    # adapter here would be the sixth instance of this same defect.
+    from quantize_hf_model import LayerBlock  # noqa: PLC0415
+
+    for idx in block_indices:
+        block = LayerBlock(trunk.layers[idx], trunk.rotary_emb)
+        book = collect_stats(block, [captured[idx]], chunk_rows=SHIPPED_CHUNK_ROWS)
+        for entry in book:  # LayerStatsBook is iterable; _entries is private
+            for block, name in wanted:
+                if block != idx:
+                    continue
+                # Names come back relative to the block that was passed in.
+                if entry.name == name or entry.name.endswith(f".{name}"):
+                    shipped[(block, name)] = {
+                        "d_in_raw": np.asarray(entry.d_in_raw, dtype=np.float64),
+                        "d_out_raw": np.asarray(entry.d_out_raw, dtype=np.float64),
+                        "percentile": None,
+                        "grad_fallback": None,
+                    }
+        release_device_memory(device)
+    del captured
 
     # Arm B: the intended construction -- real CE backward, p99.9 clip first.
     # chunk_tokens selects the memory-bounded head-chunked path (see
@@ -1208,6 +1260,8 @@ def main() -> int:
                 "cuda_available": bool(torch.cuda.is_available()),
                 "attn_implementation": diag.get("attn_implementation"),
                 "mem_csv": "rehearsal-mem.csv" if args.out is not None else None,
+                "host_peak_gb": round(telemetry.peak_used / 1e9, 3) if telemetry else None,
+                "host_peak_phase": telemetry.peak_phase if telemetry else None,
                 "no_cuda_memory_caching": os.environ.get("PYTORCH_NO_CUDA_MEMORY_CACHING"),
             }
             print(f"[lane0] REHEARSAL {json.dumps(record, sort_keys=True)}")
@@ -1225,6 +1279,8 @@ def main() -> int:
                         f"rehearsal={record['rehearsal']}\n"
                         f"rehearsal_sequences={record['sequences']}\n"
                         f"protocol_sequences={record['protocol_sequences']}\n"
+                        f"host_peak_gb={record['host_peak_gb']}\n"
+                        f"host_peak_phase={record['host_peak_phase']}\n"
                     )
             return 0
         stats = build_real_arms(probe_set, device=device, chunk_tokens=chunk_tokens)
