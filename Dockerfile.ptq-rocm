@@ -1,0 +1,86 @@
+# syntax=docker/dockerfile:1
+# quantibbler PTQ runner -- ROCm/gfx1151 (Strix Halo) variant.
+#
+# Same staged build as Dockerfile.ptq, with the two differences that are the
+# whole point of the tag:
+#
+#   1. torch comes from AMD's whl-next index instead of the locked PyPI wheel.
+#      The locked wheel is 2.14.1+cu130, a CUDA build: it structurally cannot
+#      enumerate ROCm devices, so `torch.cuda.is_available()` is False on this
+#      box because of the WHEEL, not the hardware. Reading that as "no GPU
+#      exists" is what sent the plan to RunPod and had to be retracted -- the
+#      hardware was there the whole time (/dev/kfd 510:0, /dev/dri/renderD128).
+#   2. libatomic1 + libquadmath0 are installed (ROCm tools need them, the slim
+#      base lacks them) and rocm[device-gfx1151] supplies the prebuilt kernels.
+#
+# Devices are deliberately NOT passed here -- that is the wrapper's job, and an
+# opt-in one (GPU=1). On this host there is no `render` group: kfd and
+# renderD128 are GID 993, card1 is video (44).
+#
+#   docker build -f Dockerfile.ptq-rocm -t quantibbler-ptq:rocm .
+#   docker build -f Dockerfile.ptq-rocm --build-arg DEV=1 -t quantibbler-ptq:rocm-dev .
+#
+# DEV=1 adds pytest for the fidelity gate: the runtime image has no pytest, so a
+# test gate run against it fails for the wrong reason.
+ARG ROCM_INDEX=https://stable.repo.amd.com/rocm/whl-next/
+
+FROM ghcr.io/pyo3/maturin:latest AS maturin
+
+WORKDIR /build
+COPY pyproject.toml README.md uv.lock ./
+COPY crates ./crates
+RUN maturin build --release --out /wheels -m crates/quantibbler-kernels/Cargo.toml \
+    && rm -rf /build/target
+
+FROM python:3.12-slim AS runner
+
+ARG ROCM_INDEX
+ARG DEV=0
+
+COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /uvx /bin/
+
+ENV UV_PYTHON_PREFERENCE=only-system \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    PATH=/opt/venv/bin:$PATH \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    MALLOC_ARENA_MAX=2 \
+    OMP_NUM_THREADS=4 \
+    MKL_NUM_THREADS=4 \
+    QUANTIBBLER_KD_TMPDIR=/tmp/ptq
+
+RUN apt-get update && apt-get install -y --no-install-recommends libatomic1 libquadmath0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+
+COPY pyproject.toml README.md uv.lock ./
+COPY crates ./crates
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-editable --all-extras --no-install-project --no-install-package quantibbler-kernels
+
+COPY src ./src
+COPY tools ./tools
+COPY --from=maturin /wheels /wheels
+
+# The final sync runs FIRST, then every non-locked install goes after it: sync
+# enforces an exact environment and removes anything pip put there earlier. That
+# ordering is the reason the ROCm torch cannot sit above this line -- it would be
+# silently reverted to the CUDA wheel and the image would look fine.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-editable --all-extras --no-install-package quantibbler-kernels \
+    && uv pip install --python /opt/venv/bin/python /wheels/quantibbler_kernels-*.whl \
+    && rm -rf /wheels
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --python /opt/venv/bin/python --index-url "$ROCM_INDEX" \
+      torch "rocm[libraries,device-gfx1151]" \
+    && /opt/venv/bin/python -c "import torch; print('rocm torch:', torch.__version__, '| cuda build:', torch.version.cuda)"
+
+RUN if [ "$DEV" = "1" ]; then uv pip install --python /opt/venv/bin/python pytest; fi
+
+RUN /opt/venv/bin/python -c "import torch, transformers; from quantibbler import kernels; print('final:', torch.__version__, '| kernels:', kernels.HAVE_KERNELS)"
+
+ENV PATH="/opt/venv/bin:$PATH"
+ENTRYPOINT []
+CMD ["python", "tools/quantize_hf_model.py", "--help"]

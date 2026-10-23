@@ -122,7 +122,7 @@ echo "run-ptq-container: model=$MODEL rank=$RANK solver=$SOLVER seq_len=$SEQ_LEN
   "tune_seq_len=${TUNE_SEQ_LEN:-unset} calibration_seqs=$CALIBRATION_SEQS" \
   "factor_mode=${FACTOR_MODE:-binary} ablation=${ABLATION:-none} layer_scope=${LAYER_SCOPE:-all}" \
   "paper_faithful=${PAPER_FAITHFUL:-0} ste_flip_pass_budget=${STE_FLIP_PASS_BUDGET:-0}" \
-  "compute_dtype=${COMPUTE_DTYPE:-float64}" \
+  "compute_dtype=${COMPUTE_DTYPE:-float64} gpu=${GPU:-0}" \
   "eval_seqs=$EVAL_SEQS out=$OUT" >&2
 
 mkdir -p "$OUT" 2>/dev/null || true
@@ -146,7 +146,8 @@ mkdir -p "$OUT" 2>/dev/null || true
   # whole reason commit-then-fire is a rule here. `grep -vc '^??'` counts
   # tracked modifications; untracked files (the owner-held wordlist) are
   # reported by their presence separately and are not dirt.
-  printf 'commit=%s\ntree_dirty_files=%s\n' \
+  printf 'gpu=%s\ncommit=%s\ntree_dirty_files=%s\n' \
+    "${GPU:-0}" \
     "$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
     "$(git -C "$REPO" status --porcelain 2>/dev/null | grep -vc '^??' || echo '?')"
 } > "$OUT/launch.env" 2>/dev/null || echo "warning: could not write $OUT/launch.env" >&2
@@ -173,6 +174,22 @@ set -- docker run --rm \
 # does. Only-when-set: an unset knob cannot author the claim.
 if [ -n "${QK_RHO_END:-}" ]; then
   set -- "$@" -e "QK_RHO_END=$QK_RHO_END"
+fi
+
+# GPU access is opt-in and explicit. These are host kernel devices, so passing
+# them into a container is a privilege decision -- never a silent default, and
+# never inferred from the image being a ROCm one. The GIDs are read off the
+# device nodes rather than named: this host has no `render` group (kfd and
+# renderD128 are GID 993, card1 is video 44), so matching GIDs is the portable
+# form and needs no host user change and no reboot.
+if [ "${GPU:-0}" = "1" ]; then
+  for node in /dev/kfd /dev/dri; do
+    if [ ! -e "$node" ]; then
+      echo "error: GPU=1 but $node is absent on this host" >&2
+      exit 2
+    fi
+  done
+  set -- "$@" --device /dev/kfd --device /dev/dri --group-add "$(stat -c %g /dev/kfd)"
 fi
 # QK_SOLVER_PROBE enables the read-only per-linear diagnostic
 # (block_recon._record_solver_probe) that writes the attribution numbers. These
