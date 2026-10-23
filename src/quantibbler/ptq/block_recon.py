@@ -1745,9 +1745,16 @@ def reconstruct_model(
     # full-width forward of a block and the one the dead run completed in bf16
     # before the MLP blew the cap, so its measured-to-fit evidence was
     # bf16-only -- and at fp32 its intermediates double like everything else.
-    x_running = _forward_chunked(
-        stem, torch.cat(batches, dim=0).to(next(stem.parameters()).device)
-    ).detach()
+    # `batches` come off the tokenizer on the CPU; `stem` may hold device-resident
+    # weights. Derive the device from the stem's own parameters, and fall back to
+    # leaving the batch alone when it has none -- a bare `next(...)` raises
+    # StopIteration on a parameterless stem, which is exactly what the block-loop
+    # fixtures are. No-op on CPU.
+    _batches = torch.cat(batches, dim=0)
+    _stem_param = next(iter(stem.parameters()), None)
+    if _stem_param is not None:
+        _batches = _batches.to(_stem_param.device)
+    x_running = _forward_chunked(stem, _batches).detach()
     _note_block_progress(0, None, x_running)
 
     # Snapshot the fp outputs of any fp stem layer that sits AFTER the last
