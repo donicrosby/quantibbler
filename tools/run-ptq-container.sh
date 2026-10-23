@@ -465,7 +465,11 @@ fi
 if [ "$MODE" != "ptq" ] && [ "${MEM_FLOOR_GB:-0}" -gt 0 ] 2>/dev/null; then
   nohup sh -c '
     floor=$1; name=$2; log=$3
-    while docker inspect -f "{{.State.Running}}" "$name" 2>/dev/null | grep -q true; do
+    while :; do
+      state=$(docker inspect -f "{{.State.Running}}" "$name" 2>/dev/null || echo missing)
+      # Exit only when the container is genuinely gone or already stopped.
+      # A transient daemon blip must NOT disarm the net (fail-closed).
+      case "$state" in missing|false) break ;; esac
       avail=$(free -g | awk "/^Mem:/{print \$NF}")
       if [ "${avail:-999}" -lt "$floor" ]; then
         echo "mem-floor: host available ${avail}G < floor ${floor}G; stopping $name" >> "$log"
