@@ -72,10 +72,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && uv pip install --python /opt/venv/bin/python /wheels/quantibbler_kernels-*.whl \
     && rm -rf /wheels
 
+# --reinstall is load-bearing, not tidiness. The sync above already installed a
+# torch satisfying the bare requirement, so a plain `uv pip install torch` from
+# the ROCm index reports "already satisfied" and changes NOTHING -- the first
+# build of this tag did exactly that and produced 2.14.1+cu130 with hip=None
+# while every layer reported success. The assertion below is the durable half:
+# a build that does not yield a ROCm torch FAILS here instead of shipping a
+# CUDA-wheel image that cannot see the device and looks fine.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python /opt/venv/bin/python --index-url "$ROCM_INDEX" \
+    uv pip install --python /opt/venv/bin/python --reinstall --index-url "$ROCM_INDEX" \
       torch "rocm[libraries,device-gfx1151]" \
-    && /opt/venv/bin/python -c "import torch; print('rocm torch:', torch.__version__, '| cuda build:', torch.version.cuda)"
+    && /opt/venv/bin/python -c "import torch; assert torch.version.hip, f'NOT a ROCm torch: {torch.__version__} (hip=None) - the index install was a no-op'; print('rocm torch:', torch.__version__, '| hip:', torch.version.hip)"
 
 RUN if [ "$DEV" = "1" ]; then uv pip install --python /opt/venv/bin/python pytest; fi
 
