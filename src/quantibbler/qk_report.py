@@ -386,6 +386,10 @@ def geometry_deviations(seq_len: Any, tune_seq_len: Any, calibration_rows: Any =
                 ),
             }
         )
+    # Sequence-counted by contract (qk-geometry-conformance): the driver's
+    # ``--calibration-seqs`` knob counts sequences ([NQ] Sec 3.4/App. C) and its
+    # counter reports the same unit, so this comparison is sequences against the
+    # protocol's 128 — no batch factor belongs here.
     rows = _as_finite_float(calibration_rows)
     if rows is not None and rows != 128:
         out.append(

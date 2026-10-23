@@ -343,6 +343,27 @@ def tokenize_chunks(
     return _tokenize_blocks(tokenizer, text, seq_len, n_chunks, seed)[0]
 
 
+def packed_chunks(sequences: int, knob: str) -> int:
+    """``sequences`` -> the packed batches the loader wants, fail-closed.
+
+    The data knobs count SEQUENCES ([NQ] Sec 3.4/App. C: 128 calibration
+    sequences), but ``_tokenize_blocks`` packs ``BATCH`` rows per chunk, so its
+    ``n_chunks`` parameter counts batches. Converting at the knob boundary — in
+    one place, before the counter that reports the same unit — keeps the
+    packed-batch structure an implementation detail of the tokenizer.
+
+    Refuses a count that is not a whole number of batches rather than silently
+    rounding it: a knob whose value is quietly changed is the defect this
+    function exists to remove.
+    """
+    if sequences % BATCH:
+        raise ValueError(
+            f"{knob} counts sequences: {sequences} is not divisible by the "
+            f"packed batch size {BATCH}"
+        )
+    return sequences // BATCH
+
+
 def _positive_int(text: str) -> int:
     """argparse type for the probe knobs: a non-positive value is a parse error.
 
@@ -738,10 +759,17 @@ def main() -> int:
     parser.add_argument(
         "--calibration-seqs",
         type=int,
-        default=16,
-        help="16 batches of 8 sequences = 128 calibration rows",
+        default=128,
+        help="128 calibration SEQUENCES ([NQ] Sec 3.4/App. C), packed "
+        f"{BATCH} rows per batch (16 batches); the count must be a multiple of {BATCH}",
     )
-    parser.add_argument("--eval-seqs", type=int, default=5, help="5 batches of 8 = 40 eval rows")
+    parser.add_argument(
+        "--eval-seqs",
+        type=int,
+        default=40,
+        help=f"40 held-out evaluation SEQUENCES, packed {BATCH} rows per batch "
+        f"({40 // BATCH} batches); the count must be a multiple of {BATCH}",
+    )
     parser.add_argument(
         "--probe-interval",
         type=_positive_int,
@@ -899,14 +927,14 @@ def main() -> int:
         tokenizer,
         load_wikitext_text(find_wikitext_shards("train")),
         args.seq_len,
-        args.calibration_seqs,
+        packed_chunks(args.calibration_seqs, "--calibration-seqs"),
         args.seed,
     )
     held_out, eval_selection = _tokenize_blocks(
         tokenizer,
         load_wikitext_text(find_wikitext_shards("test")),
         args.seq_len,
-        args.eval_seqs,
+        packed_chunks(args.eval_seqs, "--eval-seqs"),
         args.seed + 1,
     )
     print(f"      calib {len(calib)} batches, eval {len(held_out)} batches")
@@ -941,14 +969,18 @@ def main() -> int:
     # overshoot refusal beside it (a usage error, not a run verdict): the
     # driver's single exit path belongs to the gate's verdict, so a config
     # refusal fails loudly here instead of implying a completed run.
-    if args.paper_faithful and args.eval_seqs != evaluation["full_local_window_batches"]:
+    # The knob counts sequences; `evaluation` records the window in batches (a
+    # harness fact, kept). The comparison is made in the knob's unit, so the
+    # gate's demanded value and the recorded one are the same kind of number.
+    full_window_sequences = evaluation["full_local_window_batches"] * BATCH
+    if args.paper_faithful and args.eval_seqs != full_window_sequences:
         raise ValueError(
             f"--paper-faithful requires the maximal local evaluation window: "
-            f"--eval-seqs {evaluation['full_local_window_batches']} "
+            f"--eval-seqs {full_window_sequences} sequences "
             f"(wikitext test at seq {args.seq_len} yields "
             f"{evaluation['full_blocks']} blocks = "
             f"{evaluation['full_local_window_batches']} batches of {BATCH}); "
-            f"got {args.eval_seqs} ({evaluation['selected_blocks']} blocks, "
+            f"got {args.eval_seqs} sequences ({evaluation['selected_blocks']} blocks, "
             f"{evaluation['coverage_of_source_tokens']:.3%} of source tokens). "
             "Diagnostics may use a smaller window and will record it; a "
             "faithful claim may not."

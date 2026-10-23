@@ -31,6 +31,19 @@ from test_driver_tune_seq_len import (  # noqa: F401  (pytest fixtures)
 from quantibbler.qk_report import EVAL_EVALUATOR
 
 
+def _max_eval_sequences(
+    offline_corpus,  # noqa: ANN001, F811
+    tiny_model,  # noqa: ANN001, F811
+    seq_len: int = SEQ_LEN,
+) -> int:
+    """The maximal eval window in SEQUENCES — the unit ``--eval-seqs`` takes.
+
+    ``qk-geometry-conformance`` moved the knob to sequences; the sizer still
+    computes batches, so the gate's number is ``batches * BATCH``.
+    """
+    return _max_eval_batches(offline_corpus, tiny_model, seq_len) * BATCH
+
+
 def _max_eval_batches(
     offline_corpus,  # noqa: ANN001, F811
     tiny_model,  # noqa: ANN001, F811
@@ -40,9 +53,10 @@ def _max_eval_batches(
 
     Mirrors the driver's own sizer exactly (same parquet read, same ``"\\n"``
     join, same tokenizer call, same ``// seq_len // BATCH`` arithmetic) so the
-    faithful preflight — which compares ``--eval-seqs`` against the number the
-    driver computes at run time — is satisfied by construction rather than by a
-    hardcoded guess that would rot if the fixture corpus changed.
+    faithful preflight — which compares ``--eval-seqs`` (sequences) against the
+    number the driver computes at run time, in that same unit — is satisfied by
+    construction rather than by a hardcoded guess that would rot if the fixture
+    corpus changed.
     """
     import pyarrow.parquet as pq
     from transformers import AutoTokenizer
@@ -69,10 +83,10 @@ def test_paper_faithful_run_records_the_algorithm1_stage_map(
     and the protocol's 128 calibration rows so the computed fidelity verdict
     has no runtime deviation to deny it.
 
-    The `--calibration-seqs 16` is load-bearing, not incidental: [NQ]'s
-    protocol is 128 rows (16 batches x 8), and the verdict flips false on any
-    other count — which is why the assertion below is `== []`, not "empty or
-    named".
+    The `--calibration-seqs 128` is load-bearing, not incidental: [NQ]'s
+    protocol is 128 sequences (16 packed batches x 8), and the verdict flips
+    false on any other count — which is why the assertion below is `== []`, not
+    "empty or named".
     """
     out_dir = tmp_path / "paper-faithful"
     max_eval = _max_eval_batches(offline_corpus, tiny_model)
@@ -87,11 +101,11 @@ def test_paper_faithful_run_records_the_algorithm1_stage_map(
             "--max-admm-iter",
             "400",
             "--calibration-seqs",
-            "16",
+            "128",
             # A faithful claim must use the maximal local eval window; the
             # driver refuses anything smaller at preflight.
             "--eval-seqs",
-            str(max_eval),
+            str(max_eval * BATCH),
         ],
     )
     assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-2000:]
@@ -279,9 +293,9 @@ def test_a_faithful_claim_on_the_svd_ablation_is_denied_by_the_computed_verdict(
         extra=[
             "--paper-faithful",
             "--calibration-seqs",
-            "16",
+            "128",
             "--eval-seqs",
-            str(_max_eval_batches(offline_corpus, tiny_model)),
+            str(_max_eval_sequences(offline_corpus, tiny_model)),
         ],
     )
     assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-2000:]
@@ -347,7 +361,7 @@ def test_a_split_tune_geometry_is_named_as_a_runtime_deviation(
             "--tune-seq-len",
             "16",
             "--eval-seqs",
-            str(_max_eval_batches(offline_corpus, tiny_model)),
+            str(_max_eval_sequences(offline_corpus, tiny_model)),
         ],
     )
     assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-2000:]
@@ -395,15 +409,15 @@ def test_a_faithful_claim_is_refused_at_preflight_on_an_undersampled_eval_window
         extra=[
             "--paper-faithful",
             "--calibration-seqs",
-            "16",
+            "128",
             "--eval-seqs",
-            str(max_eval - 1),
+            str((max_eval - 1) * BATCH),
         ],
     )
     assert proc.returncode != 0
     assert "--paper-faithful requires the maximal local evaluation window" in proc.stderr
-    assert f"--eval-seqs {max_eval}" in proc.stderr
-    assert f"got {max_eval - 1}" in proc.stderr
+    assert f"--eval-seqs {max_eval * BATCH} sequences" in proc.stderr
+    assert f"got {(max_eval - 1) * BATCH} sequences" in proc.stderr
     # Preflight means preflight: no report, no artifact, no partial claim.
     assert not (out_dir / "quantize_report.json").exists()
     assert not list(out_dir.glob("layers/*.qpk1"))
@@ -427,7 +441,7 @@ def test_an_eval_window_past_the_corpus_is_still_refused_by_the_sizer(
         offline_corpus,
         tiny_model,
         out_dir,
-        extra=["--paper-faithful", "--eval-seqs", str(max_eval + 1)],
+        extra=["--paper-faithful", "--eval-seqs", str((max_eval + 1) * BATCH)],
     )
     assert proc.returncode != 0
     assert "wikitext yields" in proc.stderr
