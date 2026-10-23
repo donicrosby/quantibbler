@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import glob
 import json
 import os
@@ -520,7 +521,7 @@ def _empty_cache() -> None:
 
 
 @contextlib.contextmanager
-def _checkpointed_blocks(trunk: Any) -> Any:
+def _checkpointed_blocks(trunk: Any, *, reentrant: bool = True) -> Any:
     """Gradient-checkpoint every decoder block for the duration of the context.
 
     The trunk activation graph, not the head, is the thing that is actually
@@ -554,7 +555,10 @@ def _checkpointed_blocks(trunk: Any) -> Any:
 
         def _make(original: Any = original) -> Any:
             def _wrapped(*args: Any, **kwargs: Any) -> Any:
-                return _ckpt(original, *args, use_reentrant=False, **kwargs)
+                # kwargs are bound into a partial rather than handed to
+                # checkpoint: reentrant checkpointing takes positional inputs
+                # only, and the model's own call passes use_cache as a keyword.
+                return _ckpt(functools.partial(original, **kwargs), *args, use_reentrant=reentrant)
 
             return _wrapped
 
@@ -576,6 +580,8 @@ def collect_intended_statistics(
     chunk_rows: int | None = None,
     chunk_tokens: int | None = None,
     checkpoint_blocks: bool = True,
+    gate_on_grad: bool = True,
+    reentrant: bool = True,
     diagnostics: dict[str, Any] | None = None,
 ) -> dict[tuple[int, str], dict[str, np.ndarray]]:
     """Per-linear ``(d_in_raw, d_out_raw)`` the paper-intended way.
@@ -632,6 +638,14 @@ def collect_intended_statistics(
     for _, module, key in linears:
 
         def _pre_hook(mod, inp, key=key):  # noqa: ANN001
+            # Gate on grad-enabled state: reentrant checkpointing runs the first
+            # pass under no_grad and recomputes under grad, so counting only the
+            # grad-enabled pass lands every row in sum_sq EXACTLY ONCE. Without
+            # the gate both passes count, sum_sq doubles, and only the ratio
+            # saves the mean -- correct by accident, and silently wrong for
+            # anyone who later reads the raw sum.
+            if gate_on_grad and not torch.is_grad_enabled():
+                return
             acc, n = _clip_and_accumulate(inp[0])
             sum_sq_in[key] = acc if sum_sq_in[key] is None else sum_sq_in[key] + acc
             rows[key] += n
@@ -642,6 +656,8 @@ def collect_intended_statistics(
     for _, module, key in linears:
 
         def _post_hook(mod, inp, out, key=key):  # noqa: ANN001
+            if gate_on_grad and not torch.is_grad_enabled():
+                return
             acc, n = _clip_and_accumulate(out)
             sum_sq_out[key] = acc if sum_sq_out[key] is None else sum_sq_out[key] + acc
             if out.requires_grad:
@@ -667,7 +683,7 @@ def collect_intended_statistics(
             if chunk_tokens is None:
                 trunk = model.get_decoder() if hasattr(model, "get_decoder") else model.model
                 if checkpoint_blocks:
-                    with _checkpointed_blocks(trunk):
+                    with _checkpointed_blocks(trunk, reentrant=reentrant):
                         logits = model(batch)
                 else:
                     logits = model(batch)
@@ -701,7 +717,7 @@ def collect_intended_statistics(
                 trunk = model.get_decoder() if hasattr(model, "get_decoder") else model.model
                 head = model.get_output_embeddings()
                 if checkpoint_blocks:
-                    with _checkpointed_blocks(trunk):
+                    with _checkpointed_blocks(trunk, reentrant=reentrant):
                         hidden = trunk(batch, use_cache=False)[0]
                 else:
                     hidden = trunk(batch, use_cache=False)[0]
@@ -709,7 +725,7 @@ def collect_intended_statistics(
                 shift_labels = batch[:, 1:].reshape(-1)
                 n_b = int(shift_labels.shape[0])
 
-                def _ce_sum(hs: Any, ls: Any, head: Any = head) -> Any:
+                def _ce_sum(hs: Any, ls: Any, head: Any = None) -> Any:
                     # .float() on the logits mirrors the whole-batch path exactly:
                     # the shipped line casts before CE, and matching the statistic
                     # bitwise means matching that cast, not just the algebra.
@@ -722,7 +738,19 @@ def collect_intended_statistics(
                     for lo in range(0, shift_hidden.shape[0], chunk_tokens)
                 ]
                 total = sum(
-                    _ckpt(_ce_sum, shift_hidden[lo:hi], shift_labels[lo:hi], use_reentrant=False)
+                    # The HEAD keeps the non-reentrant flavour deliberately.
+                    # Reentrant here moved the captured gradient statistic by
+                    # ~1.6% relative (measured on the equivalence fixture), while
+                    # the head's own accumulators are never captured -- nothing
+                    # in `wanted` lives in the head -- so reentrancy buys the
+                    # statistic nothing here and costs exactness. The BLOCKS are
+                    # reentrant, which is where the doubling actually mattered.
+                    _ckpt(
+                        functools.partial(_ce_sum, head=head),
+                        shift_hidden[lo:hi],
+                        shift_labels[lo:hi],
+                        use_reentrant=False,
+                    )
                     for lo, hi in spans
                 )
                 # The mean gauge is applied to the LOSS, not to the squared
@@ -754,6 +782,12 @@ def collect_intended_statistics(
             "percentile": percentile,
             "grad_fallback": None,
             "grad_rows": grad_rows,
+            # Raw accumulators, exposed so the fixture asserts identity on the
+            # SUMS rather than only on the means: a doubled numerator with a
+            # doubled denominator passes a mean check and fails this one.
+            "sum_sq_in": np.asarray(sum_sq_in[key], dtype=np.float64),
+            "sum_sq_out": np.asarray(sum_sq_out[key], dtype=np.float64),
+            "rows": rows[key],
         }
         if grads[key] is None:
             # No reachable gradient: fall back to the activation-only statistic

@@ -234,19 +234,27 @@ def test_chunked_ce_preserves_statistic_exactly(tool, tiny_model):  # noqa: F811
     model = _tiny_fp64_model(tiny_model)
     batch = _tiny_batch(tiny_model)
     wanted = ((0, "mlp.down_proj"),)
-
-    whole = tool.collect_intended_statistics(model, [batch], wanted=wanted, percentile=99.9)
-    chunked = tool.collect_intended_statistics(
-        model, [batch], wanted=wanted, percentile=99.9, chunk_tokens=8
-    )
-
     key = (0, "mlp.down_proj")
-    for field in ("d_in_raw", "d_out_raw"):
-        a, b = whole[key][field], chunked[key][field]
-        assert np.array_equal(a, b), (
-            f"{field} is not bitwise identical: max abs diff {np.abs(a - b).max():.3e}"
-        )
-    assert whole[key]["grad_rows"] == chunked[key]["grad_rows"]
+
+    def _stats(**kw):
+        return tool.collect_intended_statistics(
+            model, [batch], wanted=wanted, percentile=99.9, **kw
+        )[key]
+
+    reference = _stats(chunk_tokens=None, checkpoint_blocks=False)
+    chunked_only = _stats(chunk_tokens=8, checkpoint_blocks=False)
+    shipped = _stats(chunk_tokens=8, checkpoint_blocks=True)
+
+    # Two pairwise identities, each isolating one change on a path we actually
+    # run: head chunking alone, then block checkpointing on top of it.
+    for label, candidate in (("head chunking", chunked_only), ("block checkpointing", shipped)):
+        for field in ("d_in_raw", "d_out_raw", "sum_sq_in", "sum_sq_out"):
+            a, b = reference[field], candidate[field]
+            assert np.array_equal(a, b), (
+                f"{field} moved under {label}: max abs diff {np.abs(a - b).max():.3e}"
+            )
+        assert reference["rows"] == candidate["rows"]
+        assert reference["grad_rows"] == candidate["grad_rows"]
 
 
 def test_per_chunk_backward_does_not_preserve_the_statistic(tool, tiny_model):  # noqa: F811
@@ -333,6 +341,56 @@ def test_trunk_checkpointing_preserves_statistic_exactly(tool, tiny_model):  # n
         assert np.array_equal(a, b), (
             f"{field} moved under trunk checkpointing: max abs diff {np.abs(a - b).max():.3e}"
         )
+    # Raw-sum identity, not just mean identity. A doubled numerator over a
+    # doubled denominator rounds to the same mean, so a mean-equality bar cannot
+    # see the doubling at all -- these assertions are the ones that can.
+    for field in ("sum_sq_in", "sum_sq_out"):
+        a, b = plain[key][field], ckpt[key][field]
+        assert np.array_equal(a, b), (
+            f"{field} differs under checkpointing: max abs diff {np.abs(a - b).max():.3e}"
+        )
+    assert plain[key]["rows"] == ckpt[key]["rows"]
+
+
+def _raw_sums(tool, model, batch, **kwargs):
+    stats = tool.collect_intended_statistics(
+        model, [batch], wanted=((0, "mlp.down_proj"),), percentile=99.9, chunk_tokens=8, **kwargs
+    )
+    return stats[(0, "mlp.down_proj")]
+
+
+def test_ungated_accumulator_doubles_the_raw_sum(tool, tiny_model):  # noqa: F811
+    """RED: drop the grad-enabled gate and the no-grad first pass counts too.
+
+    The mean is unchanged by the doubling -- 2S/2R rounds identically to S/R --
+    so this test also demonstrates why the previous mean-equality bar could not
+    see the defect the raw-sum bar catches.
+    """
+    model = _tiny_fp64_model(tiny_model)
+    batch = _tiny_batch(tiny_model)
+
+    gated = _raw_sums(tool, model, batch, gate_on_grad=True)
+    ungated = _raw_sums(tool, model, batch, gate_on_grad=False)
+
+    assert not np.array_equal(gated["sum_sq_in"], ungated["sum_sq_in"])
+    assert ungated["rows"] / gated["rows"] == pytest.approx(2.0)
+    assert np.array_equal(gated["d_in_raw"], ungated["d_in_raw"])
+
+
+def test_non_reentrant_checkpoint_doubles_the_raw_sum(tool, tiny_model):  # noqa: F811
+    """RED: non-reentrant checkpointing runs the first pass grad-enabled.
+
+    With both passes counted, sum_sq doubles while the mean stays put -- the
+    trap that made bitwise preservation rest on ratio arithmetic.
+    """
+    model = _tiny_fp64_model(tiny_model)
+    batch = _tiny_batch(tiny_model)
+
+    reentrant = _raw_sums(tool, model, batch, reentrant=True)
+    non_reentrant = _raw_sums(tool, model, batch, reentrant=False)
+
+    assert not np.array_equal(reentrant["sum_sq_in"], non_reentrant["sum_sq_in"])
+    assert non_reentrant["rows"] / reentrant["rows"] == pytest.approx(2.0)
 
 
 def test_every_trunk_block_is_gradient_checkpointed(tool, tiny_model):  # noqa: F811
