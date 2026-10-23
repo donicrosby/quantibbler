@@ -93,12 +93,13 @@ The decisive run SHALL write a quantize_report-style JSON (strict-parseable, pro
 
 ### Requirement: The real-statistics pass SHALL be memory-fenced and statistic-exact
 
-The CE-gradient pass SHALL chunk the head (logits/CE/backward) per 256-token slice off a full-context trunk forward — never re-running the trunk per slice. Per-chunk backward SHALL use `reduction="sum"` with `1/N_c^2` post-scaling, preserving both the per-row statistic and the mean-loss gauge. Per-slice `del` + `empty_cache` SHALL bound the allocator, and the refire SHALL be preceded by a fenced rehearsal whose peak is recorded in launch.env.
+The CE-gradient pass SHALL chunk the head per 256-token slice off a full-context trunk forward under `torch.utils.checkpoint`, sum the chunk losses, apply the mean gauge to the total, and take ONE backward, bitwise identical to the whole-batch path. Per-slice `empty_cache` SHALL bound the allocator, and the refire SHALL be preceded by a fenced rehearsal whose peak is recorded in launch.env.
 
 #### Scenario: chunked_ce_preserves_statistic
 
-- **WHEN** the equivalence fixture runs the old whole-batch CE path and the new head-chunked path on identical weights and inputs (tiny geometry, one sequence, 128 tokens, CPU)
-- **THEN** the accumulated gradient-square vectors match to machine precision — identity, not tolerance — and the fixture goes red against the naive trunk-rechunking variant
+- **WHEN** the equivalence fixture runs the legacy whole-batch path and the checkpointed-head path on identical weights and inputs (tiny geometry, one sequence, 128 tokens, CPU)
+- **THEN** the accumulated gradient-square vectors match to machine precision — identity, not tolerance
+- **AND** the fixture goes red against the naive trunk-rechunk variant AND against per-chunk backward (attention couples rows, so squared partials do not sum)
 
 #### Scenario: rehearsal_red_first
 
