@@ -139,6 +139,12 @@ The accumulation hooks SHALL gate on `torch.is_grad_enabled()` so each row is co
 
 - **WHEN** the checkpointed build's rehearsal runs
 - **THEN** it starts at ONE batch measuring the true per-batch peak from `torch.cuda.max_memory_reserved`; the full 16-batch endurance run proceeds only if that peak lands at or under 15G; and the refire happens only after the 16-batch peak leaves solve-compatible headroom under 32G, the red artifacts, and both fixtures are green
+- **AND** the rehearsal constructs its batches through the same packed loader as the protocol run — one batch is one packed batch of BATCH×seq_len tokens, never a degenerate corpus-sized blob — with explicit rehearsal sequences recorded as provenance (`rehearsal=true, sequences=N, protocol_sequences=128`) so the artifact cannot be misread as a protocol statistic
+
+#### Scenario: rehearsal_geometry_guard_exempts_explicitly
+
+- **WHEN** the rehearsal passes an explicit sequences value
+- **THEN** the geometry validation checks the resolved count against THAT explicit value, the decisive fire's 128-sequence guard stays untouched, and any rehearsal without an explicit sequences value is refused rather than silently defaulted
 
 ### Requirement: Every Lane 0 launch SHALL ride the wrapper
 
