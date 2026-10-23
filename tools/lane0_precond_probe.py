@@ -238,9 +238,40 @@ def _solve(
     d_out: np.ndarray,
     d_in: np.ndarray,
     cfg: PTQConfig,
+    device: str | None = None,
 ) -> dict:
-    """One arm's solve: shipped solver pair, four quantities out."""
+    """One arm's solve: shipped solver pair, four quantities out.
+
+    With ``device`` set, the target and diagonals move to the accelerator
+    BEFORE the solver runs — a decisive fire labelled GPU must compute on the
+    GPU (fail-closed at the stats stage, so reaching here means the device
+    exists). Without ``device`` the path is the original, byte-for-byte.
+    """
     dt = np.dtype(cfg.compute_dtype)
+    if device is not None:
+        import torch as _torch
+
+        _dt = getattr(_torch, cfg.compute_dtype)  # float32 on the GPU fire, per cfg
+        w_t = _torch.as_tensor(w, dtype=_dt).to(device)
+        d_out_t = _torch.as_tensor(np.asarray(d_out), dtype=_dt).to(device)
+        d_in_t = _torch.as_tensor(np.asarray(d_in), dtype=_dt).to(device)
+        w_tilde = (d_out_t[:, None] * w_t) * d_in_t[None, :]
+        res = lb_admm(w_tilde, cfg)
+        bal = magnitude_balance(res.P_u, res.P_v, d_out_t, d_in_t, target=w_t)
+        product = bal.U @ bal.V.T
+        trace = res.trace
+        recon = float((_torch.sum(w_t * product)) / (_torch.norm(w_t) * _torch.norm(product)))
+        return {
+            "recon_cos": recon,
+            "residuals": [float(r) for r in trace.residuals],
+            "n_iter": int(res.n_iter),
+            "min_eigs_floor": float(min(trace.min_eigs)) if trace.min_eigs else float("nan"),
+            "n_jitter": int(trace.n_jitter),
+            "converged": bool(res.converged),
+            "cfg_rank": int(cfg.rank),
+            "solver": "admm",
+            "compute_dtype": cfg.compute_dtype,
+        }
     w_tilde = ((np.asarray(d_out)[:, None] * w) * np.asarray(d_in)[None, :]).astype(dt)
     res = lb_admm(w_tilde, cfg)
     bal = magnitude_balance(res.P_u, res.P_v, d_out, d_in, target=w)
@@ -277,8 +308,15 @@ def run_arms(
     seed: int = 0,
     cfg: PTQConfig | None = None,
     target_provider: Any = None,
+    stats: dict | None = None,
+    device: str | None = None,
 ) -> list[dict]:
-    """Both arms over the pinned set, in set order, one row pair per layer."""
+    """Both arms over the pinned set, in set order, one row pair per layer.
+
+    ``stats`` carries ``build_real_arms`` output — the real shipped/intended
+    statistics keyed by ``(block_idx, layer_name)``. When it is None the
+    provider's nominal statistics drive both arms (the smoke path).
+    """
     cfg = cfg or production_config()
     provider = target_provider or (
         lambda _model, _block, _layer, _seed: _synthetic_target(seed=_seed)
@@ -287,14 +325,29 @@ def run_arms(
     for model, block_idx, layer_name in probe_set:
         target = provider(model, block_idx, layer_name, seed)
         w = target["w"]
-        # arm A: shipped robust_diag + shipped raw fold
-        d_in_a, d_out_a = robust_diag(target["d_in_raw"], target["d_out_raw"])
-        # arm B: intended (clip -> sqrt fold, once per side)
-        _, d_out_b, d_in_b = fold_intended(
-            w, d_out_raw=target["d_out_raw"], d_in_raw=target["d_in_raw"]
-        )
+        if stats is not None:
+            key = (int(block_idx), layer_name)
+            arm_a = stats["shipped"][key]
+            arm_b = stats["intended"][key]
+            # arm A: shipped robust_diag + shipped raw fold
+            d_in_a, d_out_a = robust_diag(arm_a["d_in_raw"], arm_a["d_out_raw"])
+            # arm B: intended (clip -> sqrt fold, once per side)
+            _, d_out_b, d_in_b = fold_intended(
+                w, d_out_raw=arm_b["d_out_raw"], d_in_raw=arm_b["d_in_raw"]
+            )
+            percentile = arm_b.get("percentile", PERCENTILE)
+            grad_fallback = arm_b.get("grad_fallback")
+        else:
+            # arm A: shipped robust_diag + shipped raw fold
+            d_in_a, d_out_a = robust_diag(target["d_in_raw"], target["d_out_raw"])
+            # arm B: intended (clip -> sqrt fold, once per side)
+            _, d_out_b, d_in_b = fold_intended(
+                w, d_out_raw=target["d_out_raw"], d_in_raw=target["d_in_raw"]
+            )
+            percentile = PERCENTILE
+            grad_fallback = None
         for arm, (d_out, d_in) in (("A", (d_out_a, d_in_a)), ("B", (d_out_b, d_in_b))):
-            measured = _solve(w, d_out=d_out, d_in=d_in, cfg=cfg)
+            measured = _solve(w, d_out=d_out, d_in=d_in, cfg=cfg, device=device)
             row = {
                 "model": model,
                 "block_idx": int(block_idx),
@@ -303,7 +356,8 @@ def run_arms(
                 "stage": "post_admm_pre_polish",
                 "polish_invoked": False,
                 "ste_invoked": False,
-                "percentile": PERCENTILE if arm == "B" else None,
+                "percentile": percentile if arm == "B" else None,
+                "grad_fallback": grad_fallback if arm == "B" else None,
                 "fold": "intended_sqrt" if arm == "B" else "shipped_raw",
                 **measured,
             }
@@ -657,13 +711,35 @@ def main() -> int:
     )
     parser.add_argument("--out", type=pathlib.Path, default=None, help="report JSON path")
     parser.add_argument("--real", action="store_true", help="use the pinned production layers")
+    parser.add_argument(
+        "--device",
+        default=None,
+        help="accelerator device (the decisive run defaults to cuda, fail-closed)",
+    )
     args = parser.parse_args()
 
     probe_set = (("synthetic", 0, "planted-rank16"),) if args.smoke else PROBE_SET
     provider = None if args.smoke else real_target
     # --smoke is the fast path (smoke rank); the decisive run is production rank.
     cfg = PTQConfig() if args.smoke else production_config()
-    rows = run_arms(probe_set, seed=args.seed, target_provider=provider, cfg=cfg)
+    stats = None
+    device = None
+    if not args.smoke:
+        # The decisive fire is GPU-mandated (user directive): torch backend on
+        # the accelerator, fp32 as the earning dtype — fail-closed, never a
+        # quiet CPU fallback. compute_dtype is recorded per row and in
+        # launch.env; the tolerance class covers fp32-vs-fp64 movement.
+        device = args.device or "cuda"
+        cfg = PTQConfig(rank=PRODUCTION_RANK, compute_dtype="float32")
+        stats = build_real_arms(probe_set, device=device)
+    rows = run_arms(
+        probe_set,
+        seed=args.seed,
+        target_provider=provider,
+        cfg=cfg,
+        stats=stats,
+        device=device,
+    )
 
     for row in rows:
         line = json.dumps(row)
