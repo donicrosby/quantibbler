@@ -111,6 +111,11 @@ The trunk forward SHALL checkpoint every production block — backward recompute
 - **THEN** the gradient-square vectors match bitwise — identity, not tolerance
 - **AND** the fixture goes red against any build where a production block is left uncheckpointed
 
+#### Scenario: trunk_doubling_ratio_invariant
+
+- **WHEN** the equivalence fixture asserts the checkpointed-trunk statistic
+- **THEN** it consumes the accumulator's MEAN — numerator and denominator double in lockstep under recompute, ×2 is exact in binary FP, so the mean is bitwise preserved — and the fixture goes red against any build consuming raw `sum_sq`
+
 #### Scenario: rehearsal_red_retired
 
 - **WHEN** any future Lane 0 rehearsal executes
