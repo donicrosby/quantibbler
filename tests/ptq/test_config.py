@@ -10,7 +10,9 @@ from quantibbler.ptq.config import PTQConfig, StageHyper
 def test_scn_config_defaults():
     """A bare PTQConfig carries [NQ] App. C defaults and the qk-ptq design
     informed-assumption values (A-1..A-7)."""
-    cfg = PTQConfig()
+    cfg = PTQConfig(
+        solver_backend="numpy",
+    )
 
     # Representation / global knobs.
     assert isinstance(cfg.rank, int) and cfg.rank >= 1
@@ -42,7 +44,9 @@ def test_scn_config_defaults():
 def test_scn_default_numerics_float64():
     """default_numerics_float64: float64 is the default compute dtype and the
     mapped numpy dtype follows it."""
-    cfg = PTQConfig()
+    cfg = PTQConfig(
+        solver_backend="numpy",
+    )
     assert cfg.compute_dtype == "float64"
     assert cfg.np_compute_dtype == np.dtype(np.float64)
 
@@ -50,31 +54,36 @@ def test_scn_default_numerics_float64():
 def test_scn_float32_opt_in():
     """float32_opt_in: float32 is reachable only through an explicit config
     setting; anything else is rejected loudly."""
-    opt_in = PTQConfig(compute_dtype="float32")
+    opt_in = PTQConfig(solver_backend="numpy", compute_dtype="float32")
     assert opt_in.compute_dtype == "float32"
     assert opt_in.np_compute_dtype == np.dtype(np.float32)
     with pytest.raises(ValueError):
-        PTQConfig(compute_dtype="float16")
+        PTQConfig(solver_backend="numpy", compute_dtype="float16")
     with pytest.raises(ValueError):
-        PTQConfig(compute_dtype="float64 ")
+        PTQConfig(solver_backend="numpy", compute_dtype="float64 ")
     # Serialization knob is likewise explicit and validated.
-    assert PTQConfig().scale_dtype == "float32"
-    assert PTQConfig(scale_dtype="float32").scale_dtype == "float32"
+    assert (
+        PTQConfig(
+            solver_backend="numpy",
+        ).scale_dtype
+        == "float32"
+    )
+    assert PTQConfig(solver_backend="numpy", scale_dtype="float32").scale_dtype == "float32"
     with pytest.raises(ValueError):
-        PTQConfig(scale_dtype="float64")
+        PTQConfig(solver_backend="numpy", scale_dtype="float64")
 
 
 def test_scn_config_validation():
     """Out-of-range hyperparameters are construction errors, never silent."""
     with pytest.raises(ValueError):
-        PTQConfig(rank=0)
+        PTQConfig(solver_backend="numpy", rank=0)
     with pytest.raises(ValueError):
-        PTQConfig(gamma=1.5)
+        PTQConfig(solver_backend="numpy", gamma=1.5)
     with pytest.raises(ValueError):
-        PTQConfig(admm_max_iter=0)
+        PTQConfig(solver_backend="numpy", admm_max_iter=0)
     with pytest.raises(ValueError):
-        PTQConfig(rho_start=0.0)
+        PTQConfig(solver_backend="numpy", rho_start=0.0)
     with pytest.raises(ValueError):
-        PTQConfig(rho_end=1e-4, rho_start=1e-2)
+        PTQConfig(solver_backend="numpy", rho_end=1e-4, rho_start=1e-2)
     with pytest.raises(ValueError):
-        PTQConfig(temperature=0.0)
+        PTQConfig(solver_backend="numpy", temperature=0.0)

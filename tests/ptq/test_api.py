@@ -53,6 +53,7 @@ def _gate_cfg() -> PTQConfig:
     from quantibbler.ptq.config import StageHyper
 
     return PTQConfig(
+        solver_backend="numpy",
         rank=4,
         stage_pre=StageHyper(1e-4, 4, 0),
         stage_latent=StageHyper(2e-3, 4, 3),
@@ -254,8 +255,10 @@ def test_scn_export_gate_refuses_nonfinite_scales():
 def test_scn_float32_opt_in():
     """float32_opt_in: default config runs float64; compute_dtype="float32"
     flips the solver entry dtype — opt-in observable via config only."""
-    assert PTQConfig().np_compute_dtype == np.dtype(np.float64)
-    opt_in = PTQConfig(compute_dtype="float32")
+    assert PTQConfig(
+        solver_backend="numpy",
+    ).np_compute_dtype == np.dtype(np.float64)
+    opt_in = PTQConfig(solver_backend="numpy", compute_dtype="float32")
     assert opt_in.np_compute_dtype == np.dtype(np.float32)
 
     # Solver entry honors the dtype: LB-ADMM on a float32 config produces
@@ -264,7 +267,7 @@ def test_scn_float32_opt_in():
 
     gen = np.random.default_rng(0)
     w = (gen.standard_normal((8, 6)) @ gen.standard_normal((6, 8))).astype(np.float32)
-    res = lb_admm(w, PTQConfig(rank=3, compute_dtype="float32"))
+    res = lb_admm(w, PTQConfig(solver_backend="numpy", rank=3, compute_dtype="float32"))
     assert res.U.dtype == np.float32 and res.V.dtype == np.float32
-    res64 = lb_admm(w.astype(np.float64), PTQConfig(rank=3))
+    res64 = lb_admm(w.astype(np.float64), PTQConfig(solver_backend="numpy", rank=3))
     assert res64.U.dtype == np.float64

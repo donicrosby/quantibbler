@@ -14,6 +14,9 @@ from quantibbler.ptq.lb_admm import (
     magnitude_balance,
     svid_proxy,
 )
+from quantibbler.ptq.solver_backend import get_backend
+
+_NP = get_backend("numpy")
 
 
 def _ground_truth(m: int, n: int, r: int, seed: int) -> np.ndarray:
@@ -31,7 +34,7 @@ def test_scn_admm_spd_solves():
     triggers deterministically on a perturbed diagonal shift."""
     for r in (2, 4, 8):
         w = _ground_truth(16, 12, r, seed=40 + r)
-        cfg = PTQConfig(rank=r, rho_start=1e-2, rho_end=1e2)
+        cfg = PTQConfig(rank=r, rho_start=1e-2, rho_end=1e2, solver_backend="numpy")
         res = lb_admm(w, cfg)
         assert res.trace.min_eigs, "trace recorded no solves"
         # Every solve was on an SPD system (min eigenvalue positive).
@@ -43,10 +46,10 @@ def test_scn_admm_spd_solves():
     # must engage the jitter path (and still return a solution).
     h_spd = np.array([[4.0, 1.0], [1.0, 3.0]])
     b = np.array([[1.0, 2.0], [3.0, 4.0]])
-    x0, fell = _cholesky_solve(h_spd, b)
+    x0, fell = _cholesky_solve(_NP, h_spd, b)
     assert fell is False
     h_bad = h_spd - 10.0 * np.eye(2)  # indefinite by construction
-    x1, fell = _cholesky_solve(h_bad, b)
+    x1, fell = _cholesky_solve(_NP, h_bad, b)
     assert fell is True
     # The fallback solution satisfies the (jittered) system, not garbage.
     assert np.all(np.isfinite(x1))
@@ -59,7 +62,7 @@ def test_scn_admm_consensus_convergence():
     preserves sign structure with norm-preserved columns (A-5, closed form)."""
     r = 4
     w = _ground_truth(20, 14, r, seed=99)
-    cfg = PTQConfig(rank=r)
+    cfg = PTQConfig(rank=r, solver_backend="numpy")
     res = lb_admm(w, cfg)
 
     residuals = np.asarray(res.trace.residuals)
@@ -84,7 +87,7 @@ def test_scn_admm_consensus_convergence():
     # magnitude per column and not norm-anchored (the norm-anchored variant
     # destabilizes the consensus loop; see lb_admm.svid_proxy notes).
     z = np.array([[3.0, -1.0, 0.0], [-2.0, 0.5, 0.0]])
-    zc = svid_proxy(z)
+    zc = svid_proxy(_NP, z)
     assert np.array_equal(np.sign(zc), np.sign(np.where(z == 0, 1.0, z)))
     # sign(0) = +1 convention on the third column.
     assert np.all(zc[:, 2] > 0)
@@ -122,7 +125,7 @@ def test_scn_scale_balancing():
     p_u = d_out[:, None] * u_hat
     p_v = d_in[:, None] * v_hat
 
-    bal = magnitude_balance(p_u, p_v, d_out, d_in)
+    bal = magnitude_balance(p_u, p_v, d_out, d_in, backend="numpy")
     eta = bal.eta
     assert eta == pytest.approx(np.sqrt(np.linalg.norm(v_hat) / np.linalg.norm(u_hat)))
 
@@ -147,7 +150,7 @@ def test_scn_scale_balancing():
     # and its binary row is +1 (sign(0) = +1, A-11).
     u_dead = u_hat.copy()
     u_dead[3] = 0.0
-    bal_dead = magnitude_balance(d_out[:, None] * u_dead, p_v, d_out, d_in)
+    bal_dead = magnitude_balance(d_out[:, None] * u_dead, p_v, d_out, d_in, backend="numpy")
     assert np.isfinite(bal_dead.s1).all()
     assert bal_dead.s1[3] == pytest.approx(DEFAULT_SCALE_FLOOR)
     assert np.all(bal_dead.Ub[3] == 1)
@@ -160,7 +163,7 @@ def test_magnitude_balance_rejects_degenerate():
     """An all-zero factor set has no equilibrium; fail closed."""
     zeros = np.zeros((4, 2))
     with pytest.raises(ValueError):
-        magnitude_balance(zeros, zeros, np.ones(4), np.ones(4))
+        magnitude_balance(zeros, zeros, np.ones(4), np.ones(4), backend="numpy")
 
 
 def test_scn_warm_start_svd_flaky_fallback_and_nan_guard():
@@ -172,7 +175,7 @@ def test_scn_warm_start_svd_flaky_fallback_and_nan_guard():
     # extreme dynamic range but finite: the gesdd-flaky species
     scales = 10.0 ** gen.uniform(-12, 12, size=(64, 1))
     w = (gen.standard_normal((64, 32)) * scales).astype(np.float64)
-    u0, v0 = _warm_start(np.ascontiguousarray(w), 8, np.dtype("float64"))
+    u0, v0 = _warm_start(_NP, np.ascontiguousarray(w), 8, np.dtype("float64"))
     assert np.all(np.isfinite(u0)) and np.all(np.isfinite(v0))
     assert u0.shape == (64, 8) and v0.shape == (32, 8)
     # warm start spans the dominant subspace: rank-8 recon of a rank-8
@@ -186,7 +189,7 @@ def test_scn_warm_start_svd_flaky_fallback_and_nan_guard():
     w_bad = w.copy()
     w_bad[3, 5] = np.nan
     with pytest.raises(ValueError, match="non-finite"):
-        _warm_start(np.ascontiguousarray(w_bad), 8, np.dtype("float64"))
+        _warm_start(_NP, np.ascontiguousarray(w_bad), 8, np.dtype("float64"))
 
 
 def test_rho_end_override_is_explicit_and_fail_closed(monkeypatch):
@@ -196,7 +199,7 @@ def test_rho_end_override_is_explicit_and_fail_closed(monkeypatch):
     both directions need pinning: unset must leave cfg.rho_end untouched, and a
     malformed value must raise rather than silently reverting to the default.
     """
-    cfg = PTQConfig(rank=4, rho_end=1e-1)
+    cfg = PTQConfig(rank=4, rho_end=1e-1, solver_backend="numpy")
 
     monkeypatch.delenv("QK_RHO_END", raising=False)
     assert _rho_end(cfg) == 1e-1

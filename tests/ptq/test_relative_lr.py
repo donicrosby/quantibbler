@@ -54,7 +54,7 @@ def test_scn_ste_relative_lr_preserves_scale_classes():
     x_b = torch.randn(8, 4, 16, generator=gen, dtype=torch.float64)
     y_b = torch.randn(8, 4, 12, generator=gen, dtype=torch.float64)
 
-    cfg = PTQConfig(rank=6, stage_latent=StageHyper(1e0, 4, 1))  # brutal lr
+    cfg = PTQConfig(solver_backend="numpy", rank=6, stage_latent=StageHyper(1e0, 4, 1))  # brutal lr
     _tune_latent_ste(linear, {"": fac}, x_b, y_b, cfg, 4)
 
     post_s1_med = float(fac.s1.detach().abs().median())

@@ -136,7 +136,7 @@ def test_scn_vacuous_teacher_carries_both_norms_and_invalidates_fidelity():
     """Broken teacher (grad 0 / residual 0) and detached student (grad 0 / residual > 0)."""
     d = 8
     x_b = torch.cat(_calib(d), dim=0)
-    cfg = PTQConfig(rank=4, stage_pre=StageHyper(1e-4, 4, 2))
+    cfg = PTQConfig(solver_backend="numpy", rank=4, stage_pre=StageHyper(1e-4, 4, 2))
 
     # (1) The shipped shape: the target IS the block's own current output.
     block = _TwoLinearBlock(d, seed=0)
@@ -218,7 +218,7 @@ def test_scn_diagnostic_run_records_the_vacuous_event_and_continues():
     result = reconstruct_block(
         block,
         _calib(8, seed=9),
-        PTQConfig(rank=4, stage_pre=StageHyper(1e-4, 4, 1)),
+        PTQConfig(solver_backend="numpy", rank=4, stage_pre=StageHyper(1e-4, 4, 1)),
         recorder=_recorder(sink),
     )
     assert result is not None
@@ -248,7 +248,7 @@ def test_scn_tunefp_fires_per_target_cycle():
     reconstruct_block(
         block,
         _calib(8, seed=17),
-        PTQConfig(rank=4, stage_pre=StageHyper(1e-3, 4, 2)),
+        PTQConfig(solver_backend="numpy", rank=4, stage_pre=StageHyper(1e-3, 4, 2)),
         recorder=_recorder(sink),
     )
     names = [event for event, _ in sink]
@@ -326,7 +326,7 @@ def test_scn_teacher_is_pinned_to_pristine_weights_with_provenance(tmp_path):
     reconstruct_model(
         model,
         batches,
-        PTQConfig(rank=4, stage_pre=StageHyper(1e-4, 4, 0)),
+        PTQConfig(solver_backend="numpy", rank=4, stage_pre=StageHyper(1e-4, 4, 0)),
         recorder=_recorder(sink),
         checkpoint_dir=tmp_path / "ck",
     )
@@ -366,7 +366,7 @@ def test_scn_tunefp_effect_is_recorded_honestly():
         block,
         x_b,
         y_b,
-        PTQConfig(rank=4, stage_pre=StageHyper(1e-3, 4, 8)),
+        PTQConfig(solver_backend="numpy", rank=4, stage_pre=StageHyper(1e-3, 4, 8)),
         4,
         label="b",
         tune_names=["fc2"],

@@ -25,7 +25,7 @@ def test_scn_divergence_gate_healthy_passes():
     """In-band ratio: no raise; the helper returns the measured ratio."""
     U, V, s1, s2 = _factors(0)
     W = (s1[:, None] * (np.sign(U) @ np.sign(V).T)) * s2[None, :]
-    cfg = PTQConfig(rank=8)
+    cfg = PTQConfig(solver_backend="numpy", rank=8)
     ratio = check_layer_magnitude("layers.0.inner.mlp.down_proj", U, V, s1, s2, W, cfg)
     assert ratio == pytest.approx(1.0, rel=1e-12)
 
@@ -35,7 +35,7 @@ def test_scn_divergence_gate_diverged_aborts():
     U, V, s1, s2 = _factors(1)
     W = (s1[:, None] * (np.sign(U) @ np.sign(V).T)) * s2[None, :]
     W_small = W / 1e5  # reconstructed >> fp target: the incident species
-    cfg = PTQConfig(rank=8)  # default band [1e-3, 1e3]
+    cfg = PTQConfig(solver_backend="numpy", rank=8)  # default band [1e-3, 1e3]
     with pytest.raises(Exception) as ei:
         check_layer_magnitude("layers.0.inner.mlp.down_proj", U, V, s1, s2, W_small, cfg)
     msg = str(ei.value)
@@ -53,7 +53,7 @@ def test_scn_divergence_gate_honest_range_passes():
     """
     U, V, s1, s2 = _factors(4)
     W = (s1[:, None] * (np.sign(U) @ np.sign(V).T)) * s2[None, :]
-    cfg = PTQConfig(rank=8)
+    cfg = PTQConfig(solver_backend="numpy", rank=8)
     for honest in (0.0006, 0.00755, 0.06, 1.0, 6.3):
         ratio = check_layer_magnitude("layers.0.inner.mlp.up_proj", U, V, s1, s2, W / honest, cfg)
         assert ratio == pytest.approx(honest, rel=1e-9)
@@ -65,7 +65,7 @@ def test_scn_divergence_gate_nan_rejected():
     s1_bad = s1.copy()
     s1_bad[3] = np.nan
     W = np.ones((32, 64))
-    cfg = PTQConfig(rank=8)
+    cfg = PTQConfig(solver_backend="numpy", rank=8)
     with pytest.raises(Exception) as ei:
         check_layer_magnitude("layers.0.inner.mlp.down_proj", U, V, s1_bad, s2, W, cfg)
     assert "layers.0.inner.mlp.down_proj" in str(ei.value)
@@ -75,6 +75,6 @@ def test_scn_divergence_gate_band_respected_custom_factor():
     """A custom band factor widens/narrows the acceptance region."""
     U, V, s1, s2 = _factors(3)
     W = (s1[:, None] * (np.sign(U) @ np.sign(V).T)) * s2[None, :]
-    cfg = PTQConfig(rank=8, divergence_band_factor=100.0)
+    cfg = PTQConfig(solver_backend="numpy", rank=8, divergence_band_factor=100.0)
     ratio = check_layer_magnitude("layers.0.inner.o_proj", U, V, s1, s2, W / 50.0, cfg)
     assert ratio == pytest.approx(50.0, rel=1e-12)

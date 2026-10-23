@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .config import PTQConfig
+from .solver_backend import get_backend
 
 __all__ = [
     "ADMMResult",
@@ -107,11 +108,7 @@ class BalanceResult:
     eta: float
 
 
-def _np_dtype(compute_dtype: str) -> np.dtype:
-    return np.dtype(compute_dtype)
-
-
-def _cholesky_factor(h: np.ndarray, trace: ADMMTrace | None = None) -> np.ndarray:
+def _cholesky_factor(xp, h: np.ndarray, trace: ADMMTrace | None = None) -> np.ndarray:
     """Stabilized Cholesky factorization of an SPD system matrix.
 
     Attempts ``numpy.linalg.cholesky``; on a non-positive-definite system
@@ -120,47 +117,47 @@ def _cholesky_factor(h: np.ndarray, trace: ADMMTrace | None = None) -> np.ndarra
     path is counted in ``trace.n_jitter``; every successful first-try
     factorization counts in ``trace.n_cholesky``.
     """
-    attempt = h.copy()
-    diag_scale = max(float(np.abs(np.diag(h)).max()), 1.0)
+    attempt = xp.clone(h)
+    diag_scale = max(float(xp.abs(xp.diag(h)).max()), 1.0)
     jitter = _JITTER * diag_scale
     for k in range(60):
         try:
-            factor = np.linalg.cholesky(attempt)
-            if np.all(np.isfinite(factor)):
+            factor = xp.linalg.cholesky(attempt)
+            if xp.all(xp.isfinite(factor)):
                 if k > 0 and trace is not None:
                     trace.n_jitter += 1
                 elif k == 0 and trace is not None:
                     trace.n_cholesky += 1
                 return factor
-        except np.linalg.LinAlgError:
+        except xp.linalg.LinAlgError:
             pass
         # Stabilization: relative jitter on the diagonal shift, escalated
         # geometrically so genuinely indefinite systems recover deterministically.
-        attempt = h + jitter * np.eye(h.shape[0])
+        attempt = h + jitter * xp.eye(h.shape[0])
         jitter *= 2.0
-    raise np.linalg.LinAlgError("stabilized Cholesky failed to produce an SPD factor")
+    raise xp.linalg.LinAlgError("stabilized Cholesky failed to produce an SPD factor")
 
 
-def _cholesky_solve(h: np.ndarray, b: np.ndarray, trace: ADMMTrace | None = None):
+def _cholesky_solve(xp, h: np.ndarray, b: np.ndarray, trace: ADMMTrace | None = None):
     """Solve ``H X = B`` via stabilized Cholesky.
 
     Returns ``(solution, jittered)`` where ``jittered`` marks that the
     fallback engaged (exposed for tests; production callers pass a trace).
     """
-    factor = _cholesky_factor(h, trace)
-    y = np.linalg.solve(factor, b)  # forward substitution equivalent
-    x = np.linalg.solve(factor.T, y)  # back substitution equivalent
+    factor = _cholesky_factor(xp, h, trace)
+    y = xp.linalg.solve(factor, b)  # forward substitution equivalent
+    x = xp.linalg.solve(factor.T, y)  # back substitution equivalent
     jittered = trace is not None and trace.n_jitter > 0
     # A direct jittered flag for the deterministic test path: recompute.
     try:
-        np.linalg.cholesky(h)
+        xp.linalg.cholesky(h)
         jittered = False
-    except np.linalg.LinAlgError:
+    except xp.linalg.LinAlgError:
         jittered = True
     return x, jittered
 
 
-def _top_rank1(mag: np.ndarray, *, steps: int = 100, tol: float = 1e-14):
+def _top_rank1(xp, mag: np.ndarray, *, steps: int = 100, tol: float = 1e-14):
     """Top singular triplet of a NON-NEGATIVE matrix, deterministically.
 
     ``mag`` is ``|P|``, so it is entrywise non-negative and the Perron-
@@ -170,7 +167,7 @@ def _top_rank1(mag: np.ndarray, *, steps: int = 100, tol: float = 1e-14):
     is recovered in a single step. Returns ``(sigma, u, v)`` with unit ``u``
     and ``v``; an all-zero input returns ``(0.0, None, None)``.
 
-    An explicit top-rank-1 solve rather than a full ``np.linalg.svd``: the
+    An explicit top-rank-1 solve rather than a full ``xp.linalg.svd``: the
     proxy is called twice per ADMM iteration (up to 800 times per layer), so a
     dense SVD of the ``d_out x r`` latents would dominate the whole solve.
     Same optimum, O(d_out * r) per step.
@@ -185,20 +182,20 @@ def _top_rank1(mag: np.ndarray, *, steps: int = 100, tol: float = 1e-14):
     well separated and one to a few steps reach machine precision.
     """
     n = mag.shape[1]
-    v = np.full(n, 1.0 / np.sqrt(n), dtype=np.float64)
+    v = xp.full(n, 1.0 / xp.sqrt(n), dtype=xp.dtype("float64"))
     u = mag @ v
-    sigma = float(np.linalg.norm(u))
-    if not np.isfinite(sigma) or sigma <= 0.0:
+    sigma = float(xp.linalg.norm(u))
+    if not xp.isfinite(sigma) or sigma <= 0.0:
         return 0.0, None, None
     u = u / sigma
     for _ in range(steps):
         v_new = mag.T @ u
-        nv = float(np.linalg.norm(v_new))
+        nv = float(xp.linalg.norm(v_new))
         if nv <= 0.0:
             break
         v_new = v_new / nv
         u_new = mag @ v_new
-        nu = float(np.linalg.norm(u_new))
+        nu = float(xp.linalg.norm(u_new))
         if nu <= 0.0:
             break
         u_new = u_new / nu
@@ -209,7 +206,7 @@ def _top_rank1(mag: np.ndarray, *, steps: int = 100, tol: float = 1e-14):
     return sigma, u, v
 
 
-def svid_proxy(z: np.ndarray) -> np.ndarray:
+def svid_proxy(xp, z: np.ndarray) -> np.ndarray:
     """SVID operator (Eq. 6): the OPTIMAL two-sided rank-1 that preserves the
     sign structure.
 
@@ -236,31 +233,31 @@ def svid_proxy(z: np.ndarray) -> np.ndarray:
     kernels.sign_estimate), and isolated exact zeros of the rank-1 fit get the
     same floor so the sign convention holds on every entry.
     """
-    zf = np.asarray(z, dtype=np.float64)
-    signs = np.sign(zf)
+    zf = xp.asarray(z, dtype=xp.dtype("float64"))
+    signs = xp.sign(zf)
     signs[signs == 0.0] = 1.0  # sign(0) = +1 (A-11 convention)
 
-    sigma, u1, v1 = _top_rank1(np.abs(zf))
+    sigma, u1, v1 = _top_rank1(xp, xp.abs(zf))
     if u1 is None:
-        out = np.zeros_like(zf)
+        out = xp.zeros_like(zf)
     else:
-        root = np.sqrt(sigma)
-        out = signs * np.outer(u1 * root, v1 * root)
+        root = xp.sqrt(sigma)
+        out = signs * xp.outer(u1 * root, v1 * root)
 
     # No output value is ever zero (sign(0) = +1 must hold on every entry).
-    out = np.where(out == 0.0, DEFAULT_SCALE_FLOOR, out)
+    out = xp.where(out == 0.0, DEFAULT_SCALE_FLOOR, out)
 
     # Dead columns (all-zero input) would be exactly zero, which carries no
     # sign; clamp them to the positive floor so sign(0) = +1 holds and no
     # output value is ever zero (A-11, matching kernels.sign_estimate).
-    col_norm = np.linalg.norm(zf, axis=0, keepdims=True)
+    col_norm = xp.linalg.norm(zf, axis=0, keepdims=True)
     dead = (col_norm == 0.0).ravel()
-    if np.any(dead):
+    if xp.any(dead):
         out[:, dead] = DEFAULT_SCALE_FLOOR
     return out
 
 
-def _warm_start(w: np.ndarray, r: int, dt: np.dtype) -> tuple[np.ndarray, np.ndarray]:
+def _warm_start(xp, w: np.ndarray, r: int, dt: np.dtype) -> tuple[np.ndarray, np.ndarray]:
     """Truncated rank-r SVD warm start (A-6): U = U_r, V = V_r (economic).
 
     ``gesdd`` (numpy's default SVD driver) is known to declare
@@ -271,40 +268,40 @@ def _warm_start(w: np.ndarray, r: int, dt: np.dtype) -> tuple[np.ndarray, np.nda
     the flaky case. A target with non-finite entries is a pipeline bug,
     not an SVD problem: it fails here with a loud, diagnosable error.
     """
-    if not np.all(np.isfinite(w)):
-        bad = int(np.count_nonzero(~np.isfinite(w)))
+    if not xp.all(xp.isfinite(w)):
+        bad = int(xp.count_nonzero(~xp.isfinite(w)))
         raise ValueError(
             f"warm start: target has {bad} non-finite entries "
-            f"(max|w|={np.nanmax(np.abs(w)):.3e}) — TuneFP/calibration "
+            f"(max|w|={xp.nanmax(xp.abs(w)):.3e}) — TuneFP/calibration "
             "produced NaN/Inf upstream"
         )
     try:
-        u_mat, s_vec, vt_mat = np.linalg.svd(w, full_matrices=False)
-    except np.linalg.LinAlgError:
+        u_mat, s_vec, vt_mat = xp.linalg.svd(w, full_matrices=False)
+    except xp.linalg.LinAlgError:
         try:
-            u_mat, s_vec, vt_mat = np.linalg.svd(w.T, full_matrices=False)
+            u_mat, s_vec, vt_mat = xp.linalg.svd(w.T, full_matrices=False)
             vt_mat, s_vec, u_mat = (
                 u_mat.T,
                 s_vec,
                 vt_mat.T,
             )
-        except np.linalg.LinAlgError:
+        except xp.linalg.LinAlgError:
             # symmetric eig on the Gram matrix: slower, unconditionally
             # stable for finite inputs.
-            s2_vec, v_mat = np.linalg.eigh(w.T @ w)
-            order = np.argsort(s2_vec)[::-1][:r]
-            s_vec = np.sqrt(np.maximum(s2_vec[order], 0.0))
+            s2_vec, v_mat = xp.linalg.eigh(w.T @ w)
+            order = xp.argsort(s2_vec)[::-1][:r]
+            s_vec = xp.sqrt(xp.maximum(s2_vec[order], 0.0))
             v0 = v_mat[:, order]
             u0 = w @ v0
-            nrm = np.linalg.norm(u0, axis=0, keepdims=True)
-            u0 = u0 / np.maximum(nrm, 1e-300)
+            nrm = xp.linalg.norm(u0, axis=0, keepdims=True)
+            u0 = u0 / xp.maximum(nrm, 1e-300)
             return (
-                np.ascontiguousarray(u0 * s_vec[None, :], dtype=dt),
-                np.ascontiguousarray(v0 * s_vec[None, :], dtype=dt),
+                xp.ascontiguousarray(u0 * s_vec[None, :], dtype=dt),
+                xp.ascontiguousarray(v0 * s_vec[None, :], dtype=dt),
             )
-    u0 = u_mat[:, :r] * np.sqrt(s_vec[:r])
-    v0 = vt_mat[:r].T * np.sqrt(s_vec[:r])
-    return np.ascontiguousarray(u0, dtype=dt), np.ascontiguousarray(v0, dtype=dt)
+    u0 = u_mat[:, :r] * xp.sqrt(s_vec[:r])
+    v0 = vt_mat[:r].T * xp.sqrt(s_vec[:r])
+    return xp.ascontiguousarray(u0, dtype=dt), xp.ascontiguousarray(v0, dtype=dt)
 
 
 def _rho_end(cfg: PTQConfig) -> float:
@@ -352,8 +349,9 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
         :class:`ADMMResult` with the final continuous factors, consensus
         proxies, stopping state, and per-iteration trace.
     """
-    dt = _np_dtype(cfg.compute_dtype)
-    w = np.asarray(w_tilde, dtype=dt)
+    xp = get_backend(cfg.solver_backend)
+    dt = xp.dtype(cfg.compute_dtype)
+    w = xp.asarray(w_tilde, dtype=dt)
     if w.ndim != 2:
         raise ValueError(f"preconditioned target must be 2-D, got shape {w.shape}")
     dout, din = w.shape
@@ -373,29 +371,29 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
     # because the exit rescale splits the factor across the pair (see the
     # sqrt below); applying target_scale to each factor overshoots by
     # target_scale. Fixture-scale targets (||W~||~O(1)) are no-ops.
-    target_scale = float(np.linalg.norm(w))
-    if not (np.isfinite(target_scale) and target_scale > 0.0):
+    target_scale = float(xp.linalg.norm(w))
+    if not (xp.isfinite(target_scale) and target_scale > 0.0):
         target_scale = 1.0  # degenerate all-zero target: keep legacy behavior
     if target_scale != 1.0:
         w = w / target_scale
 
     trace = ADMMTrace()
-    u = np.zeros((dout, r), dtype=dt)
-    v = np.zeros((din, r), dtype=dt)
-    u, v = _warm_start(w, r, dt)
-    zu = svid_proxy(u).astype(dt)
-    zv = svid_proxy(v).astype(dt)
-    lu = np.zeros((dout, r), dtype=dt)
-    lv = np.zeros((din, r), dtype=dt)
-    eye_r = np.eye(r, dtype=dt)
+    u = xp.zeros((dout, r), dtype=dt)
+    v = xp.zeros((din, r), dtype=dt)
+    u, v = _warm_start(xp, w, r, dt)
+    zu = xp.astype(svid_proxy(xp, u), dt)
+    zv = xp.astype(svid_proxy(xp, v), dt)
+    lu = xp.zeros((dout, r), dtype=dt)
+    lv = xp.zeros((din, r), dtype=dt)
+    eye_r = xp.eye(r, dtype=dt)
 
     def residual(u_cur, v_cur, zu_cur, zv_cur) -> float:
-        du = float(np.linalg.norm(u_cur - zu_cur, "fro"))
-        dv = float(np.linalg.norm(v_cur - zv_cur, "fro"))
-        return max(du, dv) / (1.0 + float(np.linalg.norm(u_cur, "fro")))
+        du = float(xp.linalg.norm(u_cur - zu_cur, "fro"))
+        dv = float(xp.linalg.norm(v_cur - zv_cur, "fro"))
+        return max(du, dv) / (1.0 + float(xp.linalg.norm(u_cur, "fro")))
 
     converged = False
-    prev_res = np.inf
+    prev_res = xp.inf
     denom = max(cfg.admm_max_iter - 1, 1)
     rho_end = _rho_end(cfg)
     for k in range(cfg.admm_max_iter):
@@ -408,20 +406,20 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
         hu = v.T @ v + shift * eye_r
         rhs_u = v.T @ w.T + rho * (zu - lu).T
         # min-eig check (documented SPD probe; cheap at r x r)
-        trace.min_eigs.append(float(np.linalg.eigvalsh(hu).min()))
-        u = _cholesky_solve(hu, rhs_u, trace)[0].T
+        trace.min_eigs.append(float(xp.linalg.eigvalsh(hu).min()))
+        u = _cholesky_solve(xp, hu, rhs_u, trace)[0].T
         hv = u.T @ u + shift * eye_r
         rhs_v = u.T @ w + rho * (zv - lv).T
-        trace.min_eigs.append(float(np.linalg.eigvalsh(hv).min()))
-        v = _cholesky_solve(hv, rhs_v, trace)[0].T
+        trace.min_eigs.append(float(xp.linalg.eigvalsh(hv).min()))
+        v = _cholesky_solve(xp, hv, rhs_v, trace)[0].T
 
         # Proxy update, Eq. 6: SVID of the consensus variable.
         pu = u + lu
         pv = v + lv
-        zu_new = svid_proxy(pu).astype(dt)
-        zv_new = svid_proxy(pv).astype(dt)
+        zu_new = xp.astype(svid_proxy(xp, pu), dt)
+        zv_new = xp.astype(svid_proxy(xp, pv), dt)
         trace.svid_sign_preserved.append(
-            bool(np.array_equal(np.sign(zu_new), np.where(pu == 0, 1, np.sign(pu))))
+            bool(xp.array_equal(xp.sign(zu_new), xp.where(pu == 0, 1, xp.sign(pu))))
         )
         zu, zv = zu_new, zv_new
 
@@ -444,7 +442,7 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
     # by target_scale scales the reconstructible matrix by target_scale^2 and
     # overshoots by a full factor of ||W~||_F. Split it across the pair so the
     # product carries it once -- the equivariance the entry comment claims.
-    factor_scale = float(np.sqrt(target_scale))
+    factor_scale = float(xp.sqrt(target_scale))
     return ADMMResult(
         U=u * factor_scale,
         V=v * factor_scale,
@@ -464,6 +462,7 @@ def magnitude_balance(
     *,
     scale_floor: float = DEFAULT_SCALE_FLOOR,
     target: np.ndarray | None = None,
+    backend: str | None = None,
 ) -> BalanceResult:
     """Latent magnitude balancing ([NQ] Step 2-3, Eqs. 7-9).
 
@@ -484,36 +483,37 @@ def magnitude_balance(
     (informed implementation choice; Phase 3 recalibrates the scales
     afterwards). Without ``target`` the Eq. 7 scale is kept as-is.
     """
-    du = np.asarray(d_out_tilde, dtype=np.float64)
-    di = np.asarray(d_in_tilde, dtype=np.float64)
-    pu = np.asarray(p_u, dtype=np.float64)
-    pv = np.asarray(p_v, dtype=np.float64)
+    xp = get_backend(backend)
+    du = xp.asarray(d_out_tilde, dtype=xp.dtype("float64"))
+    di = xp.asarray(d_in_tilde, dtype=xp.dtype("float64"))
+    pu = xp.asarray(p_u, dtype=xp.dtype("float64"))
+    pv = xp.asarray(p_v, dtype=xp.dtype("float64"))
     if pu.shape[0] != du.shape[0] or pv.shape[0] != di.shape[0]:
         raise ValueError("proxy rows must match preconditioner lengths")
     if pu.shape[1] != pv.shape[1]:
         raise ValueError("proxy ranks disagree")
-    if np.any(du <= 0.0) or np.any(di <= 0.0):
+    if xp.any(du <= 0.0) or xp.any(di <= 0.0):
         raise ValueError("preconditioner entries must be positive")
 
     u_hat = pu / du[:, None]
     v_hat = pv / di[:, None]
-    n_u = float(np.linalg.norm(u_hat, "fro"))
-    n_v = float(np.linalg.norm(v_hat, "fro"))
+    n_u = float(xp.linalg.norm(u_hat, "fro"))
+    n_v = float(xp.linalg.norm(v_hat, "fro"))
     if n_u <= 0.0 or n_v <= 0.0:
         raise ValueError("magnitude balancing is undefined for an all-zero factor")
 
-    eta = float(np.sqrt(n_v / n_u))
+    eta = float(xp.sqrt(n_v / n_u))
     u = eta * u_hat
     v = v_hat / eta
 
-    ub = np.where(u >= 0.0, np.int8(1), np.int8(-1)).astype(np.int8)
-    vb = np.where(v >= 0.0, np.int8(1), np.int8(-1)).astype(np.int8)
+    ub = xp.where(u >= 0.0, xp.scalar(1, xp.dtype("int8")), xp.scalar(-1, xp.dtype("int8")))
+    vb = xp.where(v >= 0.0, xp.scalar(1, xp.dtype("int8")), xp.scalar(-1, xp.dtype("int8")))
 
-    s1 = np.mean(np.abs(u), axis=1)
-    s2 = np.mean(np.abs(v), axis=1)
+    s1 = xp.mean(xp.abs(u), axis=1)
+    s2 = xp.mean(xp.abs(v), axis=1)
 
     if target is not None:
-        w = np.asarray(target, dtype=np.float64)
+        w = xp.asarray(target, dtype=xp.dtype("float64"))
         if w.shape != (ub.shape[0], vb.shape[0]):
             raise ValueError("target must have shape (dout, din)")
         # Weighted global refit: the balanced product already carries the
@@ -523,14 +523,16 @@ def magnitude_balance(
         # magnitude twice and shrink the product orders of magnitude below
         # W (observed as a ~0.99 relative reconstruction error on an exact
         # rank-r target; crystallized in design.md implementation notes).
-        b = (s1[:, None] * ub.astype(np.float64)) @ (s2[:, None] * vb.astype(np.float64)).T
+        b = (s1[:, None] * xp.astype(ub, xp.dtype("float64"))) @ (
+            s2[:, None] * xp.astype(vb, xp.dtype("float64"))
+        ).T
         denom = float((b * b).sum())
         if denom > 0.0:
             alpha = float((w * b).sum()) / denom
-            if np.isfinite(alpha) and alpha > 0.0:
+            if xp.isfinite(alpha) and alpha > 0.0:
                 s1 = s1 * alpha
 
     # Dead-channel guard (A-11): clamp floors, never NaN or 0.
-    s1 = np.maximum(s1, scale_floor)
-    s2 = np.maximum(s2, scale_floor)
+    s1 = xp.maximum(s1, scale_floor)
+    s2 = xp.maximum(s2, scale_floor)
     return BalanceResult(U=u, V=v, Ub=ub, Vb=vb, s1=s1, s2=s2, eta=eta)

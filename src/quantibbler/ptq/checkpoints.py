@@ -72,9 +72,20 @@ def config_fingerprint(cfg) -> str:
     return hashlib.sha256(blob).hexdigest()
 
 
+# Provenance fields recorded ALONGSIDE the hash. The hash already covers them
+# (``config_fingerprint`` hashes ``dataclasses.asdict(cfg)``), but a bare digest
+# cannot answer "which backend and dtype produced these checkpoints?" without
+# re-deriving it. The scenario that matters: a run resumed on a different
+# solver backend or dtype must be identifiable from the artifact alone.
+_FINGERPRINT_PROVENANCE = ("solver_backend", "compute_dtype", "solver", "rank", "factor_mode")
+
+
 def write_fingerprint(ckpt_dir: Path, cfg) -> None:
+    record = {"fingerprint": config_fingerprint(cfg)}
+    for name in _FINGERPRINT_PROVENANCE:
+        record[name] = getattr(cfg, name, "unknown")
     (ckpt_dir / _FINGERPRINT_NAME).write_text(
-        json.dumps({"fingerprint": config_fingerprint(cfg)}, indent=2), encoding="utf-8"
+        json.dumps(record, indent=2, sort_keys=True), encoding="utf-8"
     )
 
 

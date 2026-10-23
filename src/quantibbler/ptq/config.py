@@ -22,6 +22,7 @@ from ..qk_report import COLLAPSE_LINE
 __all__ = ["PTQConfig", "StageHyper", "PrefixProbeAbort"]
 
 _COMPUTE_DTYPES = ("float64", "float32")
+_SOLVER_BACKENDS = ("torch", "numpy")
 _SCALE_DTYPES = ("float16", "float32")
 # Root-cause ablation knobs (change qk-root-cause-ablation): each isolates ONE
 # constraint so a failing run says which stage lies. Unknown values are
@@ -152,6 +153,7 @@ class PTQConfig:
 
     rank: int = 8
     compute_dtype: str = "float64"
+    solver_backend: str = "torch"
     scale_dtype: str = "float32"
     seed: int = 0
     temperature: float = 1.0
@@ -220,6 +222,13 @@ class PTQConfig:
             raise ValueError(
                 f"compute_dtype must be one of {_COMPUTE_DTYPES} (float32 is opt-in "
                 f"only, never a default), got {self.compute_dtype!r}"
+            )
+        if self.solver_backend not in _SOLVER_BACKENDS:
+            raise ValueError(
+                f"solver_backend must be one of {_SOLVER_BACKENDS}, got "
+                f"{self.solver_backend!r}. Production execution is the accelerated "
+                f"backend; 'numpy' is the parity oracle and is reachable only by "
+                f"asking for it by name."
             )
         if self.scale_dtype not in _SCALE_DTYPES:
             raise ValueError(

@@ -135,7 +135,7 @@ def test_scn_ste_records_its_own_objective_effect():
     # starting at its own optimum would make the effect assertion vacuous.
     y_b = linear(x_b).detach() + torch.randn(8, 4, 12, generator=gen, dtype=torch.float64) * 0.5
 
-    cfg = PTQConfig(rank=6, stage_latent=StageHyper(1e-2, 4, 4))
+    cfg = PTQConfig(solver_backend="numpy", rank=6, stage_latent=StageHyper(1e-2, 4, 4))
     stats = _tune_latent_ste(linear, {"": fac}, x_b, y_b, cfg, 4, steps=256, label="probe")
     rec = stats["per_linear"][""]
     assert rec["gradient_norm"] > 0.0, (
@@ -166,7 +166,7 @@ def test_scn_paper_ste_crosses_a_near_zero_latent_and_records_counts():
     x_b = torch.randn(8, 4, 16, generator=gen, dtype=torch.float64)
     y_b = torch.randn(8, 4, 12, generator=gen, dtype=torch.float64)
 
-    cfg = PTQConfig(rank=6, stage_latent=StageHyper(1e-3, 4, 4))
+    cfg = PTQConfig(solver_backend="numpy", rank=6, stage_latent=StageHyper(1e-3, 4, 4))
     stats = _tune_latent_ste(linear, {"": fac}, x_b, y_b, cfg, 4, steps=8, label="probe")
     rec = stats["per_linear"][""]
     assert rec["steps"] == 8
@@ -186,7 +186,7 @@ def test_scn_zero_flip_completion_is_never_silent():
     """Far-from-zero latents: the stage declares scale-only, or the gate fails."""
     block = _SevenLinearBlock(seed=31)
     sink: list = []
-    cfg = PTQConfig(rank=3, stage_latent=StageHyper(1e-8, 4, 8))
+    cfg = PTQConfig(solver_backend="numpy", rank=3, stage_latent=StageHyper(1e-8, 4, 8))
     reconstruct_block(block, _calib(8, seed=31), cfg, recorder=_recorder(sink))
     ste = [info for event, info in sink if event == "ste"][0]
     per = ste["per_linear"]
@@ -221,7 +221,7 @@ def test_scn_refinement_covers_every_factorized_linear_with_full_budget():
     """
     block = _SevenLinearBlock(seed=41)
     sink: list = []
-    cfg = PTQConfig(rank=3, stage_latent=StageHyper(1e-3, 4, 8))
+    cfg = PTQConfig(solver_backend="numpy", rank=3, stage_latent=StageHyper(1e-3, 4, 8))
     reconstruct_block(block, _calib(8, seed=41), cfg, recorder=_recorder(sink))
     ste = [info for event, info in sink if event == "ste"][0]
 
@@ -266,7 +266,7 @@ def test_full_budget_is_per_linear_not_a_pooled_split():
     """
     block = _SevenLinearBlock(seed=47)
     sink: list = []
-    cfg = PTQConfig(rank=3, stage_latent=StageHyper(1e-3, 4, 1))
+    cfg = PTQConfig(solver_backend="numpy", rank=3, stage_latent=StageHyper(1e-3, 4, 1))
     reconstruct_block(block, _calib(8, seed=47), cfg, recorder=_recorder(sink))
     ste = [info for event, info in sink if event == "ste"][0]
     assert "allocation" not in ste
@@ -287,6 +287,7 @@ def test_full_budget_is_per_linear_not_a_pooled_split():
 
 def _faithful_cfg(**kwargs) -> PTQConfig:
     return PTQConfig(
+        solver_backend="numpy",
         rank=3,
         stage_latent=StageHyper(1e-8, 4, 8),
         paper_faithful=True,
@@ -341,12 +342,17 @@ def test_scn_paper_faithful_disables_greedy_polish(monkeypatch):
     br.reconstruct_block(
         _SevenLinearBlock(seed=91),
         _calib(8, seed=91),
-        PTQConfig(rank=3, stage_latent=StageHyper(1e-8, 4, 8)),
+        PTQConfig(solver_backend="numpy", rank=3, stage_latent=StageHyper(1e-8, 4, 8)),
         recorder=_recorder(sink2),
     )
     assert calls == [1] * len(SEVEN), "the production path must polish every scoped linear"
     lb2 = [info for event, info in sink2 if event == "lb_admm"][0]
-    assert lb2["polish_rounds"] == PTQConfig().polish_rounds
+    assert (
+        lb2["polish_rounds"]
+        == PTQConfig(
+            solver_backend="numpy",
+        ).polish_rounds
+    )
 
 
 def test_scn_paper_faithful_records_measured_crossings_with_no_rescope():
@@ -382,6 +388,7 @@ def test_scn_paper_faithful_records_measured_crossings_with_no_rescope():
 def test_scn_flip_pass_accepts_only_on_the_block_objective():
     """Deterministic sweep, monotone objective, GQA k/v shape typechecks."""
     cfg = PTQConfig(
+        solver_backend="numpy",
         rank=3,
         stage_latent=StageHyper(1e-8, 4, 8),
         ste_flip_pass_budget=4,
@@ -412,6 +419,7 @@ def test_scn_flip_pass_accepts_only_on_the_block_objective():
 def test_scn_flip_pass_is_reproducible():
     """Same seed, same sweep -> identical flip sequence and acceptance."""
     cfg = PTQConfig(
+        solver_backend="numpy",
         rank=3,
         stage_latent=StageHyper(1e-8, 4, 8),
         ste_flip_pass_budget=3,
@@ -511,11 +519,21 @@ def test_the_divergence_gate_fires_on_a_band_the_live_block_cannot_meet():
     calib = _calib(8, seed=16)
 
     # Silence side: a generous band must not fire on an honest reconstruction.
-    generous = PTQConfig(rank=3, stage_latent=StageHyper(1e-3, 4, 1), divergence_band_factor=1e6)
+    generous = PTQConfig(
+        solver_backend="numpy",
+        rank=3,
+        stage_latent=StageHyper(1e-3, 4, 1),
+        divergence_band_factor=1e6,
+    )
     assert reconstruct_block(block, calib, generous, recorder=_recorder([])) is not None
 
     # Firing side: a rank-3 balanced reconstruction of this block cannot have
     # ||Wq||_F/||W||_F within 1e-4 of 1.0, so a band that tight must fire.
-    tight = PTQConfig(rank=3, stage_latent=StageHyper(1e-3, 4, 1), divergence_band_factor=1.0001)
+    tight = PTQConfig(
+        solver_backend="numpy",
+        rank=3,
+        stage_latent=StageHyper(1e-3, 4, 1),
+        divergence_band_factor=1.0001,
+    )
     with pytest.raises(QuantizationDivergenceError):
         reconstruct_block(block, calib, tight, recorder=_recorder([]))
