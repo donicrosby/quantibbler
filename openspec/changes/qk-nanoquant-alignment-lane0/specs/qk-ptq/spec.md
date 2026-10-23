@@ -125,6 +125,11 @@ The accumulation hooks SHALL gate on `torch.is_grad_enabled()` so each row is co
 - **WHEN** the fixture exercises an ungated accumulator or a non-reentrant checkpoint (both passes grad-enabled)
 - **THEN** the raw sums double relative to the uncheckpointed path and the fixture goes red, so the trap fails loudly instead of surviving as folklore
 
+#### Scenario: whole_head_checkpointed_trunk_fenced
+
+- **WHEN** the harness is asked to run the whole-batch head with checkpointed blocks — the combination whose `d_out_raw` moved ~0.8% while raw sums and rows stayed identical, executed by no shipped path
+- **THEN** it fails closed before any statistics pass, the error names the finding and its commit, and the configuration is not launchable until the divergence is root-caused
+
 #### Scenario: rehearsal_red_retired
 
 - **WHEN** any future Lane 0 rehearsal executes
