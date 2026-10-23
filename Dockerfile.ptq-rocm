@@ -49,7 +49,14 @@ ENV UV_PYTHON_PREFERENCE=only-system \
     MKL_NUM_THREADS=4 \
     QUANTIBBLER_KD_TMPDIR=/tmp/ptq
 
-RUN apt-get update && apt-get install -y --no-install-recommends libatomic1 libquadmath0 \
+# libatomic1 + libquadmath0 are AMD's documented prerequisites. libgomp1 is the
+# one the import actually demanded: the first build of this tag installed the
+# right wheel (torch 2.14.0+rocm10.1.0, rocm-sdk-device-gfx1151) and then died on
+# `libgomp.so.1: cannot open shared object file` -- the GCC OpenMP runtime the
+# ROCm torch links against, which the slim base does not carry. libnuma1 rides
+# along as its standard companion rather than costing another build cycle to name.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libatomic1 libquadmath0 libgomp1 libnuma1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work
