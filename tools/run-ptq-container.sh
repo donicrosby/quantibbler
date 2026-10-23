@@ -191,12 +191,18 @@ fi
 if [ "$PAPER_FAITHFUL" != "1" ]; then
   echo "note: PAPER_FAITHFUL unset -> gate-shaped stage budgets (TuneFP 1 step); the paper's method is PAPER_FAITHFUL=1" >&2
 fi
+if [ "$MODE" != "ptq" ]; then
+  echo "run-ptq-container: mode=$MODE device=cuda rehearsal_batches=$REHEARSAL_BATCHES" \
+    "chunk_tokens=$CHUNK_TOKENS wall_min=${WALL_MIN}m gpu=1 image=$IMAGE" \
+    "image_digest=$IMAGE_DIGEST out=$OUT" >&2
+else
 echo "run-ptq-container: model=$MODEL rank=$RANK solver=$SOLVER seq_len=$SEQ_LEN" \
   "tune_seq_len=${TUNE_SEQ_LEN:-unset} calibration_seqs=$CALIBRATION_SEQS" \
   "factor_mode=${FACTOR_MODE:-binary} ablation=${ABLATION:-none} layer_scope=${LAYER_SCOPE:-all}" \
   "paper_faithful=${PAPER_FAITHFUL:-0} ste_flip_pass_budget=${STE_FLIP_PASS_BUDGET:-0}" \
   "compute_dtype=${COMPUTE_DTYPE:-float64} gpu=${GPU:-0} image=$IMAGE image_digest=$IMAGE_DIGEST" \
   "eval_seqs=$EVAL_SEQS out=$OUT" >&2
+fi
 
 mkdir -p "$OUT" 2>/dev/null || true
 # Launch provenance, written into the artifact directory BEFORE the container
