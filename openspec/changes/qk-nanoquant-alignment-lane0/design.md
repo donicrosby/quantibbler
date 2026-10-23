@@ -33,6 +33,8 @@ Gate contract (acceptance, verbatim from the lane spec): "a quantize_report-styl
 
 ## Measurement protocol
 
+- **Execution vehicle (user directive, 2026-10-23):** the decisive fire runs ON the torch backend once `qk-solver-backend`'s port lands; the NumPy backend runs as the in-fire oracle on the stratified six-cell grid (one entry per family×depth cell), with escalation to all ten entries on any tolerance breach — per the oracle-grid rule owned by `qk-solver-backend`. "Existing lb_admm" holds in the algorithmic sense — the torch port preserves the algebra and is tolerance-class-gated before the decisive run, and the parity acceptance rides the same fire (one execution delivers verdict + parity; target ~5–10 min).
+
 - **Fixed probe set:** pinned constant in the harness; real production layers loaded from the offline HF cache (the `bench_admm_rank_sweep.py` loading pattern); one entry per (model, block idx, layer name); spans attention and MLP projections across ≥2 blocks. The exact list is pinned at task time (Open Question OQ-1) and is immutable per run — no CLI override.
 - **Both arms, per probed layer:** arm A builds W̃ from shipped `collect_stats` + `robust_diag`; arm B builds W̃_intended. Each feeds `lb_admm(w_tilde, cfg)` then `magnitude_balance(p_u, p_v, d_out_tilde, d_in_tilde, target=W)` with the SAME production-default `PTQConfig` and the arm's own diagonals.
 - **Stage boundary:** post-ADMM = after `lb_admm` + `magnitude_balance`; pre-polish = before `greedy_polish`. The lane never calls polish or TuneLatentSTE.

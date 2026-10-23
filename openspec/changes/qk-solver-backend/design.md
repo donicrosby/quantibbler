@@ -25,6 +25,14 @@ GPU acceleration lands PRIOR to the next production run — the user has ruled t
 - The numpy-to-torch default flip is decided by the sequencing mandate, contingent on parity acceptance — no longer an open decision.
 - The rank-1 init path (`np.linalg.eigh` and the power iteration) has sign/branch ambiguity that different backends may resolve differently on near-degenerate spectra. A re-oriented init is a different factorization with the same cos, so cos-based acceptance is correct — but the residual-trajectory column (required by the parity scenario) is what makes a re-oriented init visible in the data rather than inferred.
 
-## Landing efficiency
+## Landing efficiency (revised by user directive, 2026-10-23)
 
-Lane 0's probe-set run doubles as the parity acceptance carrier: the backend arm runs on the same fixed probe set in the same fire, so the GPU landing adds no new run — parity acceptance and the Lane 0 measurement share one execution.
+The user has reversed the numpy-first sequencing: the decisive Lane 0 fire happens ON the torch backend once the port lands, and the numpy arm runs as the in-fire reference — one execution delivers the Lane 0 verdict AND the parity acceptance (row-times, tolerance class, per-layer naming). Target wall time: ~5–10 min (~40 solves at GPU fp32 rates vs 90–150 s/solve on CPU). Lane 0's harness therefore does NOT fire before the torch port exists.
+
+## Oracle grid (default) and escalation (revised by user mandate, 2026-10-23)
+
+The user mandate makes NumPy oracle-only — it runs to produce reference numbers, never artifacts. The fire therefore carries **20 torch verdict solves + 6 oracle solves** (the stratified six: block 0 `q_proj`/`down_proj`, block 14 `q_proj` / block 15 `down_proj` on the deliberate asymmetry, block 26 `q_proj`/`down_proj` — one entry per family×depth cell, exact, no nearest-match). **Escalation clause:** if any of the six cells breaches the tolerance class, the oracle expands to all ten entries before the backend is accepted — a silent pass on an unchecked layer is not an option. The 40-solve full-grid variant is retired by the mandate, not by time pressure.
+
+## Fire sequencing (v2 complete, 2026-10-23)
+
+v2 finished at 16:42Z — nothing is in flight, and the earlier note sequencing the Lane 0 fire behind it is historical. The only things in front of the GPU fire are the port, the parity tests, and the harness GPU wiring. The `lb_admm.py` namespace swap that makes `SOLVER_BACKEND` live is no longer blocked by the v2 import graph; it lands with the harness wiring. The torch port (`solver_backend.py` + tests) is already landed outside the fire's import graph.

@@ -2,25 +2,30 @@
 
 ## ADDED Requirements
 
-### Requirement: The ADMM solver SHALL support a torch backend behind a provenance-recorded knob
+### Requirement: The ADMM solver SHALL default to the torch backend with NumPy as oracle-only
 
-The solver SHALL support `SOLVER_BACKEND=numpy|torch`, resolved fail-closed once per run with the same provenance idiom as `QK_RHO_END` (recorded in launch.env, the checkpoint fingerprint, and every probe row). The NumPy backend SHALL remain the default and the determinism reference; the torch backend SHALL run the same iteration algebra on a device with a recorded dtype. The fidelity condition `solver_is_admm` SHALL remain an algorithm condition — the backend does not change it.
+The solver SHALL default to the torch backend, the only backend that produces artifacts, resolved fail-closed once per run with the `QK_RHO_END` provenance idiom. NumPy SHALL be reachable only by explicit name, solely as the determinism oracle for parity acceptance — never producing artifacts — with NO fallback: a torch request without an accelerator SHALL fail rather than resolve to NumPy. `solver_is_admm` SHALL remain an algorithm condition.
 
 #### Scenario: backend_knob_provenance
 
-- **WHEN** a run selects `SOLVER_BACKEND=torch`
+- **WHEN** a run selects `SOLVER_BACKEND=torch` (or resolves the default)
 - **THEN** launch.env, the checkpoint fingerprint, and every solver-probe row record backend and dtype
-- **AND** an unset knob resolves to numpy, preserving today's behavior byte-for-byte
+- **AND** the default resolves to torch — the accelerated backend
 - **AND** a torch backend without an available accelerator device fails closed at startup, on the same pattern as `GPU=1` requiring a rocm-tagged image — a torch backend running on CPU is a slowdown wearing an optimization's name
+
+#### Scenario: numpy_is_oracle_only
+
+- **WHEN** the NumPy backend executes
+- **THEN** it is reachable only by explicit name, produces no artifacts, and exists solely to generate the reference numbers the parity acceptance compares against
 
 #### Scenario: admm_algorithm_unchanged
 
-- **WHEN** the torch backend factorizes a matrix
-- **THEN** it executes the same continuous-update, SVID-proxy, dual-update, and magnitude-balance steps as the NumPy backend, and `solver_is_admm` remains true on either backend
+- **WHEN** either backend factorizes a matrix
+- **THEN** it executes the same continuous-update, SVID-proxy, dual-update, and magnitude-balance steps, and `solver_is_admm` remains true on either backend
 
 ### Requirement: Backend parity SHALL be measured on the fixed production-layer probe set with row-time reported
 
-The torch backend SHALL be accepted only after a parity run on the Lane 0 probe set (owned by `qk-nanoquant-alignment-lane0`) reports, per layer and per backend: post-ADMM pre-polish recon cos, consensus residual trajectory, n_iter, min_eigs floor, and row-time. fp32-vs-fp64 cosine movement SHALL stay within the campaign's measured tolerance class (±0.002 on production layers); a larger movement names the layer and fails the acceptance for that layer.
+The torch backend SHALL be accepted only after a parity run on the Lane 0 probe set reports, per layer and per backend: post-ADMM pre-polish recon cos, consensus residual trajectory, n_iter, min_eigs floor, and row-time. The oracle arm runs the stratified six-cell grid; a tolerance breach in any probed cell SHALL expand the oracle to all ten entries. fp32-vs-fp64 cosine movement SHALL stay within the ±0.002 tolerance class; a larger movement names the layer and fails acceptance for that layer.
 
 #### Scenario: parity_on_probe_set
 
