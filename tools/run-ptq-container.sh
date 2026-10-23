@@ -70,8 +70,11 @@ LAYER_SCOPE="${LAYER_SCOPE:-}"
 # 0 value is the gate-shaped pipeline, which is not the paper.
 PAPER_FAITHFUL="${PAPER_FAITHFUL:-}"
 STE_FLIP_PASS_BUDGET="${STE_FLIP_PASS_BUDGET:-}"
-CALIBRATION_SEQS="${CALIBRATION_SEQS:-16}"
-EVAL_SEQS="${EVAL_SEQS:-5}"
+# The data knobs count SEQUENCES (qk-geometry-conformance), so the defaults are
+# the [NQ] protocol's own numbers: 128 calibration / 40 eval sequences. The
+# packed-batch size is the driver's business, not the launcher's.
+CALIBRATION_SEQS="${CALIBRATION_SEQS:-128}"
+EVAL_SEQS="${EVAL_SEQS:-40}"
 DRY_RUN="${DRY_RUN:-0}"
 
 # Refuse arguments instead of ignoring them. This wrapper pins the eval geometry

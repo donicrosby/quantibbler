@@ -150,6 +150,20 @@ def test_gpu_requires_a_rocm_tagged_image():
     assert "'--device' '/dev/kfd'" in ok.stdout
 
 
+def test_data_knob_defaults_are_protocol_values_in_sequences():
+    """The data knobs count sequences, so the defaults are the protocol's numbers.
+
+    Pre-fix the wrapper defaulted to 16 *batches* (128 sequences) and 5 batches
+    (40 sequences) — the protocol's values in a unit the CLI never named. With
+    the knob re-expressed in sequences (qk-geometry-conformance), a default that
+    still said 16 would silently calibrate on an eighth of the paper's data.
+    """
+    default = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048")
+    assert default.returncode == 0, default.stderr
+    assert "calibration_seqs=128" in default.stderr
+    assert "eval_seqs=40" in default.stderr
+
+
 def test_image_identity_and_digest_are_stated():
     """A tag is a mutable name; the digest is the binary.
 
