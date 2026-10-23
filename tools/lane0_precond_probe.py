@@ -32,6 +32,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import glob
 import json
 import os
@@ -518,6 +519,54 @@ def _empty_cache() -> None:
         torch.cuda.empty_cache()
 
 
+@contextlib.contextmanager
+def _checkpointed_blocks(trunk: Any) -> Any:
+    """Gradient-checkpoint every decoder block for the duration of the context.
+
+    The trunk activation graph, not the head, is the thing that is actually
+    huge: two host deaths from this code path falsified the ~9-10 GB arithmetic,
+    and the surviving explanation is attention materialising per-head score
+    matrices for backward (28 layers x 8 heads x 2048^2), which checkpointing
+    bounds regardless of whether SDPA takes its fused path.
+
+    Implemented by wrapping each block's bound ``forward``, NOT by re-implementing
+    the decoder's call sequence. That matters twice over: the model keeps
+    computing its own rotary embeddings, masks and cache positions exactly as
+    before, and the attention implementation is left entirely alone -- so what
+    the container runs is what the fixture measured. Recomputing activations in
+    backward is the same kernels on the same inputs, which is why the statistic
+    stays bitwise identical (same property the head-chunk fixture proves).
+
+    Raises if the trunk exposes no blocks: silently not checkpointing is the
+    failure mode this exists to prevent, so it fails closed instead.
+    """
+    from torch.utils.checkpoint import checkpoint as _ckpt  # noqa: PLC0415
+
+    layers = list(getattr(trunk, "layers", None) or [])
+    if not layers:
+        raise ValueError(
+            "trunk checkpointing requires a decoder exposing .layers; refusing to "
+            "silently run with an unbounded activation graph"
+        )
+    patched: list[tuple[Any, Any]] = []
+    for layer in layers:
+        original = layer.forward
+
+        def _make(original: Any = original) -> Any:
+            def _wrapped(*args: Any, **kwargs: Any) -> Any:
+                return _ckpt(original, *args, use_reentrant=False, **kwargs)
+
+            return _wrapped
+
+        layer.forward = _make()
+        patched.append((layer, original))
+    try:
+        yield len(layers)
+    finally:
+        for layer, original in patched:
+            layer.forward = original
+
+
 def collect_intended_statistics(
     model: Any,
     calibration_batches: Any,
@@ -526,6 +575,7 @@ def collect_intended_statistics(
     percentile: float = PERCENTILE,
     chunk_rows: int | None = None,
     chunk_tokens: int | None = None,
+    checkpoint_blocks: bool = True,
     diagnostics: dict[str, Any] | None = None,
 ) -> dict[tuple[int, str], dict[str, np.ndarray]]:
     """Per-linear ``(d_in_raw, d_out_raw)`` the paper-intended way.
@@ -615,7 +665,12 @@ def collect_intended_statistics(
         for batch in calibration_batches:
             model.zero_grad(set_to_none=True)
             if chunk_tokens is None:
-                logits = model(batch)
+                trunk = model.get_decoder() if hasattr(model, "get_decoder") else model.model
+                if checkpoint_blocks:
+                    with _checkpointed_blocks(trunk):
+                        logits = model(batch)
+                else:
+                    logits = model(batch)
                 if not isinstance(logits, torch.Tensor):
                     logits = logits[0]
                 # Real CE against the calibration targets: next-token prediction.
@@ -645,7 +700,11 @@ def collect_intended_statistics(
 
                 trunk = model.get_decoder() if hasattr(model, "get_decoder") else model.model
                 head = model.get_output_embeddings()
-                hidden = trunk(batch, use_cache=False)[0]
+                if checkpoint_blocks:
+                    with _checkpointed_blocks(trunk):
+                        hidden = trunk(batch, use_cache=False)[0]
+                else:
+                    hidden = trunk(batch, use_cache=False)[0]
                 shift_hidden = hidden[:, :-1, :].reshape(-1, hidden.shape[-1])
                 shift_labels = batch[:, 1:].reshape(-1)
                 n_b = int(shift_labels.shape[0])

@@ -214,7 +214,12 @@ def _tiny_fp64_model(tiny_model):  # noqa: F811
     import torch
     from transformers import AutoModelForCausalLM
 
-    return AutoModelForCausalLM.from_pretrained(str(tiny_model), dtype=torch.float64).eval()
+    # Pin the attention implementation the container will actually run: the
+    # checkpointing bound must hold for the real path, not for a default that
+    # might differ between sandbox and image.
+    return AutoModelForCausalLM.from_pretrained(
+        str(tiny_model), dtype=torch.float64, attn_implementation="sdpa"
+    ).eval()
 
 
 def test_chunked_ce_preserves_statistic_exactly(tool, tiny_model):  # noqa: F811
@@ -302,6 +307,91 @@ def test_per_chunk_backward_does_not_preserve_the_statistic(tool, tiny_model):  
         f"per-chunk backward matched the whole-batch statistic (rel {rel:.3e}); "
         "the ban on it would be unnecessary"
     )
+
+
+def test_trunk_checkpointing_preserves_statistic_exactly(tool, tiny_model):  # noqa: F811
+    """Checkpointing the trunk blocks must not move the statistic at all.
+
+    Recompute in backward runs the same kernels on the same inputs, so the bar is
+    identity, not tolerance -- the same bar that caught the fp32-cast trap in the
+    head-chunk fixture.
+    """
+    model = _tiny_fp64_model(tiny_model)
+    batch = _tiny_batch(tiny_model)
+    wanted = ((0, "mlp.down_proj"),)
+
+    plain = tool.collect_intended_statistics(
+        model, [batch], wanted=wanted, percentile=99.9, chunk_tokens=8, checkpoint_blocks=False
+    )
+    ckpt = tool.collect_intended_statistics(
+        model, [batch], wanted=wanted, percentile=99.9, chunk_tokens=8, checkpoint_blocks=True
+    )
+
+    key = (0, "mlp.down_proj")
+    for field in ("d_in_raw", "d_out_raw"):
+        a, b = plain[key][field], ckpt[key][field]
+        assert np.array_equal(a, b), (
+            f"{field} moved under trunk checkpointing: max abs diff {np.abs(a - b).max():.3e}"
+        )
+
+
+def test_every_trunk_block_is_gradient_checkpointed(tool, tiny_model):  # noqa: F811
+    """RED case for a block left uncheckpointed.
+
+    Checkpointing is proven by recomputation: an instrumented submodule inside
+    each block fires once on the forward and once more when backward recomputes
+    it. A block left unwrapped fires exactly once, so any omission shows up as a
+    count of 1 and the test goes red -- which is the point, since "some blocks
+    checkpointed" would bound nothing.
+    """
+
+    model = _tiny_fp64_model(tiny_model)
+    batch = _tiny_batch(tiny_model)
+    trunk = model.model
+    wanted = ((0, "mlp.down_proj"),)
+
+    def _count_attn_calls() -> dict[int, int]:
+        counts: dict[int, int] = {}
+        handles = [
+            layer.self_attn.register_forward_hook(
+                lambda m, i, o, idx=idx: counts.__setitem__(idx, counts.get(idx, 0) + 1)
+            )
+            for idx, layer in enumerate(trunk.layers)
+        ]
+        return counts, handles
+
+    counts, handles = _count_attn_calls()
+    tool.collect_intended_statistics(
+        model, [batch], wanted=wanted, percentile=99.9, chunk_tokens=8, checkpoint_blocks=True
+    )
+    for h in handles:
+        h.remove()
+    assert set(counts) == set(range(len(trunk.layers))), counts
+    assert all(n == 2 for n in counts.values()), f"not every block recomputed: {counts}"
+
+    counts, handles = _count_attn_calls()
+    tool.collect_intended_statistics(
+        model, [batch], wanted=wanted, percentile=99.9, chunk_tokens=8, checkpoint_blocks=False
+    )
+    for h in handles:
+        h.remove()
+    assert all(n == 1 for n in counts.values()), f"unexpected recompute: {counts}"
+
+
+def test_checkpointing_fails_closed_without_blocks(tool):
+    """A trunk with no .layers must raise, never silently run unbounded."""
+    import torch
+
+    class _Bare(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.head = torch.nn.Linear(4, 4)
+
+    with (
+        pytest.raises(ValueError, match="requires a decoder exposing .layers"),
+        tool._checkpointed_blocks(_Bare()),
+    ):
+        pass
 
 
 # --- per_token_norm_clip_999 ---------------------------------------------------
