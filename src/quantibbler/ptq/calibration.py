@@ -98,6 +98,12 @@ def _accumulate(rows: torch.Tensor, total: torch.Tensor, count: int) -> tuple[to
     the reference path computes as ``x.pow(2).mean(dim=0)``, re-associated.
     """
     flat = rows.detach().to(torch.float64).reshape(-1, rows.shape[-1])
+    # `total` is a capture accumulator created before any activation arrives, so
+    # its device is only knowable here, at the first real input. Coerce at the
+    # boundary rather than guessing at creation: the activation's device is the
+    # only authority on where the sum must happen. A no-op on CPU.
+    if torch.is_tensor(total):
+        total = total.to(flat.device)
     return total + flat.pow(2).sum(dim=0), count + int(flat.shape[0])
 
 
