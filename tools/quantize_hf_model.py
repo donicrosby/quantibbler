@@ -214,6 +214,19 @@ def rewire_trunk_embedding(causal: nn.Module) -> None:
     stock_forward = trunk.forward
 
     def forward(input_ids=None, inputs_embeds=None, **kwargs):  # noqa: ANN001
+        # Inputs arrive tokenized on the CPU; the weights may be on an accelerator.
+        # The device is read off the module's own parameters rather than threaded
+        # down from the driver: a second source of truth can disagree with where
+        # the weights actually are, and the disagreement surfaces as a
+        # device-mismatch error several frames from its cause. Every move here is
+        # a no-op on a CPU tensor, so the reference path is unchanged rather than
+        # merely re-tested.
+        _dev = next(causal.parameters()).device
+        if input_ids is not None:
+            input_ids = input_ids.to(_dev)
+        if inputs_embeds is not None:
+            inputs_embeds = inputs_embeds.to(_dev)
+        kwargs = {k: (v.to(_dev) if torch.is_tensor(v) else v) for k, v in kwargs.items()}
         if inputs_embeds is None and input_ids is not None and input_ids.dtype.is_floating_point:
             # Float "ids" are already pre-embedded activations from the
             # pipeline's stem; hand them to the stock inputs_embeds path.
