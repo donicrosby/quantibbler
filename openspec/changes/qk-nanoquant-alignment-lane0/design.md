@@ -31,6 +31,16 @@ Gate contract (acceptance, verbatim from the lane spec): "a quantize_report-styl
 | Solver | `lb_admm` + `magnitude_balance` | IDENTICAL — existing entry points, production-default `PTQConfig` |
 | Polish/STE/export | available downstream | never invoked on the lane |
 
+## Post-incident record (2026-10-23 box OOM)
+
+The first Lane 0 fire OOM-killed the whole box ~10 min after launch. Diagnosis, fix, and proof protocol, pinned here so the record is self-contained:
+
+- **Mechanism:** the CE-gradient stats pass materialized full-vocabulary logits under autograd, unchunked — per batch: logits (8×2048×151936 bf16 ≈ 5 GB), non-contiguous reshape copy (≈5 GB), fp32 cast (≈10 GB), CE gradient (≈10 GB), plus the retained trunk activation graph (≈9–10 GB) — peak ~35–40 GB/batch. On the 8060S iGPU, "VRAM" is system RAM granted through `/dev/kfd` by the kernel driver — **outside the container's memory cgroup** — so the 32G fence could not hold it, and the ROCm caching allocator never returns freed blocks, so 16 back-to-back batches only climbed.
+- **Launch regression:** the fire was launched hand-rolled, outside `run-ptq-container.sh`, the wrapper that carries this box's launch discipline. Lesson applied: every Lane 0 launch rides the wrapper conventions; the wrapper gains a lane0 mode rather than being bypassed.
+- **Fix (landed `9aa37dc`):** head chunking per 256 tokens under `torch.utils.checkpoint` off a full-context trunk forward, chunk losses summed, mean gauge on the total, ONE backward — bitwise-identical statistic (fixture: `np.array_equal`, no tolerance; the forbidden per-chunk-backward shape has a must-differ test) and head peak cut ~64×.
+- **Proof protocol (amended):** red run on parent bytes (byte-identical to the killer, verified: zero code-line diff) bounded to one batch — artifact is the MEASURED peak from `torch.cuda.max_memory_reserved` (the instrument that sees kfd-granted memory), not an expected kill; green run = full 16-batch stats phase; refire requires the green peak to beat the red peak with solve headroom under 32G. Operational nets: free-RAM baseline beside the artifact, hard wall-clock timeout, no co-tenants mid-run. Watchdog silence is weighted as no evidence for the kfd class.
+- **Measured rehearsal numbers land here when the runs complete.**
+
 ## Measurement protocol
 
 - **Execution vehicle (user directive, 2026-10-23):** the decisive fire runs ON the torch backend once `qk-solver-backend`'s port lands — all 20 solves torch-only, no NumPy runs anywhere outside unit tests. "Existing lb_admm" holds in the algorithmic sense — the torch port preserves the algebra and its unit-test parity suite is the acceptance gate before the decisive run (one execution delivers the verdict plus measured row-times; target ~5–10 min).
