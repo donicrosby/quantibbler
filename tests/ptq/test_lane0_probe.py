@@ -840,3 +840,26 @@ def test_shipped_arm_is_row_chunked_like_production(tool, tiny_model, monkeypatc
     # become unbounded again.
     assert seen[0].get("chunk_rows") == 4, seen[0]
     assert tool.SHIPPED_CHUNK_ROWS == 4
+
+
+def test_arm_a_threads_the_config_into_robust_diag(tool, monkeypatch):
+    """Arm A must take tau/gamma from the config, not from the defaults.
+
+    Production threads them (block_recon.py:1349); the harness relied on
+    PTQConfig's defaults happening to equal the function's. Setting either knob
+    would have silently left the shipped arm measuring a preconditioner the
+    pipeline never uses -- the same class as the unbounded capture, caught
+    before it fired.
+    """
+    seen: list[dict] = []
+    real = tool.robust_diag
+
+    def _spy(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        seen.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(tool, "robust_diag", _spy)
+    cfg = tool.PTQConfig(rank=8, tau=0.5, gamma=0.35)
+    tool.run_arms((("synthetic", 0, "planted-rank16"),), seed=0, cfg=cfg)
+    assert seen, "robust_diag was never called"
+    assert all(kw.get("tau") == 0.5 and kw.get("gamma") == 0.35 for kw in seen), seen

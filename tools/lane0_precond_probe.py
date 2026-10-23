@@ -338,8 +338,14 @@ def run_arms(
             key = (int(block_idx), layer_name)
             arm_a = stats["shipped"][key]
             arm_b = stats["intended"][key]
-            # arm A: shipped robust_diag + shipped raw fold
-            d_in_a, d_out_a = robust_diag(arm_a["d_in_raw"], arm_a["d_out_raw"])
+            # arm A: shipped robust_diag + shipped raw fold. tau/gamma come from
+            # the config, as production does (block_recon.py:1349): the values
+            # coincide today only because PTQConfig's defaults are the function's
+            # defaults, so setting either knob would silently leave the shipped
+            # arm measuring a preconditioner the pipeline never uses.
+            d_in_a, d_out_a = robust_diag(
+                arm_a["d_in_raw"], arm_a["d_out_raw"], tau=cfg.tau, gamma=cfg.gamma
+            )
             # arm B: intended (clip -> sqrt fold, once per side)
             _, d_out_b, d_in_b = fold_intended(
                 w, d_out_raw=arm_b["d_out_raw"], d_in_raw=arm_b["d_in_raw"]
@@ -347,8 +353,10 @@ def run_arms(
             percentile = arm_b.get("percentile", PERCENTILE)
             grad_fallback = arm_b.get("grad_fallback")
         else:
-            # arm A: shipped robust_diag + shipped raw fold
-            d_in_a, d_out_a = robust_diag(target["d_in_raw"], target["d_out_raw"])
+            # arm A: shipped robust_diag + shipped raw fold (config-threaded, as above).
+            d_in_a, d_out_a = robust_diag(
+                target["d_in_raw"], target["d_out_raw"], tau=cfg.tau, gamma=cfg.gamma
+            )
             # arm B: intended (clip -> sqrt fold, once per side)
             _, d_out_b, d_in_b = fold_intended(
                 w, d_out_raw=target["d_out_raw"], d_in_raw=target["d_in_raw"]
