@@ -90,3 +90,22 @@ The decisive run SHALL write a quantize_report-style JSON (strict-parseable, pro
 
 - **WHEN** the intended preconditioner does not dominate (per the design's domination rule)
 - **THEN** the verdict paragraph declares the hypothesis falsified and the report carries the lane gate for Lanes 1-3: STOP and re-analyze before landing anything, with Lane 0 gating Lanes 1-3 because lane order is load-bearing
+
+### Requirement: The real-statistics pass SHALL be memory-fenced and statistic-exact
+
+The CE-gradient pass SHALL chunk the head (logits/CE/backward) per 256-token slice off a full-context trunk forward — never re-running the trunk per slice. Per-chunk backward SHALL use `reduction="sum"` with `1/N_c^2` post-scaling, preserving both the per-row statistic and the mean-loss gauge. Per-slice `del` + `empty_cache` SHALL bound the allocator, and the refire SHALL be preceded by a fenced rehearsal whose peak is recorded in launch.env.
+
+#### Scenario: chunked_ce_preserves_statistic
+
+- **WHEN** the equivalence fixture runs the old whole-batch CE path and the new head-chunked path on identical weights and inputs (tiny geometry, one sequence, 128 tokens, CPU)
+- **THEN** the accumulated gradient-square vectors match to machine precision — identity, not tolerance — and the fixture goes red against the naive trunk-rechunking variant
+
+#### Scenario: rehearsal_red_first
+
+- **WHEN** the bounded rehearsal runs on pre-chunk bytes inside the fenced container
+- **THEN** it reproduces the death as an in-container OOM kill — inside the fence, never a box death
+
+#### Scenario: rehearsal_peak_recorded_before_refire
+
+- **WHEN** the chunked rehearsal completes all 16 stats batches under the fence
+- **THEN** the measured memory peak is recorded in launch.env with enough headroom for the 20 solves and model weights, and the refire happens only after the peak, the red-first artifact, and the equivalence fixture are all green
