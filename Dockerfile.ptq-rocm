@@ -23,6 +23,12 @@
 # DEV=1 adds pytest for the fidelity gate: the runtime image has no pytest, so a
 # test gate run against it fails for the wrong reason.
 ARG ROCM_INDEX=https://stable.repo.amd.com/rocm/whl-next/
+# The ROCm minor is a build arg, not a hand-edit: the whl-next index carries
+# exactly two (rocm10.0.0 and rocm10.1.0 for torch 2.14.0, no newer line and no
+# rc/dev), so pinning the minor IS the experiment that discriminates a corrupted
+# code-object packaging from a host-driver mismatch. A variant that has to be
+# hand-edited cannot be rebuilt reproducibly or compared honestly.
+ARG ROCM_MINOR=10.1.0
 
 FROM ghcr.io/pyo3/maturin:latest AS maturin
 
@@ -35,6 +41,7 @@ RUN maturin build --release --out /wheels -m crates/quantibbler-kernels/Cargo.to
 FROM python:3.12-slim AS runner
 
 ARG ROCM_INDEX
+ARG ROCM_MINOR
 ARG DEV=0
 
 COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /uvx /bin/
@@ -88,8 +95,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # CUDA-wheel image that cannot see the device and looks fine.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python /opt/venv/bin/python --reinstall --index-url "$ROCM_INDEX" \
-      torch "rocm[libraries,device-gfx1151]" \
-    && /opt/venv/bin/python -c "import torch; assert torch.version.hip, f'NOT a ROCm torch: {torch.__version__} (hip=None) - the index install was a no-op'; print('rocm torch:', torch.__version__, '| hip:', torch.version.hip)"
+      "torch==2.14.0+rocm${ROCM_MINOR}" "rocm[libraries,device-gfx1151]==${ROCM_MINOR}" \
+    && /opt/venv/bin/python -c "import torch; assert torch.version.hip, f'NOT a ROCm torch: {torch.__version__} (hip=None) - the index install was a no-op'; print('rocm torch:', torch.__version__, '| hip:', torch.version.hip)" \
+    && /opt/venv/bin/python -c "import torch; print(torch.__version__)" | grep -q "rocm${ROCM_MINOR}"
 
 RUN if [ "$DEV" = "1" ]; then uv pip install --python /opt/venv/bin/python pytest; fi
 
