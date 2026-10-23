@@ -791,3 +791,52 @@ def test_build_real_arms_runs_end_to_end_on_a_stubbed_corpus(tool, tiny_model, m
     assert diagnostics["sequences"] == 8
     assert diagnostics["protocol_sequences"] == 128
     assert diagnostics["packed_batches"] == 1
+
+
+def test_shipped_arm_is_row_chunked_like_production(tool, tiny_model, monkeypatch):  # noqa: F811
+    """The shipped arm must run in the configuration the pipeline runs it in.
+
+    It was calling collect_stats unbounded and calling that "verbatim". The
+    unbounded path is the fp64 reference path, documented in block_recon as
+    retaining attention graphs for every row at once -- tens of GB at (8, 2048)
+    over 28 layers, spent before the intended arm even starts.
+    """
+    q = _driver()
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    model = _tiny_fp64_model(tiny_model)
+    vocab = int(model.config.vocab_size)
+    seen: list[dict] = []
+
+    # Patched on the harness module, not on calibration: the harness binds the
+    # name at import, so patching the source module would not be observed.
+    real_collect = tool.collect_stats
+
+    def _spy(module, batches, **kwargs):  # noqa: ANN001, ANN202
+        seen.append(kwargs)
+        return real_collect(module, batches, **kwargs)
+
+    monkeypatch.setattr(tool, "collect_stats", _spy)
+    monkeypatch.setattr(q, "find_wikitext_shards", lambda split: ["stub"])  # noqa: ARG005
+    monkeypatch.setattr(q, "load_wikitext_text", lambda shards: "stub text")  # noqa: ARG005
+
+    def _stub_tokenizer(*a, **k):  # noqa: ARG001
+        return _FixedTokenizer(8 * 2048, vocab)
+
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", staticmethod(_stub_tokenizer))
+    monkeypatch.setattr(
+        AutoModelForCausalLM,
+        "from_pretrained",
+        staticmethod(lambda *a, **k: model),  # noqa: ARG005
+    )
+
+    tool.build_real_arms(
+        (("Qwen/Qwen3-0.6B", 0, "mlp.down_proj"),), device=None, chunk_tokens=8, max_batches=1
+    )
+    assert seen, "the shipped arm never ran"
+    # Pinned against production's literal (block_recon.py:1269), NOT against the
+    # harness's own constant: comparing the constant to itself passes whatever
+    # the constant becomes, which is exactly how a bounded arm could silently
+    # become unbounded again.
+    assert seen[0].get("chunk_rows") == 4, seen[0]
+    assert tool.SHIPPED_CHUNK_ROWS == 4

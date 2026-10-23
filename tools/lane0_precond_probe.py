@@ -72,6 +72,10 @@ GAMMA = 0.2
 # packed batches, so build_real_arms converts through the driver's own
 # packed_chunks rather than passing these straight to the tokenizer.
 ATTN_IMPL = os.environ.get("QK_ATTN_IMPL", "sdpa")
+# The row-chunking production gives collect_stats on the real-model path
+# (block_recon.py:1269). Mirrored rather than restated: the harness's job is to
+# measure the shipped construction, not a reference configuration of it.
+SHIPPED_CHUNK_ROWS = 4
 SEQ_LEN = 2048
 CALIBRATION_SEQS = 128
 
@@ -1031,10 +1035,25 @@ def build_real_arms(
         model = model.to(device)
     wanted = tuple((block, name) for _, block, name in probe_set)
 
-    # Arm A: the shipped construction, verbatim -- same call the pipeline makes.
+    # Arm A: the shipped construction, in the configuration the pipeline runs it.
+    #
+    # This was calling collect_stats(model, batches) with chunk_rows unset, and
+    # the comment claimed "verbatim -- same call the pipeline makes". That was
+    # false in the one way that mattered: block_recon.py:1268-1269 gives the
+    # real-model (bf16) path chunk_rows=4, and documents chunk_rows=None as the
+    # fp64 reference path that "retains attention graphs for every row at once
+    # (~15GB on a 28-layer bf16 trunk) and OOMs under container caps" -- plus,
+    # on the list/concatenate branch, every linear's full float64 activation for
+    # the whole batch. At (8, 2048) over 28 layers that is tens of GB, and it
+    # runs BEFORE the intended arm. The shipped arm is what drained the host.
+    #
+    # chunk_rows=4 is not a new number: it is the value production uses, and
+    # tests/ptq/test_capture_chunking.py already pins that it preserves the
+    # statistic (the docstring's "raw f64 grads accumulated across chunks,
+    # squared once per batch").
     if telemetry is not None:
         telemetry.phase = "stats_shipped"
-    book = collect_stats(model, batches)
+    book = collect_stats(model, batches, chunk_rows=SHIPPED_CHUNK_ROWS)
     shipped: dict[tuple[int, str], dict[str, Any]] = {}
     for entry in book:  # LayerStatsBook is iterable; _entries is private
         for block, name in wanted:
