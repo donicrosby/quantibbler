@@ -111,10 +111,19 @@ The trunk forward SHALL checkpoint every production block — backward recompute
 - **THEN** the gradient-square vectors match bitwise — identity, not tolerance
 - **AND** the fixture goes red against any build where a production block is left uncheckpointed
 
-#### Scenario: trunk_doubling_ratio_invariant
+### Requirement: The stats accumulator SHALL count each row exactly once
 
-- **WHEN** the equivalence fixture asserts the checkpointed-trunk statistic
-- **THEN** it consumes the accumulator's MEAN — numerator and denominator double in lockstep under recompute, ×2 is exact in binary FP, so the mean is bitwise preserved — and the fixture goes red against any build consuming raw `sum_sq`
+The accumulation hooks SHALL gate on `torch.is_grad_enabled()` so each row is counted exactly once on the recompute pass, and the trunk checkpoint SHALL be reentrant mode — the discriminator's premise. The equivalence fixture SHALL assert RAW-sum identity against the uncheckpointed path, not just the mean.
+
+#### Scenario: raw_sums_are_the_correct_version
+
+- **WHEN** the equivalence fixture runs the checkpointed-trunk path against the uncheckpointed path
+- **THEN** `d_in_raw` and `d_out_raw` match bitwise — raw, not mean — each row counted exactly once, so the raw sums are the naive-magnitude values and no future reader can be surprised by a ×2
+
+#### Scenario: doubling_trap_is_a_red_case
+
+- **WHEN** the fixture exercises an ungated accumulator or a non-reentrant checkpoint (both passes grad-enabled)
+- **THEN** the raw sums double relative to the uncheckpointed path and the fixture goes red, so the trap fails loudly instead of surviving as folklore
 
 #### Scenario: rehearsal_red_retired
 
