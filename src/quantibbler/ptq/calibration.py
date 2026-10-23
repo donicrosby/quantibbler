@@ -213,6 +213,13 @@ def collect_stats(
                 if chunk_rows
                 else [batch]
             )
+            # `batch` comes off the tokenizer on the CPU; the module's weights may be on an
+            # accelerator, and the auditor names this boundary (calibration.py:225). Move once,
+            # at entry, so the whole chunk loop is device-true rather than per-chunk. The
+            # explicit None guard avoids the StopIteration class. No-op on CPU.
+            _ref = next(iter(module.parameters()), None)
+            if _ref is not None:
+                batch = batch.to(_ref.device)
             dout_din = {name: tuple(m.weight.shape) for name, m in linears}
             # Same class as sum_sq_in: this accumulator meets cuda grad statistics.
             _acc_dev = next(iter(linears))[1].weight.device
