@@ -876,6 +876,10 @@ def main() -> int:
         else ("cpu" if args.device == "auto" else args.device)
     )
     causal.to(_device)
+    from quantibbler.ptq.device_audit import install_device_auditor
+
+    if install_device_auditor():
+        print("      device auditor ON (fail-closed; names the call site)", flush=True)
     os.environ["QUANTIBBLER_DEVICE"] = _device
     print(
         f"      device={_device} (requested {args.device}; "

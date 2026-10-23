@@ -195,6 +195,13 @@ set -- docker run --rm \
 if [ -n "${QK_RHO_END:-}" ]; then
   set -- "$@" -e "QK_RHO_END=$QK_RHO_END"
 fi
+
+# DEVICE_AUDIT turns on the call-time device auditor (fail-closed, names the
+# call site). Same idiom as QK_RHO_END: passed only when set, so a run that does
+# not ask for it is unaffected -- the campaign fire runs with it off.
+if [ -n "${DEVICE_AUDIT:-}" ]; then
+  set -- "$@" -e "QUANTIBBLER_DEVICE_AUDIT=$DEVICE_AUDIT"
+fi
 set -- "$@" -e "QUANTIBBLER_IMAGE=$IMAGE" -e "QUANTIBBLER_IMAGE_DIGEST=$IMAGE_DIGEST"
 
 # GPU access is opt-in and explicit. These are host kernel devices, so passing

@@ -660,7 +660,9 @@ def _tune_fp(
             lr = cfg.stage_pre.lr * 0.5 * (1 + math.cos(math.pi * step / total))
             for group in opt.param_groups:
                 group["lr"] = lr
-        idx = torch.arange((step % (n // bs or 1)) * bs, (step % (n // bs or 1)) * bs + bs)
+        idx = torch.arange(
+            (step % (n // bs or 1)) * bs, (step % (n // bs or 1)) * bs + bs, device=x_b.device
+        )
         out = block(x_b[idx])
         loss = (out - y_b[idx]).pow(2).mean()
         if not torch.isfinite(loss):
