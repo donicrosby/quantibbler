@@ -152,6 +152,15 @@ The accumulation hooks SHALL gate on `torch.is_grad_enabled()` so each row is co
 - **WHEN** the rehearsal writes its peak
 - **THEN** it reads device memory (`torch.cuda.mem_get_info` / the telemetry CSV maximum) — never `max_memory_reserved`, which is meaningless under the disabled caching allocator — and both arms' per-phase peaks are recorded separately so the gate judges the actual measurement path, not a reference arm dressed as it
 
+### Requirement: Harness changes touching a production import SHALL pass the surface-table gate
+
+Any harness change that touches a production import SHALL be accompanied by the production-surface diff table — one row per touchpoint (collect_stats, robust_diag, lb_admm, magnitude_balance), each citing the production call-site line and reading `matches` or `DEFECT`. No fire SHALL launch while any row reads DEFECT.
+
+#### Scenario: surface_table_gate_before_fire
+
+- **WHEN** a Lane 0 fire is staged
+- **THEN** the harness change's surface table exists with every production touchpoint row citing its call-site line, all rows read `matches`, and any DEFECT row blocks the launch — instance six gets caught by a grep, not a floor-switch
+
 ### Requirement: Every Lane 0 launch SHALL ride the wrapper
 
 Every Lane 0 launch SHALL go through `tools/run-ptq-container.sh` under `MODE=lane0-rehearsal` or `MODE=lane0-fire` — hand-rolled docker launches SHALL NOT exist and SHALL NOT be certifiable: launch.env carries the wrapper's provenance block plus the mode, and an artifact without it is not a Lane 0 result. Both lane0 modes SHALL fail closed without GPU=1, SHALL carry a wall-clock stop net, and SHALL record the pre-launch free-RAM baseline beside the artifact.
