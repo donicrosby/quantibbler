@@ -232,7 +232,18 @@ def rewire_trunk_embedding(causal: nn.Module) -> None:
             # pipeline's stem; hand them to the stock inputs_embeds path.
             inputs_embeds = input_ids
             input_ids = None
-        return stock_forward(input_ids=input_ids, inputs_embeds=inputs_embeds, **kwargs)
+        # Scoped default device for the stock forward. The arguments are moved
+        # above, but the stock HF forward also CREATES tensors -- the rotary
+        # arange / inv_freq class of temporaries -- and in this transformers
+        # version those are born on the default device, which is CPU, giving
+        # "found at least two devices, cuda:0 and cpu" inside the model rather
+        # than at any call site we control. Creating them on the weights' device
+        # is the version-agnostic fix; naming cache_position/position_ids would
+        # only cover whichever temporaries this version happens to expose.
+        # Scoped, not global: torch.set_default_device would also retarget the
+        # NumPy solver stage, which must stay CPU. On CPU this context is a no-op.
+        with torch.device(_dev):
+            return stock_forward(input_ids=input_ids, inputs_embeds=inputs_embeds, **kwargs)
 
     trunk.forward = forward  # type: ignore[method-assign]
 
