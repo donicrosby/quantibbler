@@ -1181,7 +1181,7 @@ def reconstruct_block(
         was_training = teacher.training
         teacher.eval()
         with torch.no_grad():
-            y_b = teacher(x_b)
+            y_b = _forward_chunked(teacher, x_b)
         if teacher_fingerprint is None:
             teacher_fingerprint = _weights_fingerprint(teacher)
         teacher_source = teacher_source or "frozen_reference_copy"
@@ -1712,7 +1712,11 @@ def reconstruct_model(
     # Map raw token-id batches once through the model's own input stem
     # (embedding modules), yielding the float activations every block sees.
     stem = _model_input_stem(model, batches)
-    x_running = stem(torch.cat(batches, dim=0)).detach()
+    # Chunked like every other forward over the capture. The stem is the FIRST
+    # full-width forward of a block and the one the dead run completed in bf16
+    # before the MLP blew the cap, so its measured-to-fit evidence was
+    # bf16-only -- and at fp32 its intermediates double like everything else.
+    x_running = _forward_chunked(stem, torch.cat(batches, dim=0)).detach()
     _note_block_progress(0, None, x_running)
 
     # Snapshot the fp outputs of any fp stem layer that sits AFTER the last
