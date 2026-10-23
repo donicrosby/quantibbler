@@ -623,8 +623,11 @@ def test_whole_batch_head_with_checkpointed_blocks_fails_closed(tool, tiny_model
 class _FixedTokenizer:
     """A tokenizer whose stream length is known, so shapes are deterministic."""
 
-    def __init__(self, n_tokens: int) -> None:
-        self._ids = list(range(1, n_tokens + 1))
+    def __init__(self, n_tokens: int, vocab: int | None = None) -> None:
+        if vocab is None:
+            self._ids = list(range(1, n_tokens + 1))
+        else:
+            self._ids = [i % vocab for i in range(n_tokens)]
 
     def __call__(self, text: str, return_tensors=None, add_special_tokens=False):  # noqa: ANN001, ANN201, ARG002
         return {"input_ids": self._ids}
@@ -687,3 +690,104 @@ def test_build_then_slice_would_still_refuse(tool):
     resolved = sum(int(b.shape[0]) for b in sliced)
     assert resolved == 8
     assert resolved != 128, "the guard would have accepted a sliced construction"
+
+
+def test_is_cuda_accepts_both_device_forms(tool):
+    """The collector passes a torch.device and the launcher a string."""
+    import torch
+
+    assert tool._is_cuda("cuda")
+    assert tool._is_cuda("cuda:0")
+    assert tool._is_cuda(torch.device("cuda"))
+    assert not tool._is_cuda("cpu")
+    assert not tool._is_cuda(torch.device("cpu"))
+    assert not tool._is_cuda(None)
+
+
+def test_release_is_safe_on_cpu_and_still_collects(tool):
+    """The release must never raise where there is no accelerator to release."""
+    tool.release_device_memory(None)
+    tool.release_device_memory("cpu")
+    import torch
+
+    tool.release_device_memory(torch.device("cpu"))
+
+
+def test_telemetry_line_is_on_disk_before_the_run_ends(tool, tmp_path):
+    """Flush-per-line: a run that dies does not get to close its files.
+
+    Asserted by reading the file back after a single sample, with no stop()
+    in between -- which is exactly the state a killed run leaves behind.
+    """
+    csv = tmp_path / "rehearsal-mem.csv"
+    telemetry = tool.MemTelemetry(csv, "cpu")
+    telemetry.start()
+    telemetry.phase = "batch1/1"
+    telemetry.write_sample(100, 50, 75, 25)
+    lines = csv.read_text().splitlines()
+    assert lines[0] == "t,phase,reserved,allocated,used,free"
+    assert lines[1].endswith(",batch1/1,100,50,75,25"), lines
+    telemetry.phase = "batch2/2"
+    telemetry.write_sample(200, 150, 175, 125)
+    assert csv.read_text().splitlines()[2].endswith(",batch2/2,200,150,175,125")
+
+
+def test_telemetry_stop_takes_a_final_sample_with_the_live_phase(tool, tmp_path):
+    """The last line names the stage that was running when the run ended.
+
+    Spied rather than read back, because on a CPU lane `sample` correctly
+    writes nothing -- the property is that stop() takes one, with the phase
+    that was live at the time.
+    """
+    calls: list[str] = []
+
+    class _Spy(tool.MemTelemetry):
+        def sample(self) -> None:
+            calls.append(self.phase)
+            super().sample()
+
+    telemetry = _Spy(tmp_path / "rehearsal-mem.csv", "cpu")
+    telemetry.start()
+    telemetry.phase = "stats_intended"
+    telemetry.stop()
+    assert calls[-1] == "stats_intended", calls
+
+
+def test_build_real_arms_runs_end_to_end_on_a_stubbed_corpus(tool, tiny_model, monkeypatch):  # noqa: F811
+    """The only end-to-end exercise of build_real_arms, and why it has to exist.
+
+    A `del` of a name still used further down is invisible to every other test
+    here -- none of them call this function -- and it is fatal at fire time.
+    Ruff caught exactly one such bug; this test is what makes the next one fail
+    in the suite instead of in the container.
+    """
+    q = _driver()
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    model = _tiny_fp64_model(tiny_model)
+    vocab = int(model.config.vocab_size)
+    monkeypatch.setattr(q, "find_wikitext_shards", lambda split: ["stub"])  # noqa: ARG005
+    monkeypatch.setattr(q, "load_wikitext_text", lambda shards: "stub text")  # noqa: ARG005
+
+    def _stub_tokenizer(*a, **k):  # noqa: ARG001
+        return _FixedTokenizer(8 * 2048, vocab)
+
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", staticmethod(_stub_tokenizer))
+    monkeypatch.setattr(
+        AutoModelForCausalLM,
+        "from_pretrained",
+        staticmethod(lambda *a, **k: model),  # noqa: ARG005
+    )
+
+    diagnostics: dict = {}
+    arms = tool.build_real_arms(
+        (("Qwen/Qwen3-0.6B", 0, "mlp.down_proj"),),
+        device=None,
+        chunk_tokens=8,
+        max_batches=1,
+        diagnostics=diagnostics,
+    )
+    assert set(arms) == {"shipped", "intended"}
+    assert diagnostics["sequences"] == 8
+    assert diagnostics["protocol_sequences"] == 128
+    assert diagnostics["packed_batches"] == 1

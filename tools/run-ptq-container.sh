@@ -232,6 +232,8 @@ mkdir -p "$OUT" 2>/dev/null || true
       "${LAYER_SCOPE:-}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "${COMPUTE_DTYPE:-float64}"
   else
     printf 'model=%s\ndevice=%s\nout=%s\n' "$MODEL" "cuda" "$OUT"
+    printf 'no_cuda_memory_caching=1\nattn_impl=%s\nmem_csv=rehearsal-mem.csv\n' \
+      "${QK_ATTN_IMPL:-sdpa}"
   fi
   printf 'rho_end_override=%s\nsolver_probe=%s\nopenblas_num_threads=%s\nlaunched_at=%s\n' \
     "${QK_RHO_END:-unset}" "${QK_SOLVER_PROBE:-unset}" "${OPENBLAS_NUM_THREADS:-16}" "$(date -u +%FT%TZ)"
@@ -280,6 +282,15 @@ fi
 # not ask for it is unaffected -- the campaign fire runs with it off.
 if [ -n "${DEVICE_AUDIT:-}" ]; then
   set -- "$@" -e "QUANTIBBLER_DEVICE_AUDIT=$DEVICE_AUDIT"
+fi
+# The rehearsal releases as it runs. With the caching allocator on, freed blocks
+# stay in the pool and the host keeps seeing the high-water mark -- which is the
+# difference between "the allocator is holding it" and "the process is using it".
+# Lane0 only: the ptq driver's peak is a measured quantity with the allocator in
+# its normal configuration, and moving it there would move a number the campaign
+# is compared against.
+if [ "$MODE" != "ptq" ]; then
+  set -- "$@" -e PYTORCH_NO_CUDA_MEMORY_CACHING=1
 fi
 set -- "$@" -e "QUANTIBBLER_IMAGE=$IMAGE" -e "QUANTIBBLER_IMAGE_DIGEST=$IMAGE_DIGEST"
 

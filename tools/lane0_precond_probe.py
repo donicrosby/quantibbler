@@ -34,10 +34,12 @@ from __future__ import annotations
 import argparse
 import contextlib
 import functools
+import gc
 import glob
 import json
 import os
 import pathlib
+import threading
 import time
 from typing import Any
 
@@ -69,6 +71,7 @@ GAMMA = 0.2
 # Protocol geometry, in SEQUENCES ([NQ] Sec 3.4 / App. C). The loader counts
 # packed batches, so build_real_arms converts through the driver's own
 # packed_chunks rather than passing these straight to the tokenizer.
+ATTN_IMPL = os.environ.get("QK_ATTN_IMPL", "sdpa")
 SEQ_LEN = 2048
 CALIBRATION_SEQS = 128
 
@@ -583,6 +586,7 @@ def collect_intended_statistics(
     gate_on_grad: bool = True,
     reentrant: bool = True,
     diagnostics: dict[str, Any] | None = None,
+    telemetry: MemTelemetry | None = None,
 ) -> dict[tuple[int, str], dict[str, np.ndarray]]:
     """Per-linear ``(d_in_raw, d_out_raw)`` the paper-intended way.
 
@@ -692,7 +696,9 @@ def collect_intended_statistics(
     grad_rows = 0
     peak_bytes = 0
     with torch.enable_grad():
-        for batch in calibration_batches:
+        for batch_idx, batch in enumerate(calibration_batches):
+            if telemetry is not None:
+                telemetry.phase = f"batch{batch_idx + 1}/{len(calibration_batches)}"
             model.zero_grad(set_to_none=True)
             if chunk_tokens is None:
                 trunk = model.get_decoder() if hasattr(model, "get_decoder") else model.model
@@ -710,6 +716,7 @@ def collect_intended_statistics(
                     shift_logits.float(), shift_labels, ignore_index=-100
                 )
                 loss.backward()
+                del logits, shift_logits, loss
             else:
                 # Head-only chunking -- and the BACKWARD is not chunked.
                 #
@@ -775,7 +782,13 @@ def collect_intended_statistics(
                 del hidden, shift_hidden, total
                 _empty_cache()
             grad_rows += int(shift_labels.shape[0])
+            # Read the peak BEFORE releasing, or the release would censor the
+            # very number the fence is decided on.
             peak_bytes = max(peak_bytes, _peak_memory_bytes())
+            # Boundary release: this batch's graph is dead, but the allocator
+            # still caches its blocks and the collector has not run. Both have
+            # to be told, every batch, for the memory to actually leave.
+            release_device_memory(device)
     for handle in handles:
         handle.remove()
 
@@ -814,6 +827,105 @@ def collect_intended_statistics(
     return out
 
 
+def _is_cuda(device: Any) -> bool:
+    """True when `device` names the accelerator, for a str or a torch.device.
+
+    The collector is handed a `torch.device` and the launcher a string, so a
+    helper that only understands one of them fails on the other.
+    """
+    if device is None:
+        return False
+    import torch
+
+    try:
+        resolved = device if isinstance(device, torch.device) else torch.device(device)
+    except (TypeError, RuntimeError):
+        return str(device).startswith("cuda")
+    return resolved.type == "cuda"
+
+
+def release_device_memory(device: Any) -> None:
+    """Return device memory to the OS at a boundary.
+
+    Two things hold memory here and only one of them is the allocator: the
+    caching allocator keeps freed blocks, and the autograd graph keeps tensors
+    alive until it is dropped. Collecting first and emptying second covers
+    both; emptying alone frees nothing Python still references, and collecting
+    alone returns nothing to the driver.
+    """
+    gc.collect()
+    if _is_cuda(device):
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
+class MemTelemetry:
+    """Device-memory samples every `interval` seconds, flushed line by line.
+
+    The flush is the whole point: a run that dies does not get to close its
+    files, so the last line on disk is the last sample actually taken. `phase`
+    is written from the main thread, so that final line names the stage that
+    was running when the box went -- the one question three dead runs have
+    left open.
+    """
+
+    def __init__(self, path: pathlib.Path, device: Any, interval: float = 2.0) -> None:
+        self.path = path
+        self.device = device
+        self.interval = interval
+        self.phase = "startup"
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def write_sample(self, reserved: int, allocated: int, used: int, free: int) -> None:
+        """Append one flushed line.
+
+        Separated from sampling so the record's format and its durability are
+        testable without an accelerator -- the flush is the property that
+        matters, and it is the one a dead run depends on.
+        """
+        with self.path.open("a") as handle:
+            handle.write(f"{time.time():.3f},{self.phase},{reserved},{allocated},{used},{free}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def sample(self) -> None:
+        if not _is_cuda(self.device):
+            return
+        import torch
+
+        if not torch.cuda.is_available():
+            return
+        free_b, total_b = torch.cuda.mem_get_info()
+        self.write_sample(
+            int(torch.cuda.memory_reserved()),
+            int(torch.cuda.memory_allocated()),
+            int(total_b - free_b),
+            int(free_b),
+        )
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            # Telemetry must never be the reason a run dies: a sampling failure
+            # is dropped so the run continues, and the gap in the trace shows it.
+            with contextlib.suppress(Exception):
+                self.sample()
+
+    def start(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text("t,phase,reserved,allocated,used,free\n")
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self.interval + 2)
+        self.sample()
+
+
 def rehearsal_sequences(sequences: int, max_batches: int | None) -> int:
     """The sequence count the construction will actually BUILD.
 
@@ -845,6 +957,7 @@ def build_real_arms(
     chunk_tokens: int | None = None,
     max_batches: int | None = None,
     diagnostics: dict[str, Any] | None = None,
+    telemetry: MemTelemetry | None = None,
 ) -> dict[str, dict[tuple[int, str], dict[str, Any]]]:
     """Real statistics for both arms, from the real fp teacher at true geometry.
 
@@ -873,6 +986,8 @@ def build_real_arms(
         tokenize_chunks,
     )
 
+    if telemetry is not None:
+        telemetry.phase = "tokenize"
     text = load_wikitext_text(find_wikitext_shards("train"))
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     # Rehearsal bound: exercise the memory ceiling on a few batches instead of
@@ -895,8 +1010,17 @@ def build_real_arms(
         diagnostics["sequences"] = resolved
         diagnostics["protocol_sequences"] = protocol_sequences
         diagnostics["packed_batches"] = len(batches)
+        diagnostics["attn_implementation"] = ATTN_IMPL
 
-    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=torch.bfloat16).eval()
+    if telemetry is not None:
+        telemetry.phase = "model_load"
+    # Pinned, not auto: which attention kernel ran is part of what the peak
+    # means, and `auto` resolves differently per environment. QK_ATTN_IMPL
+    # makes the alternative testable without a code change.
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_ID, dtype=torch.bfloat16, attn_implementation=ATTN_IMPL
+    ).eval()
+    del text, tokenizer
     # Fail closed, never silently fall back: a "GPU" run that quietly computed on
     # CPU would report GPU timings for CPU work. Both collectors move the batches
     # to the model's parameter device themselves, so moving the model is the
@@ -908,6 +1032,8 @@ def build_real_arms(
     wanted = tuple((block, name) for _, block, name in probe_set)
 
     # Arm A: the shipped construction, verbatim -- same call the pipeline makes.
+    if telemetry is not None:
+        telemetry.phase = "stats_shipped"
     book = collect_stats(model, batches)
     shipped: dict[tuple[int, str], dict[str, Any]] = {}
     for entry in book:  # LayerStatsBook is iterable; _entries is private
@@ -919,10 +1045,13 @@ def build_real_arms(
                     "percentile": None,
                     "grad_fallback": None,
                 }
+    release_device_memory(device)
 
     # Arm B: the intended construction -- real CE backward, p99.9 clip first.
     # chunk_tokens selects the memory-bounded head-chunked path (see
     # collect_intended_statistics); None keeps the whole-batch reference.
+    if telemetry is not None:
+        telemetry.phase = "stats_intended"
     intended = collect_intended_statistics(
         model,
         batches,
@@ -934,6 +1063,7 @@ def build_real_arms(
         # supported combination and the naive baseline it is meant to be.
         checkpoint_blocks=chunk_tokens is not None,
         diagnostics=diagnostics,
+        telemetry=telemetry,
     )
 
     missing = [key for key in wanted if key not in shipped or key not in intended]
@@ -1012,13 +1142,29 @@ def main() -> int:
             if device.startswith("cuda"):
                 torch.cuda.reset_peak_memory_stats()
             diag: dict[str, Any] = {}
-            build_real_arms(
-                probe_set,
-                device=device,
-                chunk_tokens=chunk_tokens,
-                max_batches=args.rehearsal_batches,
-                diagnostics=diag,
+            # Telemetry starts before the model is loaded, so the trace covers
+            # the load and the tokenize pass as well as the statistics: the
+            # drain is fast enough that a trace starting at the stats pass
+            # would open after the interesting part.
+            telemetry = (
+                MemTelemetry(args.out.parent / "rehearsal-mem.csv", device)
+                if args.out is not None
+                else None
             )
+            if telemetry is not None:
+                telemetry.start()
+            try:
+                build_real_arms(
+                    probe_set,
+                    device=device,
+                    chunk_tokens=chunk_tokens,
+                    max_batches=args.rehearsal_batches,
+                    diagnostics=diag,
+                    telemetry=telemetry,
+                )
+            finally:
+                if telemetry is not None:
+                    telemetry.stop()
             peak_bytes = int(diag.get("peak_bytes", 0))
             record = {
                 "phase": "rehearsal",
@@ -1033,6 +1179,9 @@ def main() -> int:
                 "peak_bytes": peak_bytes,
                 "peak_gb": round(peak_bytes / 1e9, 3),
                 "cuda_available": bool(torch.cuda.is_available()),
+                "attn_implementation": diag.get("attn_implementation"),
+                "mem_csv": "rehearsal-mem.csv" if args.out is not None else None,
+                "no_cuda_memory_caching": os.environ.get("PYTORCH_NO_CUDA_MEMORY_CACHING"),
             }
             print(f"[lane0] REHEARSAL {json.dumps(record, sort_keys=True)}")
             if args.out is not None:

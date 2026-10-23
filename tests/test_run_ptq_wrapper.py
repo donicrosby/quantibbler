@@ -308,3 +308,29 @@ def test_lane0_launch_env_records_harness_knobs_not_driver_geometry(tmp_path):
     assert any(
         line.startswith("tree_dirty_files=") and line.split("=", 1)[1].isdigit() for line in lines
     ), lines
+
+
+def test_lane0_disables_the_caching_allocator_and_ptq_does_not():
+    """The rehearsal releases as it runs; the campaign keeps its normal allocator.
+
+    With caching on, freed blocks stay in the pool and the host keeps seeing the
+    high-water mark -- the difference between "the allocator is holding it" and
+    "the process is using it". The ptq peak is a number the campaign is compared
+    against, so its allocator configuration must not move.
+    """
+    lane0 = _launch(**_LANE0)
+    assert lane0.returncode == 0, lane0.stderr
+    assert "PYTORCH_NO_CUDA_MEMORY_CACHING=1" in lane0.stdout
+
+    ptq = _launch(MODE="ptq")
+    assert ptq.returncode == 0, ptq.stderr
+    assert "PYTORCH_NO_CUDA_MEMORY_CACHING" not in ptq.stdout
+
+
+def test_lane0_launch_env_records_the_release_configuration(tmp_path):
+    completed = _launch(OUT=str(tmp_path), **_LANE0)
+    assert completed.returncode == 0, completed.stderr
+    text = (tmp_path / "launch.env").read_text()
+    assert "no_cuda_memory_caching=1" in text
+    assert "attn_impl=sdpa" in text
+    assert "mem_csv=rehearsal-mem.csv" in text
