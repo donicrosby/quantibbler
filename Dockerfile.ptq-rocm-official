@@ -61,6 +61,12 @@ RUN uv export --frozen --no-hashes --no-dev --no-emit-project --all-extras -o /t
     && grep -iE '^(torch|triton|pytorch-triton|cuda-)|^-e ' /tmp/req-notorch.txt && exit 1 || true \
     && uv pip install --python "$(command -v python3)" -r /tmp/req-notorch.txt \
     && uv pip install --python "$(command -v python3)" /wheels/quantibbler_kernels-*.whl \
+    # The project itself, with --no-deps: `--no-emit-project` kept it out of the
+    # requirement set (correctly -- its deps come from that filtered set), but the
+    # package still has to be importable. --no-deps is the load-bearing flag: a
+    # resolving install would re-derive torch from the lock and undo the whole
+    # point of this image. Backend is uv_build, so no Rust toolchain is needed.
+    && uv pip install --python "$(command -v python3)" --no-deps /work \
     && rm -rf /wheels /tmp/req*.txt
 
 # Assert the two things this image is for, at build time: the base's torch is
