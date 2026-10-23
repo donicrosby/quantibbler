@@ -618,3 +618,72 @@ def test_whole_batch_head_with_checkpointed_blocks_fails_closed(tool, tiny_model
         assert tool.collect_intended_statistics(
             model, [batch], wanted=wanted, percentile=99.9, **kwargs
         )
+
+
+class _FixedTokenizer:
+    """A tokenizer whose stream length is known, so shapes are deterministic."""
+
+    def __init__(self, n_tokens: int) -> None:
+        self._ids = list(range(1, n_tokens + 1))
+
+    def __call__(self, text: str, return_tensors=None, add_special_tokens=False):  # noqa: ANN001, ANN201, ARG002
+        return {"input_ids": self._ids}
+
+
+def _driver():
+    import sys
+
+    tools = str(pathlib.Path(__file__).resolve().parents[2] / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    import quantize_hf_model
+
+    return quantize_hf_model
+
+
+def test_rehearsal_geometry_is_the_count_that_gets_built(tool):
+    """The guard must compare against what was BUILT, not the protocol count.
+
+    Green-1 refused here: the rehearsal built sixteen batches, sliced to one,
+    then checked the eight surviving rows against the protocol's 128.
+    """
+    assert tool.rehearsal_sequences(128, None) == 128
+    assert tool.rehearsal_sequences(128, 1) == 8
+    assert tool.rehearsal_sequences(128, 16) == 128
+
+
+def test_rehearsal_builds_the_shapes_the_guard_checks(tool):
+    """Shape assertion (the audit point): what the reduced geometry constructs.
+
+    Runs the driver's real packing code over a fixed token stream, so this
+    asserts the loader's arithmetic rather than the corpus, and asserts the
+    exact quantity the guard compares.
+    """
+    q = _driver()
+    # Enough blocks for the largest case (16 packed batches of 8).
+    tokenizer = _FixedTokenizer(128 * 2048)
+    for max_batches, expected_batches in ((1, 1), (2, 2), (None, 16)):
+        sequences = tool.rehearsal_sequences(128, max_batches)
+        n_batches = q.packed_chunks(sequences, "--calibration-seqs")
+        batches = q.tokenize_chunks(tokenizer, "text", 2048, n_batches, 0)
+        assert len(batches) == expected_batches, (max_batches, len(batches))
+        assert all(tuple(b.shape) == (q.BATCH, 2048) for b in batches), max_batches
+        # This is precisely the comparison the guard makes.
+        assert sum(int(b.shape[0]) for b in batches) == sequences, max_batches
+
+
+def test_build_then_slice_would_still_refuse(tool):
+    """The green-1 refusal, reproduced: the reduction must happen before the loader.
+
+    Building at protocol count and slicing afterwards leaves the guard comparing
+    the eight surviving rows against the protocol's 128 -- the identical error
+    the rehearsal died on.
+    """
+    q = _driver()
+    tokenizer = _FixedTokenizer(128 * 2048)
+    sliced = q.tokenize_chunks(
+        tokenizer, "text", 2048, q.packed_chunks(128, "--calibration-seqs"), 0
+    )[:1]
+    resolved = sum(int(b.shape[0]) for b in sliced)
+    assert resolved == 8
+    assert resolved != 128, "the guard would have accepted a sliced construction"

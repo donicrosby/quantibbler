@@ -814,10 +814,30 @@ def collect_intended_statistics(
     return out
 
 
+def rehearsal_sequences(sequences: int, max_batches: int | None) -> int:
+    """The sequence count the construction will actually BUILD.
+
+    A bounded rehearsal reduces the count at the boundary it is converted at,
+    rather than building the full protocol and slicing the batches down: a
+    sliced construction leaves the guard comparing a reduced row count against
+    the protocol count, which is exactly how green-1 refused. The packed batch
+    size comes from the driver so the two boundaries cannot drift apart.
+    """
+    if max_batches is None:
+        return sequences
+    import sys as _sys
+
+    _sys.path.insert(0, str(REPO_ROOT / "tools"))
+    from quantize_hf_model import BATCH  # noqa: PLC0415
+
+    return max_batches * BATCH
+
+
 def build_real_arms(
     probe_set: tuple[tuple[str, int, str], ...] = PROBE_SET,
     *,
     sequences: int = CALIBRATION_SEQS,
+    protocol_sequences: int = CALIBRATION_SEQS,
     seq_len: int = SEQ_LEN,
     seed: int = 0,
     percentile: float = PERCENTILE,
@@ -855,19 +875,26 @@ def build_real_arms(
 
     text = load_wikitext_text(find_wikitext_shards("train"))
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-    n_batches = packed_chunks(sequences, "--calibration-seqs")
+    # Rehearsal bound: exercise the memory ceiling on a few batches instead of
+    # all sixteen. The statistic is not being measured here, only the peak --
+    # and the peak is a per-batch property, so a bounded run still reproduces a
+    # per-batch defect. The reduction happens BEFORE the loader, so what is
+    # built is what the guard checks.
+    built_sequences = rehearsal_sequences(sequences, max_batches)
+    n_batches = packed_chunks(built_sequences, "--calibration-seqs")
     batches = tokenize_chunks(tokenizer, text, seq_len, n_batches, seed)
-    if max_batches is not None:
-        # Rehearsal bound: exercise the memory ceiling on a few batches instead
-        # of all sixteen. The statistic is not being measured here, only the
-        # peak -- and the peak is a per-batch property, so a bounded run still
-        # reproduces a per-batch defect.
-        batches = batches[:max_batches]
     resolved = sum(int(b.shape[0]) for b in batches)
-    if resolved != sequences:
+    if resolved != built_sequences:
         raise ValueError(
-            f"calibration geometry resolved to {resolved} sequences, expected {sequences}"
+            f"calibration geometry resolved to {resolved} sequences, expected {built_sequences}"
         )
+    if diagnostics is not None:
+        # Provenance: a rehearsal's geometry must be readable from the record,
+        # or "sequences=8" gets read as a protocol claim instead of a bound.
+        diagnostics["rehearsal"] = max_batches is not None
+        diagnostics["sequences"] = resolved
+        diagnostics["protocol_sequences"] = protocol_sequences
+        diagnostics["packed_batches"] = len(batches)
 
     model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=torch.bfloat16).eval()
     # Fail closed, never silently fall back: a "GPU" run that quietly computed on
@@ -995,6 +1022,10 @@ def main() -> int:
             peak_bytes = int(diag.get("peak_bytes", 0))
             record = {
                 "phase": "rehearsal",
+                "rehearsal": True,
+                "sequences": diag.get("sequences"),
+                "protocol_sequences": diag.get("protocol_sequences"),
+                "packed_batches": diag.get("packed_batches"),
                 "chunk_tokens": chunk_tokens,
                 "rehearsal_batches": args.rehearsal_batches,
                 "device": device,
@@ -1015,6 +1046,9 @@ def main() -> int:
                         f"rehearsal_peak_gb={record['peak_gb']}\n"
                         f"rehearsal_chunk_tokens={chunk_tokens}\n"
                         f"rehearsal_batches={args.rehearsal_batches}\n"
+                        f"rehearsal={record['rehearsal']}\n"
+                        f"rehearsal_sequences={record['sequences']}\n"
+                        f"protocol_sequences={record['protocol_sequences']}\n"
                     )
             return 0
         stats = build_real_arms(probe_set, device=device, chunk_tokens=chunk_tokens)
