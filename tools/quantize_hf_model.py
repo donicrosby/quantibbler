@@ -250,6 +250,11 @@ def perplexity_from_logits(logits_fn, batches: list[torch.Tensor]) -> float:
     n_preds = 0
     for batch in batches:
         logits = logits_fn(batch[:, :-1])
+        # `batch` is tokenized on the CPU; the logits come back on whatever
+        # device the model ran on. Move the batch to match instead of assuming
+        # they agree -- the target, and any mask derived from it, must be on the
+        # logits' device. A no-op on CPU.
+        batch = batch.to(logits.device)
         targets = batch[:, 1:]
         for i in range(logits.shape[0]):
             nats = torch.nn.functional.cross_entropy(logits[i].float(), targets[i], reduction="sum")
