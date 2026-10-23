@@ -1006,7 +1006,7 @@ def main() -> int:
         argument by which this call site could re-pin it.
         """
         if depth >= MIN_PROBE_DEPTH and not (depth - MIN_PROBE_DEPTH) % args.probe_interval:
-            prefix_ppl = perplexity_from_logits(lambda b: host_model(b), probe_slice)
+            prefix_ppl = perplexity_from_logits(lambda b: host_model(b.to(_device)), probe_slice)
             ratio = probe_ratio(prefix_ppl, fp_probe_ppl)
             probe_history.append(
                 {
@@ -1087,7 +1087,7 @@ def main() -> int:
 
         print("[5/6] quantized perplexity (checkpoint-native dtype, artifact written back)")
         host = model  # quantize_model wrote the artifact back into the host
-        ppl_quant = perplexity_from_logits(lambda b: host(b), held_out)
+        ppl_quant = perplexity_from_logits(lambda b: host(b.to(_device)), held_out)
         # A measurement has no packed artifact: BPW and qpk1 bytes are null,
         # never 0 — a consumer must not read "0.0000 bpp" as a compression win.
         measured_artifact = args.factor_mode != "fp"
