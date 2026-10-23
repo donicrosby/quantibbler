@@ -139,6 +139,24 @@ def _record_solver_probe(name, w, bal, res, cfg) -> None:
     Both against the ORIGINAL (un-preconditioned) FP weight W, never W~, per
     the stage-boundary pin. The effective rho_end and its source ride along, so
     a probe row can never be mislabelled about which arm produced it.
+
+    ``rel_raw`` measures ``||W - U V^T||_F / ||W||_F`` on the CONTINUOUS
+    product, which is deliberately NOT fit to W: the alpha refit fits the
+    *packed* product (see lb_admm.magnitude_balance -- it corrects
+    ``s1 o Ub Vb^T o s2^T`` and never rescales the latents). Nothing consumes
+    the continuous product either: every site that turns latents into a weight
+    goes through ``_factor_terms``, whose binary mode applies ``sign``, i.e.
+    the packed class -- the module forward, the live STE forward
+    (``_quantized_forward_block``) and the ``_set_linear`` write-back alike.
+
+    So ``rel_raw > 1`` is EXPECTED on the ADMM arm and is not a defect signal.
+    It reads as magnitude drift of the continuous latents, which is the
+    consensus shaping that makes the packed product good in the first place
+    (Bug Hunter's ALS-ceiling audit: ADMM packs at -0.133, SVD at -0.389 on the
+    same real weight). Driving that drift toward 1.0 would trade away the pack
+    fidelity the solver is chosen for. Do not close it as a balance-stage bug;
+    the useful reading is that raw fit is a weak predictor of the served
+    artifact, which is the same lesson the SVD arm taught from the other side.
     """
     if not os.environ.get(SOLVER_PROBE_ENV):
         return
