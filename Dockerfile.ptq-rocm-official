@@ -1,0 +1,73 @@
+# syntax=docker/dockerfile:1
+# quantibbler PTQ runner on the OFFICIAL ROCm PyTorch base.
+#
+# Why this image exists: the DIY image (python:3.12-slim + whl-next wheels)
+# carried a torch and HIP IDENTICAL to this base -- 2.14.0+rocm10.1.0, hip
+# 7.16.26385, same device -- and could not execute a single kernel
+# (hipErrorInvalidKernelFile on the 10.1.0 arm, hipErrorInvalidImage on 10.0.0),
+# while this base computes a matmul on the same host driver. Same wheels,
+# different system layer. So the fault was the slim base's ROCm interop: not the
+# wheel, not the minor, and not the host driver -- which publishes
+# gfx_target_version 110501 (gfx1151) with firmware loaded.
+#
+# TORCH IS NEVER NAMED IN THIS FILE. It is the proven-working stack, and both
+# traps that bit the DIY image were "something else replaced torch". So the
+# project's locked requirements are installed from the lock with torch filtered
+# out, into the base's OWN interpreter. Deliberately not `uv sync`: sync manages
+# an environment, and would prune the base's torch as extraneous. This is the
+# layering case the pip interface exists for -- the opposite of the earlier
+# mistake, where the pip interface was used for torch itself, which uv could and
+# should have managed.
+#
+#   docker build -f Dockerfile.ptq-rocm-official -t quantibbler-ptq:rocm-official .
+#
+# Devices are not passed here; that is the wrapper's job and it is opt-in (GPU=1).
+# On this host there is no `render` group: kfd and renderD128 are GID 993.
+ARG BASE=rocm/pytorch:rocm10.1.0_ubuntu24.04_py3.12_pytorch_release_2.14.0
+
+FROM ghcr.io/pyo3/maturin:latest AS maturin
+
+WORKDIR /build
+COPY pyproject.toml README.md uv.lock ./
+COPY crates ./crates
+RUN maturin build --release --out /wheels -m crates/quantibbler-kernels/Cargo.toml \
+    && rm -rf /build/target
+
+FROM ${BASE} AS runner
+
+COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /uvx /bin/
+
+# The base ships python3 with no `python` on PATH -- the first Launch 1 attempt
+# died on exactly that, before ROCm was ever reached. Fixed in the image rather
+# than in the wrapper so the launch line stays identical across image families:
+# the interpreter is a property of the attested image, not of the launch.
+RUN ln -sf "$(command -v python3)" /usr/local/bin/python
+
+WORKDIR /work
+COPY pyproject.toml README.md uv.lock ./
+COPY src ./src
+COPY tools ./tools
+COPY --from=maturin /wheels /wheels
+
+RUN uv export --frozen --no-hashes --no-dev --no-emit-project --all-extras -o /tmp/req.txt \
+    # The filter and the guard below mirror each other, and both are wider than
+    # torch: the lock carries torch's own CUDA stack (`cuda-bindings`, `cuda-toolkit`,
+    # each `# via torch`) and a workspace `-e` path dependency, and installing any of
+    # them into this base is the "something else replaced torch's stack" failure this
+    # image exists to end -- it has already cost two builds to narrower patterns.
+    && grep -vE '^(torch|triton|pytorch-triton|cuda-)|^-e ' /tmp/req.txt > /tmp/req-notorch.txt \
+    && echo "--- requirements installed (torch absent by construction) ---" \
+    && grep -cE '^[a-z]' /tmp/req-notorch.txt \
+    && grep -iE '^(torch|triton|pytorch-triton|cuda-)|^-e ' /tmp/req-notorch.txt && exit 1 || true \
+    && uv pip install --python "$(command -v python3)" -r /tmp/req-notorch.txt \
+    && uv pip install --python "$(command -v python3)" /wheels/quantibbler_kernels-*.whl \
+    && rm -rf /wheels /tmp/req*.txt
+
+# Assert the two things this image is for, at build time: the base's torch is
+# still the base's torch, and our code imports against it.
+RUN python -c "import torch; print('torch after layering:', torch.__version__, '| hip:', torch.version.hip)" \
+    && python -c "import torch, transformers; from quantibbler import kernels; print('layered:', torch.__version__, '| kernels:', kernels.HAVE_KERNELS)"
+
+ENV PATH="/usr/local/bin:$PATH"
+ENTRYPOINT []
+CMD ["python", "tools/quantize_hf_model.py", "--help"]
