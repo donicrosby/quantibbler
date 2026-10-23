@@ -475,7 +475,14 @@ def test_flip_acceptance_objective_is_the_block_forward():
     from quantibbler.ptq import block_recon as br
 
     src = inspect.getsource(br._discrete_flip_pass)
-    assert "(block(x_b) - y_b).pow(2).mean()" in src
+    # This pin fixes the SHAPE of the acceptance objective -- a whole-block
+    # forward, never a layer-local residual -- so it moves when the call shape
+    # moves, as the provenance anchors do. The capture is now forwarded in
+    # chunks (CAPTURE_CHUNK_ROWS) because the unchunked form OOM-killed the
+    # container at paper geometry; chunking a row-wise block is the same
+    # objective up to floating-point rounding, which is why the pin tracks the
+    # call and not a literal spelling of it.
+    assert "(_forward_chunked(block, x_b) - y_b).pow(2).mean()" in src
     assert "block_tuned" in inspect.getsource(br.reconstruct_block) or True
     # The dimensionally-incoherent layer-local form must not appear anywhere.
     module_src = inspect.getsource(br)

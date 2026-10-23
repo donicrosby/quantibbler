@@ -216,6 +216,42 @@ def _record_solver_probe(name, w, bal, res, cfg) -> None:
     )
 
 
+#: Row chunk for forwards over the full capture tensor.
+#:
+#: At the paper geometry the capture is (128 seqs x 8) = 1024 rows x 2048 tokens
+#: x 1024 d_model (4 GiB at bf16). The block's MLP expands that to
+#: (1024, 2048, 3072), so ``act(gate(x)) * up(x)`` alone requires TWO 12 GiB
+#: intermediates live at once -- 24 GiB, plus the 4 GiB capture and a 4 GiB
+#: clone, against a 32 GiB container cap. That is what killed the first
+#: paper-faithful run: dmesg anon-rss 33,480,244kB = 99.8% of the cap, a
+#: one-window spike no polling watchdog can catch.
+#:
+#: Chunking bounds the peak by ``chunk_rows`` instead of by capture geometry --
+#: 64 rows holds 0.75 GiB per MLP intermediate instead of 12 GiB -- which is
+#: what makes the cost independent of rank/seq/calib growth rather than tuned to
+#: today's numbers. Same idiom as ``calibration.collect_stats``'s ``chunk_rows``;
+#: note that fp32 would DOUBLE the intermediates, so this is required on any
+#: device, not merely a CPU workaround.
+CAPTURE_CHUNK_ROWS = 64
+
+
+def _forward_chunked(module, x, chunk_rows: int = CAPTURE_CHUNK_ROWS):
+    """Run ``module(x)`` without ever holding more than ``chunk_rows`` of activations.
+
+    Row-chunked and concatenated, which is exact for a row-wise block -- the
+    module sees each row independently, so the only difference is floating-point
+    blocking: BLAS picks its reduction order from the batch shape, exactly as the
+    pinned thread count does, so results match within rounding rather than
+    bit-for-bit. Cost is compute-neutral to a few percent (16 forwards instead of
+    1 at the paper geometry) in exchange for a peak bounded by chunk size.
+    """
+    if not isinstance(chunk_rows, int) or chunk_rows <= 0 or x.shape[0] <= chunk_rows:
+        return module(x)
+    return torch.cat(
+        [module(x[lo : lo + chunk_rows]) for lo in range(0, x.shape[0], chunk_rows)], dim=0
+    )
+
+
 def _weights_fingerprint(module: nn.Module) -> str:
     """Stable sha256 over a module's parameters (the pristine teacher source).
 
@@ -583,7 +619,7 @@ def _tune_fp(
 
     def _residual() -> float:
         with torch.no_grad():
-            out = block(x_b)
+            out = _forward_chunked(block, x_b)
             return float((out - y_b).pow(2).mean().sqrt())
 
     opt = torch.optim.Adam(params, lr=cfg.stage_pre.lr)
@@ -775,7 +811,7 @@ def _tune_latent_ste(
         distinguish an effective stage from an inert one).
         """
         with torch.no_grad():
-            out = _quantized_forward_block(block, facs, x_b)
+            out = _forward_chunked(lambda t: _quantized_forward_block(block, facs, t), x_b)
             return float((out - y_b).pow(2).mean().sqrt())
 
     residual_before = _residual()
@@ -936,7 +972,7 @@ def _discrete_flip_pass(
     if budget <= 0:
         return record
     with torch.no_grad():
-        objective = float((block(x_b) - y_b).pow(2).mean())
+        objective = float((_forward_chunked(block, x_b) - y_b).pow(2).mean())
     record["objective_before"] = objective
     order: list[tuple[str, int, int]] = []
     for tag, latent in (("u", fac.u_latent), ("v", fac.v_latent)):
@@ -956,7 +992,7 @@ def _discrete_flip_pass(
             latent.data[i, j] = -latent.data[i, j]
         _set_linear(linear, fac, factor_mode=factor_mode)
         with torch.no_grad():
-            candidate = float((block(x_b) - y_b).pow(2).mean())
+            candidate = float((_forward_chunked(block, x_b) - y_b).pow(2).mean())
         record["proposals"] += 1
         if candidate < objective:
             objective = candidate
@@ -1713,7 +1749,9 @@ def reconstruct_model(
             # silently turn the teacher into a quantized-prefix teacher.
             teacher_block = teacher_children.get(name)
             with torch.no_grad():
-                y_b = (teacher_block if teacher_block is not None else block)(x_running)
+                y_b = _forward_chunked(
+                    teacher_block if teacher_block is not None else block, x_running
+                )
             result = reconstruct_block(
                 block,
                 batches,
@@ -1737,7 +1775,7 @@ def reconstruct_model(
         # Prefix advances through the block with its factorized layers active
         # (frozen binaries already written back by reconstruct_block).
         with torch.no_grad():
-            x_running = block(x_running)
+            x_running = _forward_chunked(block, x_running)
         # Observer hook (qk-fail-fast-loop): the live host model is now exactly
         # the quantized prefix of ``len(results)`` blocks — the same object the
         # driver measures at the end. ``depth`` counts quantized blocks 1-based.
