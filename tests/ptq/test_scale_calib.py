@@ -62,7 +62,9 @@ def test_scn_kl_scale_calibration():
         u0, s0, vt0 = np.linalg.svd(w, full_matrices=False)
         uu = u0[:, :4] * np.sqrt(s0[:4])
         vv = vt0[:4].T * np.sqrt(s0[:4])
-        bal = magnitude_balance(uu.copy(), vv.copy(), np.ones(8), np.ones(8), target=w)
+        bal = magnitude_balance(
+            uu.copy(), vv.copy(), np.ones(8), np.ones(8), target=w, backend="numpy"
+        )
         bal.s1 = bal.s1 * 1.15
         bal.s2 = bal.s2 * 0.9
         st = QuantizedLayerState(name, bal.Ub, bal.Vb, bal.s1, bal.s2, w * 0)
@@ -121,7 +123,9 @@ def _kd_layer_book(model, rank: int = 4):
         u0, s0, vt0 = np.linalg.svd(w, full_matrices=False)
         uu = u0[:, :rank] * np.sqrt(s0[:rank])
         vv = vt0[:rank].T * np.sqrt(s0[:rank])
-        bal = magnitude_balance(uu.copy(), vv.copy(), np.ones(8), np.ones(8), target=w)
+        bal = magnitude_balance(
+            uu.copy(), vv.copy(), np.ones(8), np.ones(8), target=w, backend="numpy"
+        )
         bal.s1 = bal.s1 * 1.15
         bal.s2 = bal.s2 * 0.9
         st = QuantizedLayerState(name, bal.Ub, bal.Vb, bal.s1, bal.s2, w * 0)

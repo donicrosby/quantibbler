@@ -44,7 +44,9 @@ def test_scn_polish_keeps_scales_positive_and_improves_objective():
     u0, s0, vt0 = np.linalg.svd(w, full_matrices=False)
     uu = u0[:, :6] * np.sqrt(s0[:6])
     vv = vt0[:6].T * np.sqrt(s0[:6])
-    bal = magnitude_balance(uu.copy(), vv.copy(), np.ones(24), np.ones(18), target=w)
+    bal = magnitude_balance(
+        uu.copy(), vv.copy(), np.ones(24), np.ones(18), target=w, backend="numpy"
+    )
 
     def sse(s1, s2, ub, vb):
         return float(np.sum((w - (s1[:, None] * (ub @ vb.T)) * s2[None, :]) ** 2))
@@ -93,7 +95,9 @@ def test_scn_polish_roundwise_trust_region_bounds_motion(rounds):
     u0, s0, vt0 = np.linalg.svd(w, full_matrices=False)
     uu = u0[:, :4] * np.sqrt(s0[:4])
     vv = vt0[:4].T * np.sqrt(s0[:4])
-    bal = magnitude_balance(uu.copy(), vv.copy(), np.ones(16), np.ones(12), target=w)
+    bal = magnitude_balance(
+        uu.copy(), vv.copy(), np.ones(16), np.ones(12), target=w, backend="numpy"
+    )
 
     ub1, vb1, s1_1, s2_1 = greedy_polish(
         w, bal.Ub.copy(), bal.Vb.copy(), bal.s1.copy(), bal.s2.copy(), rounds=1
