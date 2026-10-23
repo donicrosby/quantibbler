@@ -87,6 +87,13 @@ MODE="${MODE:-ptq}"
 REHEARSAL_BATCHES="${REHEARSAL_BATCHES:-1}"
 CHUNK_TOKENS="${CHUNK_TOKENS:-256}"
 WALL_MIN="${WALL_MIN:-30}"
+# Host memory-floor kill-switch for lane0 modes: kfd-granted device memory is
+# invisible to the cgroup fence, so the ONLY thing that can stop a run before
+# it kills the box is a host-side watcher on the host's own free memory. The
+# watcher polls `free` every 3s and docker-stops the container when host
+# available memory falls under the floor -- the box survives, the run dies
+# with a trace. 0 disables (rehearsals on this box keep it armed at 20G).
+MEM_FLOOR_GB="${MEM_FLOOR_GB:-20}"
 
 # Refuse arguments instead of ignoring them. This wrapper pins the eval geometry
 # below, so a stray flag — or SEQ_LEN=2048 written in argument position — used to
@@ -237,8 +244,8 @@ mkdir -p "$OUT" 2>/dev/null || true
     "${GPU:-0}" "$IMAGE" "$IMAGE_DIGEST" \
     "$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
     "$(git -C "$REPO" status --porcelain 2>/dev/null | grep -vc '^??' || true)"
-  printf 'mode=%s\nrehearsal_batches=%s\nchunk_tokens=%s\nwall_min=%s\n' \
-    "$MODE" "$REHEARSAL_BATCHES" "$CHUNK_TOKENS" "$WALL_MIN"
+  printf 'mode=%s\nrehearsal_batches=%s\nchunk_tokens=%s\nwall_min=%s\nmem_floor_gb=%s\n' \
+    "$MODE" "$REHEARSAL_BATCHES" "$CHUNK_TOKENS" "$WALL_MIN" "$MEM_FLOOR_GB"
 } > "$OUT/launch.env" 2>/dev/null || echo "warning: could not write $OUT/launch.env" >&2
 # Pre-launch host free-RAM baseline, beside the artifact: the fence decision
 # reads the kfd-visible peak against what the host actually had going in.
@@ -438,6 +445,27 @@ if [ "$MODE" != "ptq" ] && [ "${WALL_MIN:-0}" -gt 0 ] 2>/dev/null; then
   nohup sh -c "sleep $((WALL_MIN * 60)); docker stop '$CONTAINER_NAME' >/dev/null 2>&1" \
     >/dev/null 2>&1 &
   echo "wall-stop-net: pid=$! deadline=${WALL_MIN}m container=$CONTAINER_NAME" >&2
+fi
+
+# Host memory-floor kill-switch: the one net that actually catches a kfd
+# drain, since only the host can see its own free memory. Polls every 3s and
+# docker-stops the container the moment host available memory drops under the
+# floor -- before the box can die. The trace lands in watchdog.log.
+if [ "$MODE" != "ptq" ] && [ "${MEM_FLOOR_GB:-0}" -gt 0 ] 2>/dev/null; then
+  nohup sh -c '
+    floor=$1; name=$2; log=$3
+    while docker inspect -f "{{.State.Running}}" "$name" 2>/dev/null | grep -q true; do
+      avail=$(free -g | awk "/^Mem:/{print \$NF}")
+      if [ "${avail:-999}" -lt "$floor" ]; then
+        echo "mem-floor: host available ${avail}G < floor ${floor}G; stopping $name" >> "$log"
+        docker stop "$name" >/dev/null 2>&1
+        break
+      fi
+      sleep 3
+    done
+  ' sh "$MEM_FLOOR_GB" "$CONTAINER_NAME" "$OUT/watchdog.log" \
+    >/dev/null 2>&1 &
+  echo "mem-floor-net: pid=$! floor=${MEM_FLOOR_GB}G container=$CONTAINER_NAME" >&2
 fi
 
 exec "$@"
