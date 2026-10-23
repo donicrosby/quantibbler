@@ -31,6 +31,8 @@ _KNOBS = (
     "PAPER_FAITHFUL",
     "STE_FLIP_PASS_BUDGET",
     "COMPUTE_DTYPE",
+    "IMAGE",
+    "GPU",
     "DRY_RUN",
 )
 
@@ -126,6 +128,41 @@ def test_compute_dtype_knob_is_passthrough_and_recorded():
     assert fp32.returncode == 0, fp32.stderr
     assert "'--compute-dtype' 'float32'" in fp32.stdout
     assert "compute_dtype=float32" in fp32.stderr
+
+
+def test_gpu_requires_a_rocm_tagged_image():
+    """GPU=1 on the default tag is the collision the rocm tag exists to prevent.
+
+    `quantibbler-ptq:rocm` and `quantibbler-ptq:latest` are different images
+    living under two names, so passing ROCm devices to the default tag hands the
+    hardware a CUDA-wheel torch -- the same failure the rocm Dockerfile's build
+    assertion makes unbuildable. Refusing is the only safe direction: a run's
+    record cannot repair a wrong binary after the fact.
+    """
+    refused = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048", GPU="1")
+    assert refused.returncode == 2, refused.stderr
+    assert "requires a rocm-tagged image" in refused.stderr
+    assert "'docker'" not in refused.stdout, "a refused launch must not resolve an argv"
+
+    ok = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048", GPU="1", IMAGE="quantibbler-ptq:rocm")
+    assert ok.returncode == 0, ok.stderr
+    assert "'quantibbler-ptq:rocm'" in ok.stdout
+    assert "'--device' '/dev/kfd'" in ok.stdout
+
+
+def test_image_identity_and_digest_are_stated():
+    """A tag is a mutable name; the digest is the binary.
+
+    Both arms of a comparison can carry the same tag while holding different
+    bytes, which is the compute_dtype/rho_end gap in its quietest form. The
+    default is stated rather than implied, and an uninspectable image says
+    `unknown` instead of silently omitting the field.
+    """
+    default = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048")
+    assert default.returncode == 0, default.stderr
+    assert "'quantibbler-ptq:latest'" in default.stdout
+    assert "image=quantibbler-ptq:latest" in default.stderr
+    assert "image_digest=" in default.stderr, "the digest is never left implied"
 
 
 def test_dry_run_announces_nothing_it_need_not_and_the_advisories_it_must():

@@ -190,6 +190,11 @@ def _record_solver_probe(name, w, bal, res, cfg) -> None:
         # gap as an unlabelled rho_end, and worse here, because an fp32 row's
         # cos is not comparable to an fp64 row's.
         "compute_dtype": cfg.compute_dtype,
+        # Image identity, carried in from the wrapper via the container env: the
+        # driver cannot inspect its own image, and a tag is mutable, so the
+        # digest is what makes "did both arms run the same binary" answerable
+        # from the artifact. Absent outside a container, and stated as such.
+        "image_digest": os.environ.get("QUANTIBBLER_IMAGE_DIGEST", "unknown"),
         "rho_end": value,
         "rho_end_source": source,
         "n_iter": getattr(res, "n_iter", None),

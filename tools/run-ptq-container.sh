@@ -105,6 +105,26 @@ fi
 if [ "$SEQ_LEN" = "2048" ] && [ -z "$TUNE_SEQ_LEN" ]; then
   echo "note: SEQ_LEN=2048 with TUNE_SEQ_LEN unset runs the tune stage at 2048 too - the geometry that died with a memcg OOM at the 32g ceiling; set TUNE_SEQ_LEN=512 to bound the tune windows" >&2
 fi
+# Image identity is run identity. `quantibbler-ptq:rocm` and
+# `quantibbler-ptq:latest` are different images that coexist under two names, so
+# GPU=1 against the default tag would hand ROCm hardware a CUDA-wheel image --
+# the exact failure the rocm Dockerfile's own build assertion exists to make
+# unbuildable. Required, not defaulted: a wrong tag is refused before the launch,
+# because the run's record cannot repair a wrong binary after the fact.
+IMAGE="${IMAGE:-quantibbler-ptq:latest}"
+if [ "${GPU:-0}" = "1" ]; then
+  case "$IMAGE" in
+    *rocm*) ;;
+    *) echo "error: GPU=1 requires a rocm-tagged image (IMAGE=$IMAGE); refusing to hand ROCm devices to a non-ROCm torch" >&2; exit 2 ;;
+  esac
+fi
+# The digest, not just the tag: a tag is a mutable name, so a rebuild changes the
+# bytes while the name stays put -- the same "two arms indistinguishable" gap as
+# compute_dtype and rho_end, only quieter. Unknown is stated rather than implied
+# (a DRY_RUN has no image to inspect).
+IMAGE_DIGEST="$(docker inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
+[ -n "$IMAGE_DIGEST" ] || IMAGE_DIGEST=unknown
+
 # Stream contract, deliberate and now pinned from both sides: STDOUT is the
 # machine channel and carries the resolved argv and NOTHING else, so a verifier
 # can parse the launch line byte-for-byte; STDERR is the human channel and
@@ -122,7 +142,7 @@ echo "run-ptq-container: model=$MODEL rank=$RANK solver=$SOLVER seq_len=$SEQ_LEN
   "tune_seq_len=${TUNE_SEQ_LEN:-unset} calibration_seqs=$CALIBRATION_SEQS" \
   "factor_mode=${FACTOR_MODE:-binary} ablation=${ABLATION:-none} layer_scope=${LAYER_SCOPE:-all}" \
   "paper_faithful=${PAPER_FAITHFUL:-0} ste_flip_pass_budget=${STE_FLIP_PASS_BUDGET:-0}" \
-  "compute_dtype=${COMPUTE_DTYPE:-float64} gpu=${GPU:-0}" \
+  "compute_dtype=${COMPUTE_DTYPE:-float64} gpu=${GPU:-0} image=$IMAGE image_digest=$IMAGE_DIGEST" \
   "eval_seqs=$EVAL_SEQS out=$OUT" >&2
 
 mkdir -p "$OUT" 2>/dev/null || true
@@ -146,8 +166,8 @@ mkdir -p "$OUT" 2>/dev/null || true
   # whole reason commit-then-fire is a rule here. `grep -vc '^??'` counts
   # tracked modifications; untracked files (the owner-held wordlist) are
   # reported by their presence separately and are not dirt.
-  printf 'gpu=%s\ncommit=%s\ntree_dirty_files=%s\n' \
-    "${GPU:-0}" \
+  printf 'gpu=%s\nimage=%s\nimage_digest=%s\ncommit=%s\ntree_dirty_files=%s\n' \
+    "${GPU:-0}" "$IMAGE" "$IMAGE_DIGEST" \
     "$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
     "$(git -C "$REPO" status --porcelain 2>/dev/null | grep -vc '^??' || echo '?')"
 } > "$OUT/launch.env" 2>/dev/null || echo "warning: could not write $OUT/launch.env" >&2
@@ -175,6 +195,7 @@ set -- docker run --rm \
 if [ -n "${QK_RHO_END:-}" ]; then
   set -- "$@" -e "QK_RHO_END=$QK_RHO_END"
 fi
+set -- "$@" -e "QUANTIBBLER_IMAGE=$IMAGE" -e "QUANTIBBLER_IMAGE_DIGEST=$IMAGE_DIGEST"
 
 # GPU access is opt-in and explicit. These are host kernel devices, so passing
 # them into a container is a privilege decision -- never a silent default, and
@@ -191,6 +212,7 @@ if [ "${GPU:-0}" = "1" ]; then
   done
   set -- "$@" --device /dev/kfd --device /dev/dri --group-add "$(stat -c %g /dev/kfd)"
 fi
+
 # QK_SOLVER_PROBE enables the read-only per-linear diagnostic
 # (block_recon._record_solver_probe) that writes the attribution numbers. These
 # are docker flags, so they belong here, not after the image.
@@ -202,7 +224,7 @@ if [ -n "${QK_SOLVER_PROBE_PATH:-}" ]; then
 fi
 # ...and the container command continues the same argument list.
 set -- "$@" \
-  quantibbler-ptq:latest \
+  "$IMAGE" \
   python tools/quantize_hf_model.py \
     --model "$MODEL" --rank "$RANK" \
     --seq-len "$SEQ_LEN" --calibration-seqs "$CALIBRATION_SEQS" --eval-seqs "$EVAL_SEQS" \
@@ -277,8 +299,8 @@ mkdir -p /opt/data/tmp "$(dirname "$OUT")"
 # killed run leaves behind: `: >` destroyed it on every launch, including the
 # one that died (`tail` from the *failed* run is the useful line, not the new
 # run's first sample).
-printf '=== run %s rank=%s solver=%s seq_len=%s tune_seq_len=%s paper_faithful=%s ste_flip_pass_budget=%s compute_dtype=%s out=%s ===\n' \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-unset}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "${COMPUTE_DTYPE:-float64}" "$OUT" \
+printf '=== run %s rank=%s solver=%s seq_len=%s tune_seq_len=%s paper_faithful=%s ste_flip_pass_budget=%s compute_dtype=%s image=%s out=%s ===\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-unset}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "${COMPUTE_DTYPE:-float64}" "$IMAGE" "$OUT" \
   >> /opt/data/tmp/quantibbler-breadcrumbs.log
 
 
