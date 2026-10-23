@@ -91,9 +91,9 @@ The decisive run SHALL write a quantize_report-style JSON (strict-parseable, pro
 - **WHEN** the intended preconditioner does not dominate (per the design's domination rule)
 - **THEN** the verdict paragraph declares the hypothesis falsified and the report carries the lane gate for Lanes 1-3: STOP and re-analyze before landing anything, with Lane 0 gating Lanes 1-3 because lane order is load-bearing
 
-### Requirement: The real-statistics pass SHALL be memory-fenced and statistic-exact
+### Requirement: The CE head SHALL be chunked and statistic-exact
 
-The CE-gradient pass SHALL chunk the head per 256-token slice off a full-context trunk forward under `torch.utils.checkpoint`, sum the chunk losses, apply the mean gauge to the total, and take ONE backward, bitwise identical to the whole-batch path. Per-slice `empty_cache` SHALL bound the allocator, and the refire SHALL be preceded by a fenced rehearsal whose peak is recorded in launch.env.
+The CE-gradient pass SHALL chunk the head per 256-token slice off a full-context trunk forward under `torch.utils.checkpoint`, sum the chunk losses, apply the mean gauge to the total, and take ONE backward, bitwise identical to the whole-batch path. Per-slice `empty_cache` SHALL bound the allocator.
 
 #### Scenario: chunked_ce_preserves_statistic
 
@@ -101,12 +101,36 @@ The CE-gradient pass SHALL chunk the head per 256-token slice off a full-context
 - **THEN** the accumulated gradient-square vectors match to machine precision — identity, not tolerance
 - **AND** the fixture goes red against the naive trunk-rechunk variant AND against per-chunk backward (attention couples rows, so squared partials do not sum)
 
-#### Scenario: rehearsal_red_first
+### Requirement: The trunk forward SHALL gradient-checkpoint every production block
 
-- **WHEN** the bounded red rehearsal runs the parent harness bytes (the code the box-death fire executed) with the unchunked stats path bounded to ONE batch
-- **THEN** it runs inside the fenced container under three operational nets — a pre-launch free-RAM baseline recorded beside the artifact, a hard wall-clock timeout on the container, and no concurrent tenants — and its artifact is the MEASURED per-batch peak, not an expected kill (the cgroup fence cannot produce an in-container OOM-kill for kfd-granted allocations, so a kill artifact would require a second box death)
+The trunk forward SHALL checkpoint every production block — backward recomputes per block, so the retained activation graph is bounded to one block, the statistic is unchanged bitwise, and the ~30% stats-phase slowdown is accepted. The fixture SHALL run under the attention implementation the fenced rehearsal will use.
 
-#### Scenario: rehearsal_peak_recorded_before_refire
+#### Scenario: trunk_checkpointing_preserves_statistic
 
-- **WHEN** the chunked rehearsal completes the full stats phase under the fence
-- **THEN** the memory peak is read from `torch.cuda.max_memory_reserved` — the instrument that sees kfd-granted memory the cgroup counter cannot — recorded in launch.env and rehearsal.json, and the refire happens only after the chunked peak beats the red peak with solve-compatible headroom under 32G, the red artifact, and the equivalence fixture are all green
+- **WHEN** the equivalence fixture runs the retained-graph path against the checkpointed-trunk path on identical weights and inputs (tiny geometry, CPU, the container's attention implementation)
+- **THEN** the gradient-square vectors match bitwise — identity, not tolerance
+- **AND** the fixture goes red against any build where a production block is left uncheckpointed
+
+#### Scenario: rehearsal_red_retired
+
+- **WHEN** any future Lane 0 rehearsal executes
+- **THEN** the parent-bytes path is never re-executed — the incident record is the artifact: one packed batch on parent bytes with the fence present killed the host twice, so the per-batch peak of that path is larger than the host and cannot be measured on it; any launch attempting the unchunked or uncheckpointed stats path SHALL be refused
+
+#### Scenario: rehearsal_green1_then_16
+
+- **WHEN** the checkpointed build's rehearsal runs
+- **THEN** it starts at ONE batch measuring the true per-batch peak from `torch.cuda.max_memory_reserved`; the full 16-batch endurance run proceeds only if that peak lands at or under 15G; and the refire happens only after the 16-batch peak leaves solve-compatible headroom under 32G, the red artifacts, and both fixtures are green
+
+### Requirement: Every Lane 0 launch SHALL ride the wrapper
+
+Every Lane 0 launch SHALL go through `tools/run-ptq-container.sh` under `MODE=lane0-rehearsal` or `MODE=lane0-fire` — hand-rolled docker launches SHALL NOT exist and SHALL NOT be certifiable: launch.env carries the wrapper's provenance block plus the mode, and an artifact without it is not a Lane 0 result. Both lane0 modes SHALL fail closed without GPU=1, SHALL carry a wall-clock stop net, and SHALL record the pre-launch free-RAM baseline beside the artifact.
+
+#### Scenario: wrapper_only_provenance
+
+- **WHEN** a Lane 0 artifact is read
+- **THEN** its launch.env carries the wrapper provenance block with mode, commit, tree state, image digest, and the pre-launch free-RAM baseline — an artifact without them is refused as evidence
+
+#### Scenario: wall_clock_stop_net_armed
+
+- **WHEN** a lane0 rehearsal or fire launches
+- **THEN** a host-side stop net is armed for the container's wall-clock deadline, so a run that neither completes nor OOMs cannot hang the box, and the deadline is recorded in launch.env

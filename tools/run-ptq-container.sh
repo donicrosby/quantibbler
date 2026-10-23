@@ -76,6 +76,17 @@ STE_FLIP_PASS_BUDGET="${STE_FLIP_PASS_BUDGET:-}"
 CALIBRATION_SEQS="${CALIBRATION_SEQS:-128}"
 EVAL_SEQS="${EVAL_SEQS:-40}"
 DRY_RUN="${DRY_RUN:-0}"
+# Lane 0 modes (qk-nanoquant-alignment-lane0): MODE=ptq is the pipeline driver
+# this wrapper has always wrapped. lane0-rehearsal runs the statistics pass
+# ONLY; lane0-fire runs the decisive probe. Both fail closed without GPU=1,
+# carry a wall-clock stop net (WALL_MIN), and write their knobs into
+# launch.env. The red parent-bytes path was retired after two box deaths; a
+# lane0 rehearsal on anything but the checkpointed build is not launchable
+# through this wrapper by construction.
+MODE="${MODE:-ptq}"
+REHEARSAL_BATCHES="${REHEARSAL_BATCHES:-1}"
+CHUNK_TOKENS="${CHUNK_TOKENS:-256}"
+WALL_MIN="${WALL_MIN:-30}"
 
 # Refuse arguments instead of ignoring them. This wrapper pins the eval geometry
 # below, so a stray flag — or SEQ_LEN=2048 written in argument position — used to
@@ -121,6 +132,19 @@ if [ "${GPU:-0}" = "1" ]; then
     *) echo "error: GPU=1 requires a rocm-tagged image (IMAGE=$IMAGE); refusing to hand ROCm devices to a non-ROCm torch" >&2; exit 2 ;;
   esac
 fi
+# Lane 0 is an accelerator-only lane by mandate: fail closed on MODE without
+# GPU=1 rather than silently running the decisive probe on CPU.
+case "$MODE" in
+  ptq|lane0-rehearsal|lane0-fire) ;;
+  *) echo "error: MODE=$MODE unknown (ptq | lane0-rehearsal | lane0-fire)" >&2; exit 2 ;;
+esac
+if [ "$MODE" != "ptq" ] && [ "${GPU:-0}" != "1" ]; then
+  echo "error: MODE=$MODE requires GPU=1 (accelerator-only lane); refusing" >&2
+  exit 2
+fi
+CONTAINER_NAME="quantibbler-ptq-run"
+[ "$MODE" = "lane0-rehearsal" ] && CONTAINER_NAME="quantibbler-lane0-rehearsal"
+[ "$MODE" = "lane0-fire" ] && CONTAINER_NAME="quantibbler-lane0-fire"
 # The digest, not just the tag: a tag is a mutable name, so a rebuild changes the
 # bytes while the name stays put -- the same "two arms indistinguishable" gap as
 # compute_dtype and rho_end, only quieter. Unknown is stated rather than implied
@@ -173,10 +197,15 @@ mkdir -p "$OUT" 2>/dev/null || true
     "${GPU:-0}" "$IMAGE" "$IMAGE_DIGEST" \
     "$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
     "$(git -C "$REPO" status --porcelain 2>/dev/null | grep -vc '^??' || echo '?')"
+  printf 'mode=%s\nrehearsal_batches=%s\nchunk_tokens=%s\nwall_min=%s\n' \
+    "$MODE" "$REHEARSAL_BATCHES" "$CHUNK_TOKENS" "$WALL_MIN"
 } > "$OUT/launch.env" 2>/dev/null || echo "warning: could not write $OUT/launch.env" >&2
+# Pre-launch host free-RAM baseline, beside the artifact: the fence decision
+# reads the kfd-visible peak against what the host actually had going in.
+{ echo "--- free -g baseline ---"; free -g; } >> "$OUT/launch.env" 2>/dev/null || true
 
 set -- docker run --rm \
-  --name quantibbler-ptq-run \
+  --name "$CONTAINER_NAME" \
   --memory 32g --memory-swap 32g \
   --cpus 24 \
   -v "$REPO:/work:ro" \
@@ -233,6 +262,23 @@ if [ -n "${QK_SOLVER_PROBE_PATH:-}" ]; then
   set -- "$@" -e "QK_SOLVER_PROBE_PATH=$QK_SOLVER_PROBE_PATH"
 fi
 # ...and the container command continues the same argument list.
+if [ "$MODE" = "lane0-rehearsal" ]; then
+  set -- "$@" \
+    "$IMAGE" \
+    python tools/lane0_precond_probe.py \
+      --device cuda --rehearsal \
+      --rehearsal-batches "$REHEARSAL_BATCHES" \
+      --chunk-tokens "$CHUNK_TOKENS" \
+      --out /out/rehearsal.json
+elif [ "$MODE" = "lane0-fire" ]; then
+  set -- "$@" \
+    "$IMAGE" \
+    python tools/lane0_precond_probe.py \
+      --real --device cuda \
+      --chunk-tokens "$CHUNK_TOKENS" \
+      --jsonl /out/rows.jsonl \
+      --out /out/report.json
+else
 set -- "$@" \
   "$IMAGE" \
   python tools/quantize_hf_model.py \
@@ -242,6 +288,7 @@ set -- "$@" \
     --solver "$SOLVER" \
     --checkpoint-dir /out/checkpoints \
     --out /out
+fi
 
 # The split knob is appended only when it was set. Passing it unconditionally
 # would make the wrapper the author of the tuning geometry - and an empty
@@ -249,6 +296,9 @@ set -- "$@" \
 # Same rule as TUNE_SEQ_LEN: the wrapper passes the precision only when it was
 # asked for, so the wrapper is never the author of the run's numerics. The
 # driver default (float64) is what launch.env records when it is unset.
+# All of these are quantize_hf_model flags — the lane0 harness rejects them,
+# so lane0 modes append none of them.
+if [ "$MODE" = "ptq" ]; then
 if [ -n "${COMPUTE_DTYPE:-}" ]; then
   set -- "$@" --compute-dtype "$COMPUTE_DTYPE"
 fi
@@ -272,6 +322,7 @@ if [ "$PAPER_FAITHFUL" = "1" ]; then
 fi
 if [ -n "$STE_FLIP_PASS_BUDGET" ]; then
   set -- "$@" --ste-flip-pass-budget "$STE_FLIP_PASS_BUDGET"
+fi
 fi
 
 # DRY_RUN=1 prints the exact command line (copy-pasteable) and stops: the launch
@@ -326,14 +377,27 @@ printf '=== run %s rank=%s solver=%s seq_len=%s tune_seq_len=%s paper_faithful=%
 WATCHDOG="${WATCHDOG:-1}"
 WATCHDOG_STALL_MIN="${WATCHDOG_STALL_MIN:-15}"
 WATCHDOG_KILL_AFTER_MIN="${WATCHDOG_KILL_AFTER_MIN:-0}"
-if [ "$WATCHDOG" = "1" ]; then
+# The breadcrumb watchdog is ptq-mode only: the lane0 harness does not write
+# breadcrumbs, so line-silence would be a false stall. lane0 modes get the
+# wall-clock stop net below instead.
+if [ "$WATCHDOG" = "1" ] && [ "$MODE" = "ptq" ]; then
   nohup sh "$REPO/tools/qkb-stall-watchdog.sh" \
     --breadcrumbs /opt/data/tmp/quantibbler-breadcrumbs.log \
-    --container quantibbler-ptq-run \
+    --container "$CONTAINER_NAME" \
     --stall-min "$WATCHDOG_STALL_MIN" \
     --kill-after-min "$WATCHDOG_KILL_AFTER_MIN" \
     --log "$OUT/watchdog.log" >>"$OUT/watchdog.log" 2>&1 &
   echo "watchdog: pid=$! stall=${WATCHDOG_STALL_MIN}m kill_after=${WATCHDOG_KILL_AFTER_MIN}m log=$OUT/watchdog.log" >&2
+fi
+
+# Wall-clock stop net for the lane0 modes: a host-side sleeper that hard-stops
+# the container at the deadline, so a run that neither completes nor OOMs
+# cannot hang the box. The fence cannot see kfd memory and the watchdog cannot
+# hear this harness, so the deadline is the binding constraint.
+if [ "$MODE" != "ptq" ] && [ "${WALL_MIN:-0}" -gt 0 ] 2>/dev/null; then
+  nohup sh -c "sleep $((WALL_MIN * 60)); docker stop '$CONTAINER_NAME' >/dev/null 2>&1" \
+    >/dev/null 2>&1 &
+  echo "wall-stop-net: pid=$! deadline=${WALL_MIN}m container=$CONTAINER_NAME" >&2
 fi
 
 exec "$@"
