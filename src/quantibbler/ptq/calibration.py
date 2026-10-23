@@ -147,6 +147,16 @@ def collect_stats(
     if not linears:
         raise ValueError("collect_stats found no nn.Linear modules to calibrate")
 
+    # The calibration batches come off the tokenizer on the CPU; the module's weights
+    # may be on an accelerator. Move them ONCE here, before any use, so the fp-prefix
+    # probe and the chunked capture forward are both device-true -- the auditor named
+    # each boundary it crossed otherwise (calibration.py:225, then :232). The parameter
+    # is `calibration_batches`; an earlier attempt wrote `batches` and hit NameError,
+    # which the red-test gate caught before any commit or fire. Explicit None guard:
+    # never truthiness on a tensor, never a bare next().
+    _audit_ref = next(iter(module.parameters()), None)
+    if _audit_ref is not None:
+        calibration_batches = [b.to(_audit_ref.device) for b in calibration_batches]
     grad_enabled = torch.is_grad_enabled()
     book = LayerStatsBook()
     # D-7: the chunked path streams (sum of squares, token count) per feature
