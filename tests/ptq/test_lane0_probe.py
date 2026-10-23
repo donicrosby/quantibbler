@@ -190,7 +190,9 @@ def test_intended_pass_collects_real_ce_gradients(tool, tiny_model):  # noqa: F8
     ids = (ids * 8)[: 4 * 32]  # the fixture corpus is tiny; tile to a full batch
     batch = torch.tensor(ids).view(4, 32)
     wanted = ((0, "mlp.down_proj"),)
-    stats = tool.collect_intended_statistics(model, [batch], wanted=wanted, percentile=99.9)
+    stats = tool.collect_intended_statistics(
+        model, [batch], wanted=wanted, percentile=99.9, checkpoint_blocks=False
+    )
     assert set(stats) == set(wanted)
     entry = stats[(0, "mlp.down_proj")]
     assert entry["percentile"] == 99.9
@@ -587,3 +589,32 @@ def test_domination_rule_needs_majority_and_band_exit(tool):
     assert verdict["dominates"] is True
     assert verdict["hypothesis"] == "supported"
     assert verdict["lanes_1_3_gate"] == "OPEN"
+
+
+def test_whole_batch_head_with_checkpointed_blocks_fails_closed(tool, tiny_model):  # noqa: F811
+    """The anomalous combination is fenced, not merely avoided.
+
+    Whole-batch head + checkpointed blocks measures a different gradient from
+    every path the fire runs. Failing closed keeps the anomaly a named edge
+    instead of a landmine someone re-derives later.
+    """
+    model = _tiny_fp64_model(tiny_model)
+    batch = _tiny_batch(tiny_model)
+    wanted = ((0, "mlp.down_proj"),)
+    with pytest.raises(ValueError, match="803c3fc"):
+        tool.collect_intended_statistics(
+            model,
+            [batch],
+            wanted=wanted,
+            percentile=99.9,
+            chunk_tokens=None,
+            checkpoint_blocks=True,
+        )
+    # Both supported shapes still run.
+    for kwargs in (
+        {"chunk_tokens": 8, "checkpoint_blocks": True},
+        {"chunk_tokens": None, "checkpoint_blocks": False},
+    ):
+        assert tool.collect_intended_statistics(
+            model, [batch], wanted=wanted, percentile=99.9, **kwargs
+        )

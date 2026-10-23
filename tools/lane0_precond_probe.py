@@ -652,6 +652,20 @@ def collect_intended_statistics(
 
         handles.append(module.register_forward_pre_hook(_pre_hook))
 
+    if checkpoint_blocks and chunk_tokens is None:
+        # Fail closed rather than measure a different gradient. The whole-batch
+        # head with checkpointed blocks diverges from every configuration the
+        # fire executes: d_out_raw moves ~0.8% while raw sums and row counts stay
+        # bitwise identical (803c3fc). Three orders of magnitude above FP
+        # reassociation noise, so it is a different gradient being measured, not
+        # rounding. No launch path runs it; this guard keeps it that way.
+        raise ValueError(
+            "whole-batch head + checkpointed blocks is not a supported configuration "
+            "(diverges ~0.8% in d_out_raw from every path the fire runs; see commit "
+            "803c3fc). Pass chunk_tokens, or set checkpoint_blocks=False for the "
+            "whole-batch reference."
+        )
+
     grads: dict[tuple[int, str], np.ndarray | None] = {key: None for _, _, key in linears}
     for _, module, key in linears:
 
@@ -888,6 +902,10 @@ def build_real_arms(
         wanted=wanted,
         percentile=percentile,
         chunk_tokens=chunk_tokens,
+        # Blocks are checkpointed exactly when the head is chunked: the
+        # whole-batch reference stays uncheckpointed, which is both the only
+        # supported combination and the naive baseline it is meant to be.
+        checkpoint_blocks=chunk_tokens is not None,
         diagnostics=diagnostics,
     )
 
