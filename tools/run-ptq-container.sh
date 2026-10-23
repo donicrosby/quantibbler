@@ -125,6 +125,17 @@ fi
 # the exact failure the rocm Dockerfile's own build assertion exists to make
 # unbuildable. Required, not defaulted: a wrong tag is refused before the launch,
 # because the run's record cannot repair a wrong binary after the fact.
+# Lane 0 pins its image rather than inheriting one. The ambient environment is
+# not a launch parameter: a stale `IMAGE` exported from an earlier session flows
+# straight into the run, and the tag guard below cannot tell one rocm-tagged
+# image from another -- `quantibbler-ptq:rocm` (the retired DIY image) satisfies
+# `*rocm*` exactly as well as `:rocm-official` does. Identity is the digest, and
+# the digest is checked where it becomes known.
+LANE0_IMAGE_PIN="quantibbler-ptq:rocm-official"
+LANE0_IMAGE_DIGEST_PIN="sha256:6bad266ffdff7243ad2db2d8afd15a593bdfa04c44e73e3669e4e95ba2a19ed4"
+if [ "$MODE" != "ptq" ]; then
+  IMAGE="${IMAGE:-$LANE0_IMAGE_PIN}"
+fi
 IMAGE="${IMAGE:-quantibbler-ptq:latest}"
 if [ "${GPU:-0}" = "1" ]; then
   case "$IMAGE" in
@@ -151,6 +162,21 @@ CONTAINER_NAME="quantibbler-ptq-run"
 # (a DRY_RUN has no image to inspect).
 IMAGE_DIGEST="$(docker inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
 [ -n "$IMAGE_DIGEST" ] || IMAGE_DIGEST=unknown
+# A tag is a mutable name; the digest is the identity. Lane 0 fails closed on a
+# digest it was not cleared for, because the failure it prevents -- handing ROCm
+# hardware an image whose kernels never launched -- looks like an unexplained
+# 60-second death, not like a wrong binary. The override names the digest it
+# authorizes rather than waving the check off, so the artifact still records what
+# was cleared.
+if [ "$MODE" != "ptq" ] && [ "$IMAGE_DIGEST" != "$LANE0_IMAGE_DIGEST_PIN" ] \
+  && [ "${LANE0_IMAGE_DIGEST_ALLOW:-}" != "$IMAGE_DIGEST" ]; then
+  if [ "$IMAGE_DIGEST" = "unknown" ] && [ "${DRY_RUN:-0}" = "1" ]; then
+    echo "note: DRY_RUN with an unresolvable image digest; the real launch fails closed" >&2
+  else
+    echo "error: lane0 image identity is pinned: IMAGE=$IMAGE has digest $IMAGE_DIGEST, expected $LANE0_IMAGE_DIGEST_PIN ($LANE0_IMAGE_PIN). To authorize a different build, set LANE0_IMAGE_DIGEST_ALLOW=$IMAGE_DIGEST." >&2
+    exit 2
+  fi
+fi
 
 # Stream contract, deliberate and now pinned from both sides: STDOUT is the
 # machine channel and carries the resolved argv and NOTHING else, so a verifier
@@ -180,12 +206,20 @@ mkdir -p "$OUT" 2>/dev/null || true
 # rho_end_source: an attribution pass must be identifiable from its own
 # directory, not from somebody's scrollback.
 {
-  printf 'model=%s\nrank=%s\nsolver=%s\nseq_len=%s\ntune_seq_len=%s\n' \
-    "$MODEL" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-}"
-  printf 'calibration_seqs=%s\neval_seqs=%s\nfactor_mode=%s\nablation=%s\n' \
-    "$CALIBRATION_SEQS" "$EVAL_SEQS" "${FACTOR_MODE:-}" "${ABLATION:-}"
-  printf 'layer_scope=%s\npaper_faithful=%s\nste_flip_pass_budget=%s\ncompute_dtype=%s\n' \
-    "${LAYER_SCOPE:-}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "${COMPUTE_DTYPE:-float64}"
+  # Lane 0 records the harness's knobs, not the driver's. Those ptq geometry
+  # fields are not lane0 defaults, they are another lane's fields: rank=8 and
+  # seq_len=512 beside a lane0 run invite exactly the misreading this room has
+  # already paid for once.
+  if [ "$MODE" = "ptq" ]; then
+    printf 'model=%s\nrank=%s\nsolver=%s\nseq_len=%s\ntune_seq_len=%s\n' \
+      "$MODEL" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-}"
+    printf 'calibration_seqs=%s\neval_seqs=%s\nfactor_mode=%s\nablation=%s\n' \
+      "$CALIBRATION_SEQS" "$EVAL_SEQS" "${FACTOR_MODE:-}" "${ABLATION:-}"
+    printf 'layer_scope=%s\npaper_faithful=%s\nste_flip_pass_budget=%s\ncompute_dtype=%s\n' \
+      "${LAYER_SCOPE:-}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "${COMPUTE_DTYPE:-float64}"
+  else
+    printf 'model=%s\ndevice=%s\nout=%s\n' "$MODEL" "cuda" "$OUT"
+  fi
   printf 'rho_end_override=%s\nsolver_probe=%s\nopenblas_num_threads=%s\nlaunched_at=%s\n' \
     "${QK_RHO_END:-unset}" "${QK_SOLVER_PROBE:-unset}" "${OPENBLAS_NUM_THREADS:-16}" "$(date -u +%FT%TZ)"
   # The commit and the tree state are part of the run's identity: a run
@@ -196,7 +230,7 @@ mkdir -p "$OUT" 2>/dev/null || true
   printf 'gpu=%s\nimage=%s\nimage_digest=%s\ncommit=%s\ntree_dirty_files=%s\n' \
     "${GPU:-0}" "$IMAGE" "$IMAGE_DIGEST" \
     "$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
-    "$(git -C "$REPO" status --porcelain 2>/dev/null | grep -vc '^??' || echo '?')"
+    "$(git -C "$REPO" status --porcelain 2>/dev/null | grep -vc '^??' || true)"
   printf 'mode=%s\nrehearsal_batches=%s\nchunk_tokens=%s\nwall_min=%s\n' \
     "$MODE" "$REHEARSAL_BATCHES" "$CHUNK_TOKENS" "$WALL_MIN"
 } > "$OUT/launch.env" 2>/dev/null || echo "warning: could not write $OUT/launch.env" >&2

@@ -34,6 +34,11 @@ _KNOBS = (
     "IMAGE",
     "GPU",
     "DRY_RUN",
+    "MODE",
+    "REHEARSAL_BATCHES",
+    "CHUNK_TOKENS",
+    "WALL_MIN",
+    "LANE0_IMAGE_DIGEST_ALLOW",
 )
 
 
@@ -228,3 +233,78 @@ def test_wrapper_never_truncates_the_breadcrumb_trail():
     assert ": > /opt/data/tmp/quantibbler-breadcrumbs.log" not in src
     assert ">> /opt/data/tmp/quantibbler-breadcrumbs.log" in src
     assert "=== run %s rank=%s solver=%s" in src
+
+
+_LANE0 = {
+    "MODE": "lane0-rehearsal",
+    "GPU": "1",
+    "REHEARSAL_BATCHES": "1",
+    "CHUNK_TOKENS": "256",
+    "WALL_MIN": "30",
+}
+_BROKEN_DIY = "quantibbler-ptq:rocm"
+_BROKEN_DIY_DIGEST = "sha256:42649ada93e0bd4221075999ba85a40d9142d3e644281fdaaa20f7afafad0a6b"
+
+
+def _resolves(image: str) -> bool:
+    """Can docker tell us this image's digest on this machine?"""
+    try:
+        done = subprocess.run(
+            ["docker", "inspect", "--format", "{{.Id}}", image],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
+    return done.returncode == 0 and done.stdout.strip() != ""
+
+
+def test_lane0_pins_its_image_rather_than_inheriting_the_ambient_one():
+    """Lane 0 must not launch on whatever `IMAGE` the shell happens to carry.
+
+    The green-1 failure: an `IMAGE` exported from the retired-DIY arc flowed
+    straight into the launch, and the rocm-tag guard waved it through because
+    `quantibbler-ptq:rocm` satisfies `*rocm*` exactly as well as the real one.
+    """
+    completed = _launch(**_LANE0)
+    assert completed.returncode == 0, completed.stderr
+    assert "quantibbler-ptq:rocm-official" in completed.stdout
+
+
+def test_lane0_refuses_the_unpinned_diy_digest():
+    """The image that actually killed green-1 is refused, by digest not by tag."""
+    if not _resolves(_BROKEN_DIY):
+        import pytest
+
+        pytest.skip(f"{_BROKEN_DIY} not present, cannot resolve a digest to refuse")
+    completed = _launch(IMAGE=_BROKEN_DIY, **_LANE0)
+    assert completed.returncode == 2, (completed.returncode, completed.stdout)
+    assert "lane0 image identity is pinned" in completed.stderr
+
+
+def test_lane0_digest_override_names_the_digest_it_authorizes():
+    """The door exists, and it opens only for a digest someone wrote down."""
+    if not _resolves(_BROKEN_DIY):
+        import pytest
+
+        pytest.skip(f"{_BROKEN_DIY} not present, cannot authorize its digest")
+    completed = _launch(IMAGE=_BROKEN_DIY, LANE0_IMAGE_DIGEST_ALLOW=_BROKEN_DIY_DIGEST, **_LANE0)
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_lane0_launch_env_records_harness_knobs_not_driver_geometry(tmp_path):
+    """The record must describe the run that happened, not the other lane's."""
+    completed = _launch(OUT=str(tmp_path), **_LANE0)
+    assert completed.returncode == 0, completed.stderr
+    lines = (tmp_path / "launch.env").read_text().splitlines()
+    text = "\n".join(lines)
+    assert "mode=lane0-rehearsal" in text
+    assert "rehearsal_batches=1" in text and "chunk_tokens=256" in text
+    for foreign in ("rank=", "seq_len=", "compute_dtype=", "eval_seqs=", "calibration_seqs="):
+        assert foreign not in text, f"lane0 launch.env carries ptq geometry: {foreign}"
+    # The splice defect that put a bare `?` line in the green-1 record.
+    assert "?" not in lines, f"stray splice line in launch.env: {lines}"
+    assert any(
+        line.startswith("tree_dirty_files=") and line.split("=", 1)[1].isdigit() for line in lines
+    ), lines
