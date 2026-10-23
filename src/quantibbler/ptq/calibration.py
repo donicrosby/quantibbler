@@ -155,8 +155,16 @@ def collect_stats(
     streaming = chunk_rows is not None
     feats_in: dict[str, list[torch.Tensor]] = {name: [] for name, _ in linears}
     feats_out: dict[str, list[torch.Tensor]] = {name: [] for name, _ in linears}
-    sum_sq_in = {name: torch.zeros(m.weight.shape[1], dtype=torch.float64) for name, m in linears}
-    sum_sq_out = {name: torch.zeros(m.weight.shape[0], dtype=torch.float64) for name, m in linears}
+    # Accumulators are born on the weights' device, not the default (CPU) one:
+    # the hook feeds them activations from wherever the model ran. A no-op on CPU.
+    sum_sq_in = {
+        name: torch.zeros(m.weight.shape[1], dtype=torch.float64, device=m.weight.device)
+        for name, m in linears
+    }
+    sum_sq_out = {
+        name: torch.zeros(m.weight.shape[0], dtype=torch.float64, device=m.weight.device)
+        for name, m in linears
+    }
     rows_in = {name: 0 for name, _ in linears}
     rows_out = {name: 0 for name, _ in linears}
     handles = []
@@ -206,8 +214,11 @@ def collect_stats(
                 else [batch]
             )
             dout_din = {name: tuple(m.weight.shape) for name, m in linears}
+            # Same class as sum_sq_in: this accumulator meets cuda grad statistics.
+            _acc_dev = next(iter(linears))[1].weight.device
             acc = {
-                name: torch.zeros(shape, dtype=torch.float64) for name, shape in dout_din.items()
+                name: torch.zeros(shape, dtype=torch.float64, device=_acc_dev)
+                for name, shape in dout_din.items()
             }
             for piece in chunk_iter:
                 torch.set_grad_enabled(True)

@@ -403,6 +403,8 @@ def _factor_terms(
         v = torch.sign(fac.v_latent).to(activation_dtype)
     s1 = fac.s1.to(activation_dtype)
     s2 = fac.s2.to(activation_dtype)
+    u = u.to(s1.device)
+    v = v.to(s2.device)
     return s1.unsqueeze(1) * u, s2.unsqueeze(1) * v
 
 
@@ -452,7 +454,7 @@ class FactorizedLinear(nn.Module):
         u0 = torch.from_numpy(np.ascontiguousarray(u_mat[:, :rr] * np.sqrt(s_vec[:rr]))).to(_dev)
         v0 = torch.from_numpy(np.ascontiguousarray(vt_mat[:rr].T * np.sqrt(s_vec[:rr]))).to(_dev)
         if bias is None:
-            b0 = torch.zeros(w_np.shape[0], dtype=torch.float64)
+            b0 = torch.zeros(w_np.shape[0], dtype=torch.float64, device=weight.device)
         else:
             b0 = bias.detach().to(torch.float64)
         return cls(u0, v0, b0)
@@ -547,7 +549,11 @@ def _quantized_forward_block(
                 dt = x_in.dtype
                 left, right = _factor_terms(_f, dt, _f.factor_mode)
                 w_q = left @ right.T
-                return x_in @ w_q.T + _f.bias.to(dt)
+                # The packed weight is assembled through a NumPy round-trip and is born on the
+                # CPU; the activation is not. Coerce here, after the assignment that produces
+                # it -- same class as the latents and the stem batches. No-op on CPU.
+                w_q = w_q.to(x_in.device)
+                return x_in @ w_q.T + _f.bias.to(device=x_in.device, dtype=dt)
 
             originals[name] = linear.forward
             linear.forward = frozen_forward  # type: ignore[method-assign]
@@ -858,7 +864,7 @@ def _tune_latent_ste(
             for group in opt.param_groups:
                 group["lr"] = group["lr_scale"] * cfg.stage_latent.lr * cos_f
         lo = (step % (n // bs or 1)) * bs
-        idx = torch.arange(lo, lo + bs)
+        idx = torch.arange(lo, lo + bs, device=x_b.device)
         out = _quantized_forward_block(block, facs, x_b[idx])
         loss = (out - y_b[idx]).pow(2).mean()
         if not torch.isfinite(loss):
@@ -1415,7 +1421,9 @@ def reconstruct_block(
         fac = FactorizedLinear(
             u0,
             v0,
-            bias0 if bias0 is not None else torch.zeros(linear.weight.shape[0]),
+            bias0
+            if bias0 is not None
+            else torch.zeros(linear.weight.shape[0], device=linear.weight.device),
             factor_mode=cfg.factor_mode,
         )
         # Scales initialized from Eq. 8 (with the latent scale folded in).
@@ -1737,7 +1745,9 @@ def reconstruct_model(
     # full-width forward of a block and the one the dead run completed in bf16
     # before the MLP blew the cap, so its measured-to-fit evidence was
     # bf16-only -- and at fp32 its intermediates double like everything else.
-    x_running = _forward_chunked(stem, torch.cat(batches, dim=0)).detach()
+    x_running = _forward_chunked(
+        stem, torch.cat(batches, dim=0).to(next(stem.parameters()).device)
+    ).detach()
     _note_block_progress(0, None, x_running)
 
     # Snapshot the fp outputs of any fp stem layer that sits AFTER the last
