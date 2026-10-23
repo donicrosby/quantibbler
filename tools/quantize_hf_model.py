@@ -813,6 +813,19 @@ def main() -> int:
         "scrollback: two arms whose rows are indistinguishable are the same "
         "provenance gap as an unlabelled rho_end.",
     )
+    parser.add_argument(
+        "--device",
+        default="auto",
+        choices=("auto", "cpu", "cuda"),
+        help="where the torch stages run (capture, TuneFP, STE, eval). 'auto' takes "
+        "the accelerator when torch can see one and falls back to CPU otherwise, so "
+        "a CPU run is unchanged and a GPU run is one flag. The per-linear SOLVER "
+        "stays NumPy/CPU either way: its weights already hand off via .cpu().numpy() "
+        "and back, roughly 200 crossings of small matrices across the whole run, "
+        "which costs seconds rather than hours -- so moving the autograd stages does "
+        "not require porting the solver. Timed on the CPU path: the torch stages are "
+        "about 69%% of wall, which is what this moves.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path, default=Path("artifacts") / "model-qpk1")
     args = parser.parse_args()
@@ -825,6 +838,21 @@ def main() -> int:
     print(f"[1/6] loading {args.model} (local cache, offline)")
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     causal = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16).eval()
+    # Resolve ONCE, from the same predicate torch uses: a second source of truth
+    # for "which device" can disagree with where the parameters actually are, and
+    # the mismatch then surfaces frames away from its cause.
+    _device = (
+        "cuda"
+        if (args.device == "auto" and torch.cuda.is_available())
+        else ("cpu" if args.device == "auto" else args.device)
+    )
+    causal.to(_device)
+    os.environ["QUANTIBBLER_DEVICE"] = _device
+    print(
+        f"      device={_device} (requested {args.device}; "
+        f"torch.cuda.is_available()={torch.cuda.is_available()})",
+        flush=True,
+    )
     rewire_trunk_embedding(causal)
     model = CausalLMLogits(causal).to(torch.bfloat16).eval()
     cfg = causal.config

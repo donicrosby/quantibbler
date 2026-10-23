@@ -195,6 +195,9 @@ def _record_solver_probe(name, w, bal, res, cfg) -> None:
         # digest is what makes "did both arms run the same binary" answerable
         # from the artifact. Absent outside a container, and stated as such.
         "image_digest": os.environ.get("QUANTIBBLER_IMAGE_DIGEST", "unknown"),
+        # Which device the torch stages ran on. An fp32 row on a GPU and an fp32
+        # row on a CPU are different measurements of the same thing.
+        "device": os.environ.get("QUANTIBBLER_DEVICE", "unknown"),
         "rho_end": value,
         "rho_end_source": source,
         "n_iter": getattr(res, "n_iter", None),
@@ -441,8 +444,13 @@ class FactorizedLinear(nn.Module):
         w_np = weight.detach().to(torch.float64).cpu().numpy()
         u_mat, s_vec, vt_mat = np.linalg.svd(w_np, full_matrices=False)
         rr = min(rank, s_vec.size)
-        u0 = torch.from_numpy(np.ascontiguousarray(u_mat[:, :rr] * np.sqrt(s_vec[:rr])))
-        v0 = torch.from_numpy(np.ascontiguousarray(vt_mat[:rr].T * np.sqrt(s_vec[:rr])))
+        # Latents live where the weights live. Derived from `weight` rather than from a
+        # threaded-out device setting: a second source of truth can disagree with where the
+        # parameters actually are, and a device mismatch surfaces frames from the cause. On
+        # CPU this is a no-op, so the reference path is unchanged by construction.
+        _dev = weight.device
+        u0 = torch.from_numpy(np.ascontiguousarray(u_mat[:, :rr] * np.sqrt(s_vec[:rr]))).to(_dev)
+        v0 = torch.from_numpy(np.ascontiguousarray(vt_mat[:rr].T * np.sqrt(s_vec[:rr]))).to(_dev)
         if bias is None:
             b0 = torch.zeros(w_np.shape[0], dtype=torch.float64)
         else:
@@ -1384,15 +1392,21 @@ def reconstruct_block(
             # then a fixed point — STE cannot and need not move them), scales
             # carry the magnitude. cos(latent, bal.U) is irrelevant; the
             # artifact is (bits, scales), and those are the polished ones.
-            u0 = torch.from_numpy(np.ascontiguousarray(ub_p))
-            v0 = torch.from_numpy(np.ascontiguousarray(vb_p))
+            _dev = linear.weight.device
+            u0 = torch.from_numpy(np.ascontiguousarray(ub_p)).to(_dev)
+            v0 = torch.from_numpy(np.ascontiguousarray(vb_p)).to(_dev)
         else:
             # No discrete stage at all: the continuous balance latents ARE the
             # factorization. In fp mode the forward never signs them (D-2); in
             # untuned-signs mode they are exported as their signs with the Eq. 8
             # scale fold and zero refinement (D-3).
-            u0 = torch.from_numpy(np.ascontiguousarray(np.asarray(bal.U, dtype=np.float64)))
-            v0 = torch.from_numpy(np.ascontiguousarray(np.asarray(bal.V, dtype=np.float64)))
+            _dev = linear.weight.device
+            u0 = torch.from_numpy(np.ascontiguousarray(np.asarray(bal.U, dtype=np.float64))).to(
+                _dev
+            )
+            v0 = torch.from_numpy(np.ascontiguousarray(np.asarray(bal.V, dtype=np.float64))).to(
+                _dev
+            )
             s1_p = np.asarray(bal.s1, dtype=np.float64)
             s2_p = np.asarray(bal.s2, dtype=np.float64)
         s1_np = np.ascontiguousarray(s1_p)
@@ -1406,8 +1420,10 @@ def reconstruct_block(
         )
         # Scales initialized from Eq. 8 (with the latent scale folded in).
         with torch.no_grad():
-            fac.s1.copy_(torch.from_numpy(s1_np))
-            fac.s2.copy_(torch.from_numpy(s2_np))
+            # copy_ requires matching devices; the numpy round trip through the CPU solver
+            # is deliberate (the solver is NumPy), so the return leg lands on the latents' device.
+            fac.s1.copy_(torch.from_numpy(s1_np).to(fac.s1.device))
+            fac.s2.copy_(torch.from_numpy(s2_np).to(fac.s2.device))
         facs[name] = fac
         # Freeze this linear's factorized weight into the module NOW: every
         # later stage in the block (the per-layer STE below, the TuneFP pass,
