@@ -976,7 +976,7 @@ def main() -> int:
         )
 
     print("[3/6] bf16 baseline perplexity (paper-regime pedestal)", flush=True)
-    ppl_base = perplexity_from_logits(lambda b: model(b), held_out)
+    ppl_base = perplexity_from_logits(lambda b: model(b.to(_device)), held_out)
     print(f"      ppl_baseline = {ppl_base:.4f}", flush=True)
 
     # --- per-block progress probe (qk-fail-fast-loop) -------------------
@@ -988,7 +988,7 @@ def main() -> int:
     # only difference between the quantized prefix and its baseline is
     # quantization damage.
     probe_slice = held_out[: args.probe_batches]
-    fp_probe_ppl = perplexity_from_logits(lambda b: model(b), probe_slice)
+    fp_probe_ppl = perplexity_from_logits(lambda b: model(b.to(_device)), probe_slice)
     print(
         f"      probe: {len(probe_slice)}-batch slice of the held-out eval, "
         f"fp prefix baseline = {fp_probe_ppl:.4f}",
