@@ -147,6 +147,11 @@ The accumulation hooks SHALL gate on `torch.is_grad_enabled()` so each row is co
 - **WHEN** the rehearsal passes an explicit sequences value
 - **THEN** the geometry validation checks the resolved count against THAT explicit value, the decisive fire's 128-sequence guard stays untouched, and any rehearsal without an explicit sequences value is refused rather than silently defaulted
 
+#### Scenario: rehearsal_peak_reads_device_memory
+
+- **WHEN** the rehearsal writes its peak
+- **THEN** it reads device memory (`torch.cuda.mem_get_info` / the telemetry CSV maximum) — never `max_memory_reserved`, which is meaningless under the disabled caching allocator — and both arms' per-phase peaks are recorded separately so the gate judges the actual measurement path, not a reference arm dressed as it
+
 ### Requirement: Every Lane 0 launch SHALL ride the wrapper
 
 Every Lane 0 launch SHALL go through `tools/run-ptq-container.sh` under `MODE=lane0-rehearsal` or `MODE=lane0-fire` — hand-rolled docker launches SHALL NOT exist and SHALL NOT be certifiable: launch.env carries the wrapper's provenance block plus the mode, and an artifact without it is not a Lane 0 result. Both lane0 modes SHALL fail closed without GPU=1, SHALL carry a wall-clock stop net, and SHALL record the pre-launch free-RAM baseline beside the artifact.
