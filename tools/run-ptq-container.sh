@@ -140,6 +140,14 @@ mkdir -p "$OUT" 2>/dev/null || true
     "${LAYER_SCOPE:-}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}"
   printf 'rho_end_override=%s\nsolver_probe=%s\nopenblas_num_threads=%s\nlaunched_at=%s\n' \
     "${QK_RHO_END:-unset}" "${QK_SOLVER_PROBE:-unset}" "${OPENBLAS_NUM_THREADS:-16}" "$(date -u +%FT%TZ)"
+  # The commit and the tree state are part of the run's identity: a run
+  # launched from a dirty tree cannot be reproduced from its SHA, which is the
+  # whole reason commit-then-fire is a rule here. `grep -vc '^??'` counts
+  # tracked modifications; untracked files (the owner-held wordlist) are
+  # reported by their presence separately and are not dirt.
+  printf 'commit=%s\ntree_dirty_files=%s\n' \
+    "$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+    "$(git -C "$REPO" status --porcelain 2>/dev/null | grep -vc '^??' || echo '?')"
 } > "$OUT/launch.env" 2>/dev/null || echo "warning: could not write $OUT/launch.env" >&2
 
 set -- docker run --rm \
