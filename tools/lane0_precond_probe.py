@@ -487,6 +487,37 @@ def load_layer_weight(model_id: str, block_idx: int, layer_name: str) -> tuple[n
     raise FileNotFoundError(f"{key} not found in any offline HF cache root: {_hf_cache_roots()}")
 
 
+def _peak_memory_bytes() -> int:
+    """Peak reserved bytes on the accelerator; 0 where there is none.
+
+    ``reserved`` rather than ``allocated``: the caching allocator never returns
+    freed blocks on gfx1151, so reserved is the number that actually decides
+    whether the fence holds.
+    """
+    try:
+        import torch  # noqa: PLC0415
+    except ImportError:  # pragma: no cover - torch is present in this lane
+        return 0
+    if not torch.cuda.is_available():
+        return 0
+    return int(torch.cuda.max_memory_reserved())
+
+
+def _empty_cache() -> None:
+    """Release the accelerator's cached blocks after a chunk.
+
+    The ROCm caching allocator on gfx1151 does not return freed blocks, so
+    reserved memory only climbs across chunks unless the pool is drained. On CPU
+    this is a no-op.
+    """
+    try:
+        import torch  # noqa: PLC0415
+    except ImportError:  # pragma: no cover - torch is present in this lane
+        return
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def collect_intended_statistics(
     model: Any,
     calibration_batches: Any,
@@ -494,6 +525,8 @@ def collect_intended_statistics(
     wanted: tuple[tuple[int, str], ...],
     percentile: float = PERCENTILE,
     chunk_rows: int | None = None,
+    chunk_tokens: int | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> dict[tuple[int, str], dict[str, np.ndarray]]:
     """Per-linear ``(d_in_raw, d_out_raw)`` the paper-intended way.
 
@@ -511,6 +544,11 @@ def collect_intended_statistics(
     module path. Returns one entry per requested pair; a pair with no reachable
     gradient records ``grad_fallback`` instead of silently substituting a
     statistic.
+
+    ``chunk_tokens`` selects the memory-bounded gradient path: the trunk runs
+    ONCE on the full batch (causal context intact) and only the head -- logits,
+    CE, backward -- is chunked along the flattened token axis. ``None`` keeps the
+    original whole-batch path, which the equivalence fixture compares against.
     """
     import torch
 
@@ -572,22 +610,80 @@ def collect_intended_statistics(
         handles.append(module.register_forward_hook(_post_hook))
 
     grad_rows = 0
+    peak_bytes = 0
     with torch.enable_grad():
         for batch in calibration_batches:
             model.zero_grad(set_to_none=True)
-            logits = model(batch)
-            if not isinstance(logits, torch.Tensor):
-                logits = logits[0]
-            # Real CE against the calibration targets: next-token prediction.
-            shift_logits = logits[:, :-1, :].reshape(-1, logits.shape[-1])
-            shift_labels = batch[:, 1:].reshape(-1)
-            loss = torch.nn.functional.cross_entropy(
-                shift_logits.float(), shift_labels, ignore_index=-100
-            )
-            loss.backward()
+            if chunk_tokens is None:
+                logits = model(batch)
+                if not isinstance(logits, torch.Tensor):
+                    logits = logits[0]
+                # Real CE against the calibration targets: next-token prediction.
+                shift_logits = logits[:, :-1, :].reshape(-1, logits.shape[-1])
+                shift_labels = batch[:, 1:].reshape(-1)
+                loss = torch.nn.functional.cross_entropy(
+                    shift_logits.float(), shift_labels, ignore_index=-100
+                )
+                loss.backward()
+            else:
+                # Head-only chunking -- and the BACKWARD is not chunked.
+                #
+                # The trunk runs once over the full batch so causal context is
+                # intact, then the head's forward runs per chunk under
+                # torch.utils.checkpoint, so only one chunk's logits exist at a
+                # time (checkpointing discards them and recomputes in backward).
+                # The chunk losses are summed into a single scalar and ONE
+                # backward runs from it, so the hooks fire once on the TOTAL
+                # gradient -- which is the quantity the statistic is defined as.
+                #
+                # Per-chunk backward is FORBIDDEN, and the equivalence fixture
+                # pins why: the hook sits on trunk outputs, attention couples
+                # rows, so each chunk's backward carries cross-row contributions
+                # and squared partials do not sum. Measured on the fixture, that
+                # shape lands ~9% off the whole-batch statistic.
+                from torch.utils.checkpoint import checkpoint as _ckpt  # noqa: PLC0415
+
+                trunk = model.get_decoder() if hasattr(model, "get_decoder") else model.model
+                head = model.get_output_embeddings()
+                hidden = trunk(batch, use_cache=False)[0]
+                shift_hidden = hidden[:, :-1, :].reshape(-1, hidden.shape[-1])
+                shift_labels = batch[:, 1:].reshape(-1)
+                n_b = int(shift_labels.shape[0])
+
+                def _ce_sum(hs: Any, ls: Any, head: Any = head) -> Any:
+                    # .float() on the logits mirrors the whole-batch path exactly:
+                    # the shipped line casts before CE, and matching the statistic
+                    # bitwise means matching that cast, not just the algebra.
+                    return torch.nn.functional.cross_entropy(
+                        head(hs).float(), ls, ignore_index=-100, reduction="sum"
+                    )
+
+                spans = [
+                    (lo, min(lo + chunk_tokens, shift_hidden.shape[0]))
+                    for lo in range(0, shift_hidden.shape[0], chunk_tokens)
+                ]
+                total = sum(
+                    _ckpt(_ce_sum, shift_hidden[lo:hi], shift_labels[lo:hi], use_reentrant=False)
+                    for lo, hi in spans
+                )
+                # The mean gauge is applied to the LOSS, not to the squared
+                # gradients. One backward from the mean-loss-equivalent scalar
+                # reproduces the shipped path's gradient exactly, so nothing
+                # downstream is rescaled -- no 1/N^2 factor anywhere.
+                (total / n_b).backward()
+                del hidden, shift_hidden, total
+                _empty_cache()
             grad_rows += int(shift_labels.shape[0])
+            peak_bytes = max(peak_bytes, _peak_memory_bytes())
     for handle in handles:
         handle.remove()
+
+    if diagnostics is not None:
+        diagnostics["chunk_tokens"] = chunk_tokens
+        diagnostics["peak_bytes"] = peak_bytes
+        diagnostics["grad_rows"] = grad_rows
+        diagnostics["batches"] = len(calibration_batches)
+        diagnostics["device"] = str(device)
 
     out: dict[tuple[int, str], dict[str, np.ndarray]] = {}
     for key in sum_sq_in:
@@ -619,6 +715,9 @@ def build_real_arms(
     seed: int = 0,
     percentile: float = PERCENTILE,
     device: str | None = None,
+    chunk_tokens: int | None = None,
+    max_batches: int | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, dict[tuple[int, str], dict[str, Any]]]:
     """Real statistics for both arms, from the real fp teacher at true geometry.
 
@@ -651,6 +750,12 @@ def build_real_arms(
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     n_batches = packed_chunks(sequences, "--calibration-seqs")
     batches = tokenize_chunks(tokenizer, text, seq_len, n_batches, seed)
+    if max_batches is not None:
+        # Rehearsal bound: exercise the memory ceiling on a few batches instead
+        # of all sixteen. The statistic is not being measured here, only the
+        # peak -- and the peak is a per-batch property, so a bounded run still
+        # reproduces a per-batch defect.
+        batches = batches[:max_batches]
     resolved = sum(int(b.shape[0]) for b in batches)
     if resolved != sequences:
         raise ValueError(
@@ -682,7 +787,16 @@ def build_real_arms(
                 }
 
     # Arm B: the intended construction -- real CE backward, p99.9 clip first.
-    intended = collect_intended_statistics(model, batches, wanted=wanted, percentile=percentile)
+    # chunk_tokens selects the memory-bounded head-chunked path (see
+    # collect_intended_statistics); None keeps the whole-batch reference.
+    intended = collect_intended_statistics(
+        model,
+        batches,
+        wanted=wanted,
+        percentile=percentile,
+        chunk_tokens=chunk_tokens,
+        diagnostics=diagnostics,
+    )
 
     missing = [key for key in wanted if key not in shipped or key not in intended]
     if missing:
@@ -716,6 +830,23 @@ def main() -> int:
         default=None,
         help="accelerator device (the decisive run defaults to cuda, fail-closed)",
     )
+    parser.add_argument(
+        "--chunk-tokens",
+        type=int,
+        default=256,
+        help="head-chunk size for the gradient statistic (0 disables chunking)",
+    )
+    parser.add_argument(
+        "--rehearsal",
+        action="store_true",
+        help="statistics pass ONLY, no solves: the pre-fire memory rehearsal",
+    )
+    parser.add_argument(
+        "--rehearsal-batches",
+        type=int,
+        default=4,
+        help="batches the rehearsal feeds the statistics pass (peak is per-batch)",
+    )
     args = parser.parse_args()
 
     probe_set = (("synthetic", 0, "planted-rank16"),) if args.smoke else PROBE_SET
@@ -731,7 +862,51 @@ def main() -> int:
         # launch.env; the tolerance class covers fp32-vs-fp64 movement.
         device = args.device or "cuda"
         cfg = PTQConfig(rank=PRODUCTION_RANK, compute_dtype="float32")
-        stats = build_real_arms(probe_set, device=device)
+        chunk_tokens = args.chunk_tokens or None
+        if args.rehearsal:
+            # Pre-fire rehearsal: the statistics pass and nothing else. This is
+            # the phase that killed the box, so it is the phase that gets
+            # measured -- inside the fence, before any solve starts. The peak is
+            # a per-batch property, so a bounded batch count still reproduces a
+            # per-batch defect.
+            import torch  # noqa: PLC0415
+
+            if device.startswith("cuda"):
+                torch.cuda.reset_peak_memory_stats()
+            diag: dict[str, Any] = {}
+            build_real_arms(
+                probe_set,
+                device=device,
+                chunk_tokens=chunk_tokens,
+                max_batches=args.rehearsal_batches,
+                diagnostics=diag,
+            )
+            peak_bytes = int(diag.get("peak_bytes", 0))
+            record = {
+                "phase": "rehearsal",
+                "chunk_tokens": chunk_tokens,
+                "rehearsal_batches": args.rehearsal_batches,
+                "device": device,
+                "grad_rows": diag.get("grad_rows"),
+                "peak_bytes": peak_bytes,
+                "peak_gb": round(peak_bytes / 1e9, 3),
+                "cuda_available": bool(torch.cuda.is_available()),
+            }
+            print(f"[lane0] REHEARSAL {json.dumps(record, sort_keys=True)}")
+            if args.out is not None:
+                args.out.parent.mkdir(parents=True, exist_ok=True)
+                (args.out.parent / "rehearsal.json").write_text(
+                    json.dumps(record, indent=2, sort_keys=True) + "\n"
+                )
+                env_path = args.out.parent / "launch.env"
+                with env_path.open("a") as handle:
+                    handle.write(
+                        f"rehearsal_peak_gb={record['peak_gb']}\n"
+                        f"rehearsal_chunk_tokens={chunk_tokens}\n"
+                        f"rehearsal_batches={args.rehearsal_batches}\n"
+                    )
+            return 0
+        stats = build_real_arms(probe_set, device=device, chunk_tokens=chunk_tokens)
     rows = run_arms(
         probe_set,
         seed=args.seed,

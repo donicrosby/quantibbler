@@ -200,6 +200,110 @@ def test_intended_pass_collects_real_ce_gradients(tool, tiny_model):  # noqa: F8
     assert entry["d_in_raw"].shape == (model.model.layers[0].mlp.down_proj.weight.shape[1],)
 
 
+def _tiny_batch(tiny_model, rows=2, cols=32):  # noqa: F811
+    import torch
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(str(tiny_model))
+    ids = tok("the quick brown fox jumps over the lazy dog . " * 8)["input_ids"]
+    ids = (ids * 8)[: rows * cols]
+    return torch.tensor(ids).view(rows, cols)
+
+
+def _tiny_fp64_model(tiny_model):  # noqa: F811
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    return AutoModelForCausalLM.from_pretrained(str(tiny_model), dtype=torch.float64).eval()
+
+
+def test_chunked_ce_preserves_statistic_exactly(tool, tiny_model):  # noqa: F811
+    """Chunked head forward must reproduce the whole-batch statistic BITWISE.
+
+    Chunking is additive over rows only if the backward is NOT chunked. The hook
+    sits on trunk outputs, where attention couples rows, so per-chunk backward
+    would capture partial gradients and squared partials do not sum. The
+    mandated shape -- checkpointed head chunks, summed losses, mean gauge on the
+    loss, ONE backward -- is an identity, so the bar is equality, not tolerance.
+    """
+    model = _tiny_fp64_model(tiny_model)
+    batch = _tiny_batch(tiny_model)
+    wanted = ((0, "mlp.down_proj"),)
+
+    whole = tool.collect_intended_statistics(model, [batch], wanted=wanted, percentile=99.9)
+    chunked = tool.collect_intended_statistics(
+        model, [batch], wanted=wanted, percentile=99.9, chunk_tokens=8
+    )
+
+    key = (0, "mlp.down_proj")
+    for field in ("d_in_raw", "d_out_raw"):
+        a, b = whole[key][field], chunked[key][field]
+        assert np.array_equal(a, b), (
+            f"{field} is not bitwise identical: max abs diff {np.abs(a - b).max():.3e}"
+        )
+    assert whole[key]["grad_rows"] == chunked[key]["grad_rows"]
+
+
+def test_per_chunk_backward_does_not_preserve_the_statistic(tool, tiny_model):  # noqa: F811
+    """The forbidden shape is RED: squared per-chunk partials do not sum.
+
+    This is the fixture bug-hunter asked for, kept as an explicit red case so the
+    ban is pinned by measurement rather than by prose. If someone reintroduces
+    per-chunk backward, this test still passes (it asserts the difference) while
+    the identity test above goes red -- the pair together is the guard.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    model = _tiny_fp64_model(tiny_model)
+    batch = _tiny_batch(tiny_model)
+    head = model.get_output_embeddings()
+    hidden = model.model(batch, use_cache=False)[0]
+    hh = hidden[:, :-1, :].reshape(-1, hidden.shape[-1])
+    ll = batch[:, 1:].reshape(-1)
+
+    captured: dict[str, torch.Tensor] = {}
+    target = next(m for n, m in model.named_modules() if n.endswith("mlp.down_proj"))
+
+    def _hook(mod, inp, out):  # noqa: ANN001
+        if out.requires_grad:
+            out.register_hook(
+                lambda g: captured.__setitem__(
+                    "total", (g.detach().reshape(-1, g.shape[-1]) ** 2).sum(0)
+                )
+            )
+
+    handle = target.register_forward_hook(_hook)
+
+    # (a) ONE backward from the summed loss: square of the TOTAL gradient.
+    model.zero_grad(set_to_none=True)
+    hidden = model.model(batch, use_cache=False)[0]
+    hh = hidden[:, :-1, :].reshape(-1, hidden.shape[-1])
+    total_loss = F.cross_entropy(head(hh), ll, reduction="sum")
+    total_loss.backward()
+    square_of_total = captured["total"].clone()
+
+    # (b) per-chunk backward: sum of squared PARTIAL gradients.
+    model.zero_grad(set_to_none=True)
+    captured.clear()
+    hidden = model.model(batch, use_cache=False)[0]
+    hh = hidden[:, :-1, :].reshape(-1, hidden.shape[-1])
+    acc = None
+    for lo in range(0, hh.shape[0], 8):
+        hi = min(lo + 8, hh.shape[0])
+        part = F.cross_entropy(head(hh[lo:hi]), ll[lo:hi], reduction="sum")
+        part.backward(retain_graph=True)
+        acc = captured["total"].clone() if acc is None else acc + captured["total"]
+    handle.remove()
+
+    assert acc is not None
+    rel = float((acc - square_of_total).abs().max() / square_of_total.abs().max())
+    assert rel > 1e-6, (
+        f"per-chunk backward matched the whole-batch statistic (rel {rel:.3e}); "
+        "the ban on it would be unnecessary"
+    )
+
+
 # --- per_token_norm_clip_999 ---------------------------------------------------
 
 
