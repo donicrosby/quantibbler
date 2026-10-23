@@ -27,11 +27,11 @@ GPU acceleration lands PRIOR to the next production run — the user has ruled t
 
 ## Landing efficiency (revised by user directive, 2026-10-23)
 
-The user has reversed the numpy-first sequencing: the decisive Lane 0 fire happens ON the torch backend once the port lands, and the numpy arm runs as the in-fire reference — one execution delivers the Lane 0 verdict AND the parity acceptance (row-times, tolerance class, per-layer naming). Target wall time: ~5–10 min (~40 solves at GPU fp32 rates vs 90–150 s/solve on CPU). Lane 0's harness therefore does NOT fire before the torch port exists.
+The user has reversed the numpy-first sequencing: the decisive Lane 0 fire happens ON the torch backend once the port lands — torch-only, 20 solves, no NumPy runs. One execution delivers the Lane 0 verdict and the measured row-times; target wall time ~5–10 min (at GPU fp32 rates vs 90–150 s/solve on CPU). Lane 0's harness therefore does NOT fire before the torch port exists.
 
-## Oracle grid (default) and escalation (revised by user mandate, 2026-10-23)
+## NumPy scope and the fire grid (user directive, 2026-10-23, revised)
 
-The user mandate makes NumPy oracle-only — it runs to produce reference numbers, never artifacts. The fire therefore carries **20 torch verdict solves + 6 oracle solves** (the stratified six: block 0 `q_proj`/`down_proj`, block 14 `q_proj` / block 15 `down_proj` on the deliberate asymmetry, block 26 `q_proj`/`down_proj` — one entry per family×depth cell, exact, no nearest-match). **Escalation clause:** if any of the six cells breaches the tolerance class, the oracle expands to all ten entries before the backend is accepted — a silent pass on an unchecked layer is not an option. The 40-solve full-grid variant is retired by the mandate, not by time pressure.
+NumPy executes ONLY inside unit tests — the parity suite is its sole sanctioned home. The in-fire oracle grid is therefore REMOVED: the fire carries **20 torch verdict solves and no NumPy runs**. Parity acceptance rests on (a) the unit-test parity suite (sign-ambiguity-safe, reconstructed-product comparisons) and (b) the campaign's measured tolerance record (fp32 GPU ≡ fp64 CPU within ±0.002 on production layers). Any tolerance breach in a parity unit test blocks acceptance and names the operation.
 
 ## Fire sequencing (v2 complete, 2026-10-23)
 
