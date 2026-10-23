@@ -103,10 +103,10 @@ The CE-gradient pass SHALL chunk the head per 256-token slice off a full-context
 
 #### Scenario: rehearsal_red_first
 
-- **WHEN** the bounded rehearsal runs on pre-chunk bytes inside the fenced container
-- **THEN** it reproduces the death as an in-container OOM kill — inside the fence, never a box death
+- **WHEN** the bounded red rehearsal runs the parent harness bytes (the code the box-death fire executed) with the unchunked stats path bounded to ONE batch
+- **THEN** it runs inside the fenced container under three operational nets — a pre-launch free-RAM baseline recorded beside the artifact, a hard wall-clock timeout on the container, and no concurrent tenants — and its artifact is the MEASURED per-batch peak, not an expected kill (the cgroup fence cannot produce an in-container OOM-kill for kfd-granted allocations, so a kill artifact would require a second box death)
 
 #### Scenario: rehearsal_peak_recorded_before_refire
 
-- **WHEN** the chunked rehearsal completes all 16 stats batches under the fence
-- **THEN** the measured memory peak is recorded in launch.env with enough headroom for the 20 solves and model weights, and the refire happens only after the peak, the red-first artifact, and the equivalence fixture are all green
+- **WHEN** the chunked rehearsal completes the full stats phase under the fence
+- **THEN** the memory peak is read from `torch.cuda.max_memory_reserved` — the instrument that sees kfd-granted memory the cgroup counter cannot — recorded in launch.env and rehearsal.json, and the refire happens only after the chunked peak beats the red peak with solve-compatible headroom under 32G, the red artifact, and the equivalence fixture are all green
