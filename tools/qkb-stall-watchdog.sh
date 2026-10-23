@@ -34,7 +34,18 @@ STALL_MIN=15
 INTERVAL=30
 KILL_AFTER_MIN=0
 # 90% of the wrapper's --memory 32g ceiling; advisory early-warning line.
-MEM_ALERT_GB=28.8
+# Memory alert threshold, calibrated from the recorded breadcrumb log rather
+# than from a fraction of the ceiling:
+#   healthy peak at the paper geometry (seq 2048, tune 2048, faithful): 17.86G
+#   next-highest healthy observation (seq 512):                         18.38G
+#   30.14G and 31.07G are NOT levels. Both are runs escalating to death at
+#   seq 2048 -- the log ends, or jumps to an unrelated run, at the top of the
+#   ramp (6.21 -> 12.07 -> 22.18 -> 31.07G inside one TuneFP fire). Reading
+#   them as normal would push the alert above the real 32G ceiling.
+# 30.5G sits above every healthy observation and below the ceiling, so a trip
+# means something new. The actionable channel stays stall/silence: a true
+# memory breach ends as a cgroup kill, and a killed container reads as silence.
+MEM_ALERT_GB=30.5
 # Seconds after watchdog start before container-absence or empty-file states
 # are trusted: the container takes seconds to create+run and ~a minute to
 # emit its first breadcrumb line.
