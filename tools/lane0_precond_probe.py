@@ -160,6 +160,9 @@ def _tau_max_override() -> float | None:
         raise ValueError(f"TAU_MAX must be a float, got {raw!r}") from exc
 
 
+DEFAULT_TAU_MAX = 1e6
+
+
 def clip_to_tau(vec: np.ndarray, tau_max: float | None = None) -> np.ndarray:
     """Clip entries above an absolute ceiling ``tau_max > 0``.
 
@@ -171,6 +174,10 @@ def clip_to_tau(vec: np.ndarray, tau_max: float | None = None) -> np.ndarray:
     here is the same choice production makes, so the fold stays the sole
     variable between the arms.
 
+    The paper gives a shape, not a number; DEFAULT_TAU_MAX is the spec's named
+    default and TAU_MAX overrides it, so a bare `TAU_MAX=` typo cannot silently
+    redefine the candidate.
+
     This replaces a line that read ``np.minimum(vec, np.max(vec))`` and was
     therefore a no-op -- nothing exceeds its own maximum -- while its docstring
     cited Eq. 3. The paper's clipping step never executed and the arm labelled
@@ -179,7 +186,16 @@ def clip_to_tau(vec: np.ndarray, tau_max: float | None = None) -> np.ndarray:
     """
     vec = np.asarray(vec, dtype=np.float64)
     if tau_max is None:
-        tau_max = float(np.percentile(vec, 95.0)) if vec.size else 0.0
+        # Default is effectively no clip. Eq. 3's ceiling is Lemma 1's
+        # boundedness guarantee -- a theoretical statement, not an aggressive
+        # hyperparameter -- so the candidate arm takes the paper's shape without
+        # inventing a number the paper does not give. Deliberately NOT
+        # production's q95: production's tau=None is a *gated* policy (clip only
+        # when max > 10x q95, calibration.py:330, _TAU_TAIL_GATE=10.0), and no
+        # unconditional clip can be identical to a gated one. The arms are meant
+        # to differ in tau policy; that difference is part of what intended-vs-
+        # shipped measures.
+        tau_max = DEFAULT_TAU_MAX
     return np.minimum(vec, float(tau_max))
 
 

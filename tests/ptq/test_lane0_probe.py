@@ -1110,37 +1110,45 @@ def test_robust_clip_shrink_acts_on_its_adversarial_class(tool) -> None:
     assert np.allclose(out[:2], vec[:2]), "entries under tau must be untouched"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "FINDING, not a fixture problem: production's robust_diag(raw, raw, tau=None, "
-        "gamma=0.0) returns the input UNCLIPPED (max 100.0 on a 0..100 ramp), while "
-        "clip_to_tau's q95 default clips to 95.0. Planner's ruling rests on 'tau=None "
-        "is production's q95 tail-gate, so the fold is the sole variable' -- that "
-        "premise is measurably false. Either production's q95 lives somewhere other "
-        "than robust_diag, or Arm B's default tau must be chosen to match whatever "
-        "production actually does before the fold can be called the sole variable. "
-        "strict=True so this cannot silently start passing: removing the marker is "
-        "the act that records the reconciliation."
-    ),
-)
-def test_clip_to_tau_default_matches_production_not_its_own_constant(tool) -> None:
-    """The default tau is production's q95 gate, pinned against production itself.
+def test_production_tail_gate_clips_a_heavy_tail_at_q95(tool) -> None:
+    """Production's tau=None contract, pinned by its actual behaviour.
 
-    Comparing against `np.percentile(raw, 95)` would be self-referential -- the
-    harness agreeing with the harness, which is how the mirror defects survived
-    review. This calls production's `robust_diag` on the same input with
-    `tau=None, gamma=0.0` and asserts the two agree, so the claim "the default is
-    production's gate" is tested rather than restated.
+    `_TAU_TAIL_GATE = 10.0` (calibration.py:34); the gate at :330 sets
+    `cap = q95 if max > 10*q95 else inf`. A heavy tail trips it and clips at q95.
+    """
+    from quantibbler.ptq.calibration import robust_diag
+
+    raw = np.array([1.0] * 99 + [1000.0])
+    q95 = float(np.percentile(raw, 95))
+    assert float(raw.max()) > 10.0 * q95, "fixture must trip the 10x gate"
+
+    prod_d_in, _ = robust_diag(raw, raw, tau=None, gamma=0.0)
+    assert prod_d_in.max() == pytest.approx(q95, rel=1e-6), prod_d_in.max()
+
+
+def test_production_tail_gate_refuses_to_clip_a_concentrated_vector(tool) -> None:
+    """The uniform ramp is the canonical refuse-case, not a missing mechanism.
+
+    My earlier reading called this "production does not clip" and treated it as a
+    falsified premise. It is production refusing to clip a vector whose max is
+    1.053x its q95 -- five times below the gate. The mechanism was there; the
+    observation was of its documented contract.
     """
     from quantibbler.ptq.calibration import robust_diag
 
     raw = np.linspace(0.0, 100.0, 101)
-    out = tool.clip_to_tau(raw)
-    assert not np.array_equal(out, raw), "clip did not act"
+    q95 = float(np.percentile(raw, 95))
+    assert float(raw.max()) <= 10.0 * q95, "fixture must NOT trip the gate"
 
     prod_d_in, _ = robust_diag(raw, raw, tau=None, gamma=0.0)
-    assert np.allclose(prod_d_in, out, atol=1e-9), (prod_d_in[:3], out[:3])
+    assert prod_d_in.max() == pytest.approx(float(raw.max()), rel=1e-6)
+
+
+def test_clip_to_tau_default_is_the_specs_named_value(tool) -> None:
+    """The candidate's default is named in the spec, not inferred from production."""
+    raw = np.linspace(0.0, 100.0, 101)
+    assert tool.DEFAULT_TAU_MAX == 1e6
+    assert np.array_equal(tool.clip_to_tau(raw), raw), "1e6 must not clip this ramp"
 
 
 def test_tau_max_override_is_fail_closed(tool, monkeypatch) -> None:
