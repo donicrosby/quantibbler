@@ -178,7 +178,7 @@ Every Lane 0 launch SHALL go through `tools/run-ptq-container.sh` under `MODE=la
 
 ### Requirement: container_log_witness
 
-The lane0 wrapper SHALL capture the container's stdout/stderr to `$OUT/container.log` — wrapper-level `tee`, no in-container changes, no image rebuild — and SHALL record the container exit status in `launch.env` via POSIX `PIPESTATUS`. A lane0 fire SHALL fail closed on completion when `container.log` is absent: a death without a trace is a launch defect, not an acceptable outcome — green-16's batch-2 Arm B death left no traceback, and the CPU suite cannot be the witness for device-only faults.
+The wrapper SHALL capture the container's stdout/stderr to `$OUT/container.log` — wrapper-level `tee`, no in-container changes, no image rebuild — and SHALL record the container exit status in `launch.env` via POSIX `PIPESTATUS`. A fire of ANY mode — lane0 or ptq production — SHALL fail closed on completion when `container.log` is absent or empty: a death without a trace is a launch defect, not an acceptable outcome — green-16's batch-2 Arm B death and v2's fifth blind death both left no traceback, and the CPU suite cannot be the witness for device-only faults.
 
 #### Scenario: witness_mechanics_verify_without_box_time
 
@@ -190,3 +190,21 @@ The lane0 wrapper SHALL capture the container's stdout/stderr to `$OUT/container
 
 - **WHEN** a rehearsal or decisive fire refires after a death
 - **THEN** the refire SHALL complete with `container.log` on disk; any subsequent death leaves its traceback named in the artifact, and the first read of that traceback is the suspect from the prior death's boundary analysis — for green-16's class, `release_device_memory`'s grad-enabled `empty_cache()` between batches
+
+### Requirement: fire_monitoring_cadence
+
+Every fire SHALL announce its poll cadence at launch with a named owner, alongside its announced wall time — a fire nobody is scheduled to look at is unmonitored by construction. When the completion channel is known dead at launch, the launcher SHALL arm the poll at launch, not remember it later. v2 — a 21.8-hour letter-of-the-paper fire with a known-dead notification channel and no poll order — died at 03:43:42Z and went unread for 21 hours: that class SHALL NOT exist again.
+
+#### Scenario: dead_channel_poll_armed_at_launch
+
+- **WHEN** a fire launches with a completion channel known dead (backend-loss)
+- **THEN** the launch announcement names the poll interval and its owner, and the first poll is scheduled at launch time
+- **AND** a fire whose wall time exceeds one hour without an announced poll cadence is a launch defect, refused at staging
+
+### Requirement: launch_env_single_writer
+
+`launch.env` SHALL have exactly one writer at a time: concurrent appends are a provenance defect, not a race to tolerate — v2's launch.env ended in a corrupted bare-`?` append line. Writers SHALL serialize (one append path) or write atomically (write-then-replace); a malformed launch.env invalidates the artifact's provenance block.
+
+### Requirement: infrastructure_interception_proof
+
+A test that overrides `PATH` to intercept a command which launches real infrastructure SHALL prove the interception took effect in-band — assert the resolved binary is the shim — before invoking the code under test. A silent fall-through to the real binary is not a red test; it is real infrastructure with the test's own timeout as the only alarm.
