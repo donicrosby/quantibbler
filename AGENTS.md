@@ -44,7 +44,9 @@ proposing or implementing anything.
 
 All Python tooling goes through uv — never pip, never bare `python`:
 
-- `uv sync --all-groups --extra kernels` — create/refresh the environment;
+- `uv sync --all-groups --extra torch --extra kernels --extra hf` — create/refresh
+  the environment (torch/hf are extras: without them the ptq test tier is
+  IGNORED cleanly and `uv run pytest` silently runs a lean suite);
   also builds the Rust extension via maturin (workspace member).
 - `uv run pytest` — test suite.
 - `uv run maturin develop` — rebuild the extension after editing Rust code.

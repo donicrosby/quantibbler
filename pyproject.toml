@@ -42,6 +42,15 @@ members = ["crates/quantibbler-kernels"]
 
 [tool.uv.sources]
 quantibbler-kernels = { workspace = true }
+# Host lanes are CPU-only (AMD box; the GPU substrate is the container image),
+# so the torch extra resolves to the CPU wheel — no nvidia-* dependency chain.
+# Per the uv PyTorch guide: explicit index, scoped to the extra.
+torch = [{ index = "pytorch-cpu", extra = "torch" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
