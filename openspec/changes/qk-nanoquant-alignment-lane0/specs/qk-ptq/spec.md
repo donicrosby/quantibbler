@@ -208,12 +208,14 @@ Every fire SHALL announce its poll cadence at launch with a named owner, alongsi
 
 ### Requirement: wrapper_failclosed_branches_hermetic_tests
 
-Every fail-closed branch of the wrapper SHALL be exercised by a hermetic test — a stub `docker` answering `inspect` with a fixture payload, the interception proven in-band before the wrapper runs — never by "verified by construction". The named class: the pre-flight name-refusal branch was claimed verified and a hermetic stub test measured it NOT firing (wrapper exited 0 through to `container: exit=0`). The branch list SHALL include: pre-flight held-name refusal, digest pin, rocm-tag gate, GPU gate, witness fail-closed, the nets' label-decline, and the watchdog's kill-path label check.
+Every fail-closed branch of the wrapper SHALL be exercised by a hermetic test — a stub `docker` answering `inspect` with a fixture payload, the interception proven in-band before the wrapper runs — never by "verified by construction".
 
 #### Scenario: refusal_branch_proven_before_fire
 
 - **WHEN** a lane0 refire or decisive fire is staged
 - **THEN** the staging proof includes the hermetic refusal test green — a fire SHALL NOT ride a guard that cannot be demonstrated
+- **AND** the branch list SHALL cover: pre-flight held-name refusal, digest pin, rocm-tag gate, GPU gate, witness fail-closed, the nets' label-decline, and the watchdog's kill-path label check
+- **AND** the named class is the 2026-10-24 pre-flight miss: claimed verified by construction, a hermetic stub measured it NOT firing — wrapper exited 0 through to `container: exit=0`
 - **AND** a guard whose red test is reverted to keep the suite green is a staging blocker, not a silent gap
 
 ### Requirement: launch_lines_derived_at_firing
