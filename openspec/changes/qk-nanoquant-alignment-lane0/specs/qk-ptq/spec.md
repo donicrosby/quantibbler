@@ -206,6 +206,22 @@ Every fire SHALL announce its poll cadence at launch with a named owner, alongsi
 - **THEN** a poll cadence with a named owner SHALL exist from launch, and the launch announcement names both
 - **AND** a fire launching with a dead completion channel SHALL have its first poll scheduled at launch — v2, a 21.8-hour fire with a known-dead channel and no poll order, died at 03:43:42Z and went unread for 21 hours; that class SHALL NOT exist again
 
+### Requirement: guards_shall_be_tri_state
+
+A guard whose verification step fails SHALL refuse, never proceed. Three states: held SHALL refuse; free SHALL proceed; unverifiable SHALL refuse with the captured failure in the message. `2>/dev/null || true` reading as free is the named defect class: the pre-flight name guard fell open exactly this way — an inspect that failed, or a payload on stderr, both read as free and the wrapper exited 0 through to `container: exit=0`.
+
+#### Scenario: unverifiable_refuses_with_captured_stderr
+
+- **WHEN** a guard's verification call returns rc≠0 or the payload lands on stderr
+- **THEN** the guard refuses with the captured stderr in the refusal message — both collapse modes produce exit 2, not 0
+- **AND** the fix lands red-first against two stub fixtures: one answering rc≠0, one emitting the payload on stderr; both currently yield rc=0, both SHALL yield exit 2 after the fix
+- **AND** the stub logs argv per call, so form-selective dispatch cannot hide inside a pass
+
+#### Scenario: fail_direction_audit_required
+
+- **WHEN** a guard chain is audited
+- **THEN** every verification call SHALL be classified by fail direction, and a call that fails toward launch is a defect — the 2026-10-24 audit found the nets' label reads and the watchdog's `docker ps` fail safe, and the pre-flight guard the only fail-open on the launch path
+
 ### Requirement: wrapper_failclosed_branches_hermetic_tests
 
 Every fail-closed branch of the wrapper SHALL be exercised by a hermetic test — a stub `docker` answering `inspect` with a fixture payload, the interception proven in-band before the wrapper runs — never by "verified by construction".
