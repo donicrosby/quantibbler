@@ -14,7 +14,7 @@ crash, flush-per-line and fsynced, matching `MemTelemetry`'s existing contract.
 - **WHEN** a fire is killed mid-loop
 - **THEN** the progress output contains every line written before the kill signal arrived
 - **AND** the final line is the last successfully written update, not a partially-overwritten bar
-- **AND** the absence of a "complete" line combined with the visible iteration count lets the reader determine exactly how far the loop progressed
+- **AND** a `complete()` call emits a marked final line (e.g. `phase=done`) distinguishable from ordinary progress lines, so a reader can distinguish "the loop finished at iteration N" from "the loop was killed after writing iteration N" without guessing from the total count
 
 ### Requirement: progress_cadence_bounded
 
@@ -98,9 +98,17 @@ the telemetry thread itself is dead.
 ### Requirement: progress_eta_sanity_checked
 
 Before rendering an ETA, the `ProgressReporter` SHALL check the predicted
-completion time against per-phase rate constants measured on the target
-hardware at the protocol geometry, and SHALL record the verdict as a boolean
-`eta_sane` field in the telemetry.
+completion time against per-phase rate constants and SHALL record the verdict as
+a boolean `eta_sane` field in the telemetry.
+
+#### Scenario: eta_unknown_before_any_unit_completes
+
+- **WHEN** the progress bar starts and no iteration unit has completed
+  (rate is uncomputable)
+- **THEN** the rendered progress line reads `eta=unknown eta_sane=false`
+- **AND** the reader can distinguish "no prediction yet" from "prediction is
+  unreasonable" and from "prediction is reliable" — three states, not two
+- **AND** the harness does not crash on an unformattable `None` ETA
 
 #### Scenario: eta_suppressed_when_unreasonable
 
