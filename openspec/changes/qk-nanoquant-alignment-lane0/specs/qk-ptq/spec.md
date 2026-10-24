@@ -175,3 +175,18 @@ Every Lane 0 launch SHALL go through `tools/run-ptq-container.sh` under `MODE=la
 
 - **WHEN** a lane0 rehearsal or fire launches
 - **THEN** a host-side stop net is armed for the container's wall-clock deadline, so a run that neither completes nor OOMs cannot hang the box, and the deadline is recorded in launch.env
+
+### Requirement: container_log_witness
+
+The lane0 wrapper SHALL capture the container's stdout/stderr to `$OUT/container.log` — wrapper-level `tee`, no in-container changes, no image rebuild — and SHALL record the container exit status in `launch.env` via POSIX `PIPESTATUS`. A lane0 fire SHALL fail closed on completion when `container.log` is absent: a death without a trace is a launch defect, not an acceptable outcome — green-16's batch-2 Arm B death left no traceback, and the CPU suite cannot be the witness for device-only faults.
+
+#### Scenario: witness_mechanics_verify_without_box_time
+
+- **WHEN** the wrapper is invoked with an unpullable image
+- **THEN** the redirect and status-capture mechanics prove themselves in seconds — the pull fails before any container exists — without spending box time or CPU hours on redirect theater
+- **AND** the mechanical check records container.log presence and the propagated exit status in the artifact
+
+#### Scenario: refire_requires_witness
+
+- **WHEN** a rehearsal or decisive fire refires after a death
+- **THEN** the refire SHALL complete with `container.log` on disk; any subsequent death leaves its traceback named in the artifact, and the first read of that traceback is the suspect from the prior death's boundary analysis — for green-16's class, `release_device_memory`'s grad-enabled `empty_cache()` between batches
