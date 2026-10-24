@@ -940,3 +940,44 @@ def test_arm_a_captures_each_probed_block_separately(tool, tiny_model, monkeypat
     # were handed the same tensor (or None). The sentinels only have to make
     # layer 1's input differ from layer 2's -- which the real layers would do
     # anyway, so the scaling is belt-and-braces, not the assertion.
+
+
+def test_build_real_arms_runs_two_batches(tool, tiny_model, monkeypatch):  # noqa: F811
+    """The batch count the CPU suite must have run before any fire runs it.
+
+    green-16 was the first execution of multi-batch Arm B in campaign history --
+    every prior rehearsal was single-batch, and the stub ran max_batches=1 by
+    design. Its second iteration raised. This is the red-first fixture for the
+    batch-2 boundary: if the path raises on CPU we get the traceback here.
+    """
+    q = _driver()
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    model = _tiny_fp64_model(tiny_model)
+    vocab = int(model.config.vocab_size)
+    monkeypatch.setattr(q, "find_wikitext_shards", lambda split: ["stub"])  # noqa: ARG005
+    monkeypatch.setattr(q, "load_wikitext_text", lambda shards: "stub text")  # noqa: ARG005
+
+    def _stub_tokenizer(*a, **k):  # noqa: ARG001
+        return _FixedTokenizer(64 * 2048, vocab)
+
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", staticmethod(_stub_tokenizer))
+    monkeypatch.setattr(
+        AutoModelForCausalLM,
+        "from_pretrained",
+        staticmethod(lambda *a, **k: model),  # noqa: ARG005
+    )
+
+    diagnostics: dict = {}
+    arms = tool.build_real_arms(
+        (("Qwen/Qwen3-0.6B", 0, "mlp.down_proj"),),
+        device=None,
+        chunk_tokens=8,
+        max_batches=2,
+        diagnostics=diagnostics,
+    )
+    assert set(arms) == {"shipped", "intended"}
+    assert diagnostics["packed_batches"] == 2, diagnostics
+    assert diagnostics["sequences"] == 16, diagnostics
+    assert torch.isfinite(torch.as_tensor(arms["intended"][(0, "mlp.down_proj")]["d_in_raw"])).all()
