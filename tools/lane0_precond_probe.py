@@ -48,6 +48,7 @@ import numpy as np
 from quantibbler.ptq.calibration import collect_stats, robust_diag
 from quantibbler.ptq.config import PTQConfig
 from quantibbler.ptq.lb_admm import lb_admm, magnitude_balance
+from quantibbler.ptq.progress import ProgressReporter
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -1193,7 +1194,9 @@ def build_real_arms(
     # adapter here would be the sixth instance of this same defect.
     from quantize_hf_model import LayerBlock  # noqa: PLC0415
 
-    for idx in block_indices:
+    stats_reporter = ProgressReporter("stats_shipped", len(block_indices))
+    for step, idx in enumerate(block_indices):
+        stats_reporter.tick(step + 1)
         block = LayerBlock(trunk.layers[idx], trunk.rotary_emb)
         book = collect_stats(block, [captured[idx]], chunk_rows=SHIPPED_CHUNK_ROWS)
         for entry in book:  # LayerStatsBook is iterable; _entries is private
@@ -1209,6 +1212,7 @@ def build_real_arms(
                         "grad_fallback": None,
                     }
         release_device_memory(device)
+    stats_reporter.complete(len(block_indices))
     del captured
 
     # Arm B: the intended construction -- real CE backward, p99.9 clip first.
