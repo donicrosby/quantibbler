@@ -21,6 +21,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import time
 
 import numpy as np
 import pytest
@@ -1023,3 +1024,70 @@ def test_load_layer_weight_walks_the_full_glob_and_key_path(tool, tmp_path, monk
     assert weight.shape == (4, 8), weight.shape
     assert weight.dtype == np.float64, weight.dtype
     assert shard == "model.safetensors", shard
+
+
+def test_telemetry_header_carries_the_progress_json_column(tool, tmp_path) -> None:
+    """The column is present whenever the reporter is active -- header included."""
+    import io
+
+    from quantibbler.ptq.progress import ProgressReporter
+
+    tel = tool.MemTelemetry(
+        tmp_path / "mem.csv",
+        device="cpu",
+        reporter=ProgressReporter("stats", 10, stream=io.StringIO()),
+    )
+    tel.start()
+    tel.stop()
+
+    header = (tmp_path / "mem.csv").read_text().splitlines()[0]
+    assert header == "t,phase,reserved,allocated,used,free,progress_json", header
+
+
+def test_progress_json_is_quoted_so_the_column_count_holds(tool, tmp_path) -> None:
+    """The progress JSON contains commas; unquoted, every reader shifts by one."""
+    import csv as _csv
+    import io
+
+    from quantibbler.ptq.progress import ProgressReporter
+
+    tel = tool.MemTelemetry(
+        tmp_path / "mem.csv",
+        device="cpu",
+        reporter=ProgressReporter("ste", 20, stream=io.StringIO()),
+    )
+    tel.start()
+    tel.write_sample(1, 2, 3, 4, '{"phase": "ste", "iter": 3, "total": 20}')
+    tel.stop()
+
+    rows = list(_csv.reader((tmp_path / "mem.csv").read_text().splitlines()))
+    assert all(len(row) == 7 for row in rows), rows
+    body = [r for r in rows if r and r[1] != "phase"][-1]
+    assert body[6].startswith('{"phase"')
+
+
+def test_heartbeat_fires_on_a_non_cuda_device(tool, tmp_path) -> None:
+    """Liveness must not depend on a memory sample succeeding.
+
+    `sample()` returns early when the device is not CUDA. A heartbeat placed
+    after it would be absent on CPU -- silently, and in exactly the run where the
+    progress line is the only signal there is.
+    """
+    import io
+
+    from quantibbler.ptq.progress import ProgressReporter
+
+    stream = io.StringIO()
+    reporter = ProgressReporter("stats", 10, stream=stream)
+    tel = tool.MemTelemetry(tmp_path / "mem.csv", device="cpu", interval=0.05, reporter=reporter)
+    tel.start()
+    # Bounded poll rather than a fixed sleep: the heartbeat is timer-driven, so
+    # waiting for the effect is the assertion, and a bare sleep would be a
+    # flakiness source on a loaded box.
+    deadline = time.monotonic() + 5.0
+    while not stream.getvalue() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    tel.stop()
+
+    assert "progress stats" in stream.getvalue(), "no heartbeat on a non-CUDA device"
+    assert tel.last_progress, "the heartbeat must also feed the CSV column"

@@ -889,6 +889,18 @@ def release_device_memory(device: Any) -> None:
             torch.cuda.empty_cache()
 
 
+def _csv_field(value: str) -> str:
+    """RFC-4180 quoting for a field that may contain commas and quotes.
+
+    The progress JSON is one object with commas in it, so an unquoted write
+    silently adds columns and every reader downstream shifts by one. Quoted only
+    when non-empty, so existing rows keep their exact shape.
+    """
+    if not value:
+        return ""
+    return '"' + value.replace('"', '""') + '"'
+
+
 class MemTelemetry:
     """Device-memory samples every `interval` seconds, flushed line by line.
 
@@ -899,11 +911,22 @@ class MemTelemetry:
     left open.
     """
 
-    def __init__(self, path: pathlib.Path, device: Any, interval: float = 2.0) -> None:
+    def __init__(
+        self,
+        path: pathlib.Path,
+        device: Any,
+        interval: float = 2.0,
+        reporter: Any = None,
+    ) -> None:
         self.path = path
         self.device = device
         self.interval = interval
         self.phase = "startup"
+        # The reporter whose heartbeat makes this thread a liveness channel. The
+        # heartbeat writes to stdout and to the breadcrumbs sink, so the watchdog
+        # reads lane0 liveness through the lines it already parses.
+        self.reporter = reporter
+        self.last_progress = ""
         # The host-visible peak. torch's caching-allocator counters read zero
         # once PYTORCH_NO_CUDA_MEMORY_CACHING is on -- so the allocator's
         # max_memory_reserved is NOT the acceptance number for this lane, and
@@ -913,7 +936,9 @@ class MemTelemetry:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
-    def write_sample(self, reserved: int, allocated: int, used: int, free: int) -> None:
+    def write_sample(
+        self, reserved: int, allocated: int, used: int, free: int, progress: str = ""
+    ) -> None:
         """Append one flushed line.
 
         Separated from sampling so the record's format and its durability are
@@ -921,7 +946,11 @@ class MemTelemetry:
         matters, and it is the one a dead run depends on.
         """
         with self.path.open("a") as handle:
-            handle.write(f"{time.time():.3f},{self.phase},{reserved},{allocated},{used},{free}\n")
+            handle.write(
+                f"{time.time():.3f},{self.phase},{reserved},{allocated},{used},{free}"
+                + ("," + _csv_field(progress) if self.reporter is not None else "")
+                + "\n"
+            )
             handle.flush()
             os.fsync(handle.fileno())
 
@@ -942,18 +971,45 @@ class MemTelemetry:
             int(torch.cuda.memory_allocated()),
             used,
             int(free_b),
+            self.last_progress,
         )
 
     def _run(self) -> None:
         while not self._stop.wait(self.interval):
+            # The heartbeat fires first and unconditionally. Liveness must not
+            # depend on a memory sample succeeding: `sample()` returns early on a
+            # non-CUDA device, so a heartbeat placed after it would be silently
+            # absent in exactly the configuration where it is the only signal.
+            with contextlib.suppress(Exception):
+                self.last_progress = self._heartbeat()
             # Telemetry must never be the reason a run dies: a sampling failure
             # is dropped so the run continues, and the gap in the trace shows it.
             with contextlib.suppress(Exception):
                 self.sample()
 
+    def _progress_header(self) -> str:
+        return ",progress_json" if self.reporter is not None else ""
+
+    def _heartbeat(self) -> str:
+        """Emit one progress line from this thread and return it for the CSV.
+
+        This is the consumer the heartbeat was missing: the reporter fans the
+        record out to stdout and the breadcrumbs file, and the watchdog's
+        existing `qkb:progress` parse reads lane0 liveness without modification.
+        """
+        if self.reporter is None:
+            return ""
+        record = self.reporter.heartbeat()
+        return "" if not record else json.dumps(record, sort_keys=True)
+
     def start(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text("t,phase,reserved,allocated,used,free\n")
+        # The column appears when the reporter is active, per the spec: a lane
+        # without progress instrumentation keeps its historical row shape rather
+        # than gaining a permanently empty column.
+        self.path.write_text(
+            "t,phase,reserved,allocated,used,free" + self._progress_header() + "\n"
+        )
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
