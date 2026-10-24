@@ -124,15 +124,6 @@ def calibrate_scales(
         groups.append({"params": [t], "lr": cfg.stage_global.lr * lr_scale, "lr_scale": lr_scale})
     opt = torch.optim.Adam(groups)
 
-    # Build the quantized-prefix input by running the batches through the
-    # frozen model once (input token ids feed embeddings upstream; for a
-    # bare block stack the batches may already be activations).
-    def host_forward(x: torch.Tensor) -> torch.Tensor:
-        return model(x)
-
-    def quantized_forward_with_scales(x: torch.Tensor) -> torch.Tensor:
-        return model(x)
-
     # Teacher logits, cached once ([NQ] Sec 3.3 memory note). Under a
     # container memory cap the cache is DISK-BACKED (np.memmap): a real
     # 152k-vocab model x 128 rows x 512 positions is tens of GB in RAM (the

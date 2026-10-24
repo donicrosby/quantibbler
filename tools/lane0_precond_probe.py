@@ -172,16 +172,6 @@ def fold_intended(
     return w_tilde, d_out, d_in
 
 
-def fold_shipped(
-    w: np.ndarray, d_out: np.ndarray, d_in: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """The shipped fold, verbatim from ``block_recon.py:1350``: no sqrt."""
-    w_tilde = (np.asarray(d_out)[:, None] * np.asarray(w, dtype=np.float64)) * np.asarray(d_in)[
-        None, :
-    ]
-    return w_tilde, np.asarray(d_out), np.asarray(d_in)
-
-
 def uniform_cotangent_statistic(linear: Any, x: Any) -> np.ndarray:
     """The shipped gradient-side statistic: mean square under a ones-cotangent."""
     import torch

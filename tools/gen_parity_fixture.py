@@ -122,7 +122,6 @@ def main() -> None:
         eos_token_id=0,
         bos_token_id=1,
         tokenizer=_TokStub(),
-        config_f64={},
         geometry=qhf._export_geometry(causal),
         inventory=inventory,
         norm_weights=qhf._export_norm_weights(causal, inventory),
