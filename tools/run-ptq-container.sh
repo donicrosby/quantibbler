@@ -483,4 +483,45 @@ if [ "$MODE" != "ptq" ] && [ "${MEM_FLOOR_GB:-0}" -gt 0 ] 2>/dev/null; then
   echo "mem-floor-net: pid=$! floor=${MEM_FLOOR_GB}G container=$CONTAINER_NAME" >&2
 fi
 
-exec "$@"
+# --- container stdout/stderr witness (container_log_witness, spec law) ---------
+# Four launches have died with their account destroyed: `--rm` removes the
+# container, nothing captured what it printed, and the artifact held a telemetry
+# csv and a launch.env and no reason. The telemetry names the *phase*; only
+# stdout names the line, and for a fault that lives in the real-model/device
+# surface the fixture matrix cannot supply it -- two of the last two real-path
+# deaths were green on CPU. Tee on the host side, deliberately: no in-container
+# change and no image rebuild, so the log survives `--rm` and teardown stays
+# clean.
+#
+# POSIX sh has no PIPESTATUS. `$?` after a pipeline is *tee's* status, not the
+# container's, so the status is captured inside the pipeline into a file and read
+# back. Without that the wrapper reports success for every failure -- a witness
+# that cannot testify.
+CONTAINER_LOG="$OUT/container.log"
+RC_FILE="$OUT/.container.rc"
+rm -f "$RC_FILE"
+# `set -eu` is on, so a bare `"$@"; echo "$?"` never writes the status: the
+# failing container kills the subshell before the echo runs, and the wrapper
+# then reports `unknown` for a run that failed for a perfectly legible reason.
+# Measured, not reasoned -- the missing-image check printed `exit=unknown` and
+# the -x trace stopped dead at the docker failure. A command in a `||` list is
+# exempt from errexit, which is what makes this the correct POSIX form.
+{ rc=0; "$@" || rc=$?; echo "$rc" > "$RC_FILE"; } 2>&1 | tee "$CONTAINER_LOG"
+CONTAINER_RC="$(cat "$RC_FILE" 2>/dev/null || true)"
+rm -f "$RC_FILE"
+case "$CONTAINER_RC" in
+  ''|*[!0-9]*) CONTAINER_RC=unknown ;;
+esac
+{ echo "--- container exit ---"; echo "container_exit_code=$CONTAINER_RC"; echo "container_log=$CONTAINER_LOG"; } >> "$OUT/launch.env" 2>/dev/null || true
+# Fail closed: a lane0 run whose witness is absent cannot be read after the
+# fact, and "it died with no reason" is the exact failure this lane keeps
+# paying for. Recorded loudly rather than discovered later.
+if [ "$MODE" != "ptq" ] && [ ! -s "$CONTAINER_LOG" ]; then
+  echo "error: container_log_witness missing or empty at $CONTAINER_LOG; the run's account was not captured" >&2
+  exit 2
+fi
+echo "container: exit=$CONTAINER_RC log=$CONTAINER_LOG" >&2
+if [ "$CONTAINER_RC" = "unknown" ]; then
+  exit 1
+fi
+exit "$CONTAINER_RC"
