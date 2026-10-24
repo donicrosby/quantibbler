@@ -210,3 +210,41 @@ def test_stale_constants_warn_on_the_first_line_only(tmp_path) -> None:
     assert first is not None and first.get("constants_stale") is True
     assert first["constants_stale_keys"] == ["torch"]
     assert "constants_stale" not in (second or {}), "warning is once, not noise"
+
+
+def test_complete_reports_iterations_actually_run_not_the_budget() -> None:
+    """A solve that converged early finished at its real count.
+
+    Reporting `total` here would be the same class of lie the ETA sanity check
+    exists to prevent, and it would be invisible: 400/400 on a solve that
+    converged at 4 reads as a completed budget.
+    """
+    stream = io.StringIO()
+    reporter = ProgressReporter("admm", 400, clock=FakeClock(), stream=stream)
+    reporter.tick(4, force=True)
+    reporter.complete(4)
+
+    lines = [line for line in stream.getvalue().splitlines() if line]
+    assert "iter=4/400" in lines[-1], lines[-1]
+    assert "iter=400/400" not in lines[-1]
+    assert lines[-1].endswith("complete")
+
+
+def test_lb_admm_emits_progress_lines(capsys) -> None:
+    """The solve loop is wired: a real lb_admm call writes progress to stdout."""
+    import numpy as np
+
+    from quantibbler.ptq.config import PTQConfig
+    from quantibbler.ptq.lb_admm import lb_admm
+
+    cfg = PTQConfig(rank=4, admm_max_iter=25, solver_backend="numpy")
+    w = np.random.default_rng(0).standard_normal((16, 12))
+    lb_admm(w, cfg)
+
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if line.startswith("progress admm")]
+    assert lines, "lb_admm must emit progress"
+    assert lines[0].startswith("progress admm iter=1/25")
+    assert lines[-1].endswith("complete")
+    # 25 iterations under a 10-step cadence: a handful of lines, not 25.
+    assert len(lines) < 25, lines

@@ -142,7 +142,7 @@ class ProgressReporter:
         self._emitted += 1
         return record
 
-    def complete(self) -> dict[str, Any] | None:
+    def complete(self, current: int | None = None) -> dict[str, Any] | None:
         """Emit a final line marking the loop finished.
 
         Without this, a loop that completed looks exactly like one killed at its
@@ -150,8 +150,12 @@ class ProgressReporter:
         being able to tell those apart from the artifact alone, and only a
         completion marker makes that possible.
         """
-        if self.total is not None:
-            self._current = self.total
+        # The caller passes the count actually reached. Do NOT substitute
+        # `total`: a solve that converged at iteration 4 finished at 4, and
+        # writing 400 would be the same class of lie the ETA check exists to
+        # prevent.
+        if current is not None:
+            self._current = current
         record = self._record(self._clock())
         record["complete"] = True
         for sink in self._sinks:

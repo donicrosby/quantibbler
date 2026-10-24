@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .config import PTQConfig
+from .progress import ProgressReporter
 from .solver_backend import get_backend
 
 __all__ = [
@@ -392,11 +393,18 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
         dv = float(xp.linalg.norm(v_cur - zv_cur, "fro"))
         return max(du, dv) / (1.0 + float(xp.linalg.norm(u_cur, "fro")))
 
+    # Progress is wired here because this loop is the spec's own worst case: 400
+    # iterations at ~0.2s each, where per-iteration output would be 400 lines
+    # around the handful that matter. The first tick emits immediately, so a
+    # reader sees the solve start rather than inferring it from silence.
+    reporter = ProgressReporter("admm", cfg.admm_max_iter)
+
     converged = False
     prev_res = xp.inf
     denom = max(cfg.admm_max_iter - 1, 1)
     rho_end = _rho_end(cfg)
     for k in range(cfg.admm_max_iter):
+        reporter.tick(k + 1)
         # Linear penalty schedule spanning [rho_start, rho_end] across the
         # K iterations (A-2).
         rho = float(cfg.rho_start + (rho_end - cfg.rho_start) * k / denom)
@@ -436,6 +444,10 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
         prev_res = res
     else:
         prev_res = trace.residuals[-1] if trace.residuals else prev_res
+
+    # The count reached, not the budget: an early-converged solve must not report
+    # iterations it never ran.
+    reporter.complete(len(trace.residuals))
 
     # The entry normalization divides the TARGET by target_scale exactly
     # once, but a rank factorization W ~ U V^T has TWO factors: scaling both
