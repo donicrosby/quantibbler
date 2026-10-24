@@ -30,14 +30,19 @@ SHALL produce a line roughly every 5 seconds.
 - **THEN** the progress output contains roughly 80 lines, not 400
 - **AND** every line carries the current iteration, total, rate, and ETA
 
-### Requirement: progress_dual_sink
+### Requirement: progress_sink_routing
 
-One `ProgressReporter` interface SHALL feed two sinks without duplication of the
-calling site. In lane0 mode the sink is the telemetry CSV column
-`progress_json`. In ptq mode the sink is the breadcrumbs file in the format
-`qkb:progress <phase> iter=<N>/<total> rate=<r> eta=<s>`. No long-running loop
-SHALL check a mode flag to decide which sink to write to — the reporter
-dispatches internally.
+One `ProgressReporter` interface SHALL feed three sinks without duplication of
+the calling site. No long-running loop SHALL check a mode flag to decide which
+sink to write to — the reporter dispatches internally.
+
+#### Scenario: stdout_sink_active_in_all_modes
+
+- **WHEN** any fire runs
+- **THEN** the `ProgressReporter` writes to stdout — live-readable,
+  line-oriented, into `container.log` — the witness channel the user actually
+  watches while the run is alive
+- **AND** stdout is active in ALL modes, never conditional on lane0 vs ptq
 
 #### Scenario: lane0_writes_csv_column
 
@@ -63,6 +68,16 @@ and cumulative counts SHALL reflect the last known state of the main loop.
 Silence for longer than one sample interval SHALL be a reliable stall signal —
 the thread writes on its own timer, so two seconds without a progress line means
 the telemetry thread itself is dead.
+
+#### Scenario: heartbeat_consumer_is_the_watchdog
+
+- **WHEN** the lane0 harness runs
+- **THEN** the heartbeat SHALL write to the ptq breadcrumbs file in addition to
+  the telemetry CSV, so the existing watchdog's stall detector — which already
+  parses `qkb:progress` lines — reads liveness without modification
+- **AND** without this consumer, the signal is available and unread, and a lane0
+  hang at minute 20 stays invisible: the `max|s|=0.0` class — an instrument that
+  reports clean because nothing reads it
 
 #### Scenario: progress_heartbeat_during_slower_phases
 
