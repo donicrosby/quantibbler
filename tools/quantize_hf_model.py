@@ -692,6 +692,34 @@ def _export_norm_weights(causal, inventory) -> np.ndarray:
     return torch.cat(parts).cpu().numpy()
 
 
+def _resolve_device(requested: str) -> str:
+    """Where the torch stages run -- or a refusal, before anything is loaded.
+
+    'auto' means the accelerator or refuse. It deliberately does not fall back:
+    `:latest` carries CUDA-wheel torch, so on this AMD host
+    `torch.cuda.is_available()` is False and 'auto' resolved to cpu without a
+    word -- a production fire spent 21 hours on one socket while its own launch
+    record printed `device=cpu`. An explicit 'cpu' is still honest and still
+    available; arriving there by accident is not. Same rule as the solver
+    backend: the non-accelerator path is reachable by explicit name only.
+
+    This lives outside `main()` on purpose. `main()` has exactly one exit, the
+    verdict path, and that invariant is pinned; a pre-flight refusal is a
+    different thing and is named as one rather than folded into the pin's
+    exception list.
+    """
+    if requested == "auto" and not torch.cuda.is_available():
+        raise SystemExit(
+            "error: --device auto found no accelerator "
+            "(torch.cuda.is_available()=False). This host is AMD/ROCm: the container "
+            "needs GPU=1 and a rocm-tagged image "
+            "(IMAGE=quantibbler-ptq:rocm-official), or pass --device cpu to ask for "
+            "a CPU run explicitly. Refusing to run the autograd stages on CPU by "
+            "default."
+        )
+    return "cuda" if requested == "auto" else requested
+
+
 def main() -> int:
     # ---- crash-safe breadcrumbs ------------------------------------
     # SIGKILL can't flush our stdout, so a watchdog thread samples the
@@ -889,6 +917,7 @@ def main() -> int:
     parser.add_argument("--out", type=Path, default=Path("artifacts") / "model-qpk1")
     args = parser.parse_args()
 
+    _device = _resolve_device(args.device)
     torch.manual_seed(args.seed)
     out_dir: Path = args.out
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -900,24 +929,6 @@ def main() -> int:
     # Resolve ONCE, from the same predicate torch uses: a second source of truth
     # for "which device" can disagree with where the parameters actually are, and
     # the mismatch then surfaces frames away from its cause.
-    # 'auto' means "the accelerator, or refuse". It deliberately does not fall
-    # back: `:latest` carries CUDA-wheel torch, so on this AMD host
-    # torch.cuda.is_available() is False and 'auto' used to resolve to cpu
-    # without a word -- which is how a production fire spent 21 hours on one
-    # socket while its launch record said `device=cpu`. An explicit
-    # `--device cpu` is still honest and still available; what is not available
-    # is arriving there by accident. Same rule as the solver backend: the
-    # non-accelerator path is reachable by explicit name only.
-    if args.device == "auto" and not torch.cuda.is_available():
-        raise SystemExit(
-            "error: --device auto found no accelerator "
-            "(torch.cuda.is_available()=False). This host is AMD/ROCm: the container "
-            "needs GPU=1 and a rocm-tagged image "
-            "(IMAGE=quantibbler-ptq:rocm-official), or pass --device cpu to ask for "
-            "a CPU run explicitly. Refusing to run the autograd stages on CPU by "
-            "default."
-        )
-    _device = "cuda" if args.device == "auto" else args.device
     causal.to(_device)
     from quantibbler.ptq.device_audit import install_device_auditor
 

@@ -289,3 +289,36 @@ def test_driver_run_records_the_probe_trajectory_and_agrees_with_its_exit_code(
         assert math.isfinite(entry["prefix_ppl"]) and entry["prefix_ppl"] > 0
         assert entry["ratio"] == pytest.approx(entry["prefix_ppl"] / entry["fp_prefix_ppl"])
         assert verdict(entry["ratio"]) != FAILED
+
+
+def test_device_auto_refuses_without_an_accelerator(monkeypatch):
+    """`auto` is the accelerator or refuse -- never a silent CPU fallback.
+
+    This replaces a source-text pin in `tests/test_qk_report.py` that asserted
+    the driver's *source* contained no `SystemExit` outside the verdict path. It
+    rotted the moment the device gate landed, because it was a statement about
+    text rather than about behaviour -- and the behaviour it should have been
+    checking is the one that cost 21 hours on one socket while the run's own
+    launch record printed `device=cpu`.
+
+    The gate is a pre-flight refusal, deliberately outside `main()`: `main()` has
+    exactly one exit, the verdict path, and that invariant stays pinned.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("qk_driver_under_test", DRIVER)
+    driver = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(driver)
+
+    monkeypatch.setattr(driver.torch.cuda, "is_available", lambda: False)
+    with pytest.raises(SystemExit) as excinfo:
+        driver._resolve_device("auto")
+    message = str(excinfo.value)
+    assert "GPU=1" in message, message
+    assert "rocm-official" in message, message
+    # The non-accelerator path is reachable -- by explicit name only.
+    assert driver._resolve_device("cpu") == "cpu"
+
+    monkeypatch.setattr(driver.torch.cuda, "is_available", lambda: True)
+    assert driver._resolve_device("auto") == "cuda"
+    assert driver._resolve_device("cpu") == "cpu"
