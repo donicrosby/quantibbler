@@ -80,3 +80,22 @@ An unannotated slow test is a defect like any other failure.
 
 - **WHEN** a test exceeds 5 seconds without a docstring justification
 - **THEN** the test is reported as a defect alongside failures
+
+### Requirement: derivation_comments_on_harness_math
+
+Any function in `tools/` that computes a quantity defined in `src/` or the paper SHALL carry a derivation comment naming that source, or a disposition naming why sharing is wrong. Inline blocks computing such quantities count as functions for this rule — a nameless copy is the drift class the inventory caught.
+
+#### Scenario: unnamed_derivation_is_a_defect
+
+- **WHEN** a `tools/` function or inline block computes a `src/` or paper quantity with no derivation comment and no valid disposition
+- **THEN** it is a review defect, fixed by naming the source — or by extracting the inline block into a named function so a name can carry the derivation
+- **AND** the disposition `(candidate under measurement; folding it into production would make the experiment vacuous)` is valid and earns a stay
+
+### Requirement: transforms_carry_identity_property_tests
+
+Any transform claiming to modify its input SHALL be born with a property test asserting output ≠ input on the adversarial class it claims to handle. The vacuous clip — clipping every entry at the vector's own maximum, which is no clip — survived review because nothing asserted the operation does anything.
+
+#### Scenario: noop_transform_is_red
+
+- **WHEN** a claimed transform's output equals its input on the class it exists to act on (entries above `tau_max`, for a clip)
+- **THEN** the property test goes red in seconds against a single planted vector, and the transform is a no-op defect regardless of what its docstring cites
