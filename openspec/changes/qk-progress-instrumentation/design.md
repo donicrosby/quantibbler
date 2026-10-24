@@ -4,21 +4,24 @@
 
 | sink | consumer | format | when |
 |---|---|---|---|
-| Lane 0 telemetry CSV | user, planner (artifact read) | one column `progress_json` per row, 2-second cadence matches existing `MemTelemetry` | always, in lane0 mode |
-| PTQ breadcrumbs | watchdog (`qkb-stall`), user | `qkb:progress <phase> iter=<N>/<total> rate=<r> eta=<s>` | ptq mode only |
+| stdout | user (live monitoring), witness (`container.log`) | one newline-terminated JSON line per update | always — every pipeline stage, every mode |
+| telemetry CSV | user, planner (artifact read) | one column `progress_json` per row, 2-second cadence matches existing `MemTelemetry` | when the telemetry subsystem is active (`MemTelemetry` thread running) |
+| breadcrumbs | watchdog (`qkb-stall`), user | `qkb:progress <phase> iter=<N>/<total> rate=<r> eta=<s>` | when the breadcrumbs subsystem is active (watchdog armed) |
 
-Both sinks are fed from a single `ProgressReporter` object owned by the
-`MemTelemetry` thread (lane0) or the main-loop iteration body (ptq), so the
-interface is one call site per long-running loop.
+All three sinks are fed from a single `ProgressReporter` object. The calling
+site never checks which sinks are live — the reporter handles routing
+internally, and each long-running loop (capture, statistics, solver, block
+recon, TuneFP, STE) gets one identical call.
 
-## Heartbeat (lane0 only)
+## Heartbeat
 
 The `MemTelemetry` thread already samples every 2 seconds and knows the current
 phase. Progress output piggybacks on that cadence: every sample writes a progress
 line with the phase and cumulative counts. Critically, a **progress line IS a
 heartbeat** — two seconds of silence is a real stall, not a quiet run, because
 the telemetry thread writes on its own timer regardless of what the main loop is
-doing.
+doing. The heartbeat writes to breadcrumbs so the existing watchdog reads
+liveness without modification.
 
 ## Sanity-check constants
 

@@ -2,19 +2,21 @@
 
 ## Why
 
-Two decisive-fire deaths on the target-load path were completely invisible until the
-container exited — the fire's only signal between weight-load and completion was
-silence. The user asked for "iteration rate and time to complete the current loop,
-similar to the PyTorch weight-load bar," and that feature is also the watchdog's
-missing liveness channel: today a lane0 hang at minute 20 looks identical to a
-running fire until the 60-minute wall net stops it.
+Two fires died on paths that were completely invisible until the container
+exited — the only signal between startup and completion was silence. The user
+asked for "iteration rate and time to complete the current loop, similar to the
+PyTorch weight-load bar." That feature is also the watchdog's missing liveness
+channel: today a hang at minute 20 looks identical to a running fire until the
+wall net stops it.
 
 ## What
 
-Add cadence-bounded, line-oriented progress output to every long-running harness
-loop (capture, statistics, solver). One progress interface writes to two sinks:
-the lane0 telemetry CSV and the ptq breadcrumbs file, so a single implementation
-feeds both the user's ETA bar and the watchdog's heartbeat.
+A pipeline-generic `ProgressReporter` utility (`src/quantibbler/ptq/progress.py`)
+that adds cadence-bounded, line-oriented progress output to every long-running
+harness loop — capture, statistics, solver, block recon, TuneFP, STE — across
+every pipeline stage and mode. One interface feeds three sinks (stdout for live
+monitoring, telemetry CSV for artifact reads, breadcrumbs for the watchdog), and
+the calling site never checks which are active.
 
 ## Progress interface
 

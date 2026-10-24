@@ -32,9 +32,12 @@ SHALL produce a line roughly every 5 seconds.
 
 ### Requirement: progress_sink_routing
 
-One `ProgressReporter` interface SHALL feed three sinks without duplication of
-the calling site. No long-running loop SHALL check a mode flag to decide which
-sink to write to — the reporter dispatches internally.
+One `ProgressReporter` interface SHALL feed three sinks — stdout, telemetry
+CSV, and breadcrumbs — without duplication of the calling site. No long-running
+loop SHALL check a mode flag to decide which sink to write to; the reporter
+dispatches internally. Stdout is always active; telemetry CSV and breadcrumbs
+activate when their respective subsystems are present, and the calling site is
+blinded to which are live — the reporter handles routing internally.
 
 #### Scenario: stdout_sink_active_in_all_modes
 
@@ -42,25 +45,28 @@ sink to write to — the reporter dispatches internally.
 - **THEN** the `ProgressReporter` writes to stdout — live-readable,
   line-oriented, into `container.log` — the witness channel the user actually
   watches while the run is alive
-- **AND** stdout is active in ALL modes, never conditional on lane0 vs ptq
+- **AND** stdout is active in ALL modes, never conditional on which pipeline
+  stage or subsystem is running
 
-#### Scenario: lane0_writes_csv_column
+#### Scenario: telemetry_sink_writes_csv_column
 
-- **WHEN** the harness runs in lane0 mode
+- **WHEN** the telemetry subsystem is active (any pipeline stage that runs
+  `MemTelemetry`)
 - **THEN** every progress update appears in the telemetry CSV as a
   `progress_json` column with one JSON object per line
 - **AND** the `progress_json` column is always present in the CSV header when
   the progress reporter is active
 
-#### Scenario: ptq_writes_breadcrumbs
+#### Scenario: breadcrumb_sink_when_watchdog_active
 
-- **WHEN** the harness runs in ptq mode
+- **WHEN** the breadcrumbs subsystem is active (any pipeline stage with the
+  watchdog armed)
 - **THEN** every progress update appears in the breadcrumbs file as
   `qkb:progress <phase> iter=<N>/<total> rate=<r> eta=<s>`
 - **AND** the watchdog's existing stall detector parses the breadcrumb lines
   without modification
 
-### Requirement: progress_heartbeat_lane0
+### Requirement: progress_heartbeat
 
 The `MemTelemetry` thread SHALL emit a progress line on every sample (every 2
 seconds by default) regardless of whether the main loop has advanced. The phase
@@ -71,12 +77,12 @@ the telemetry thread itself is dead.
 
 #### Scenario: heartbeat_consumer_is_the_watchdog
 
-- **WHEN** the lane0 harness runs
-- **THEN** the heartbeat SHALL write to the ptq breadcrumbs file in addition to
+- **WHEN** the `MemTelemetry` thread is active
+- **THEN** the heartbeat SHALL write to the breadcrumbs file in addition to
   the telemetry CSV, so the existing watchdog's stall detector — which already
   parses `qkb:progress` lines — reads liveness without modification
-- **AND** without this consumer, the signal is available and unread, and a lane0
-  hang at minute 20 stays invisible: the `max|s|=0.0` class — an instrument that
+- **AND** without this consumer, the signal is available and unread, and a hang
+  at minute 20 stays invisible: the `max|s|=0.0` class — an instrument that
   reports clean because nothing reads it
 
 #### Scenario: progress_heartbeat_during_slower_phases
@@ -101,7 +107,8 @@ hardware at the protocol geometry, and SHALL record the verdict as a boolean
 - **WHEN** the progress bar computes an ETA of 21 hours for a 20-solve fire
   (measured pace ~89s/linear, expected ~30 minutes)
 - **THEN** the rendered progress line reads `eta=unsafe eta_sane=false`
-- **AND** `MAX_SANE_ETA` defaults to 4 hours for a 20-solve lane0 fire
+- **AND** `MAX_SANE_ETA` defaults to 4 hours for a full pipeline fire at the
+  protocol geometry
 - **AND** the harness does not halt or raise — the run continues with the
   unreasonable ETA suppressed rather than misinforming the user
 
