@@ -2086,3 +2086,80 @@ def test_non_completion_report_shapes_carry_the_evaluation_record():
         # ... and the record is not a fidelity condition on those paths either.
         assert "evaluation" not in report["fidelity_conditions"]
         assert report["paper_faithful"] is False
+
+
+def test_scn_label_requires_fp_stream_teacher_provenance():
+    """Scenario ``label_requires_fp_stream_teacher_provenance`` (Phase-2 gated).
+
+    A ``paper_faithful`` label owes evidence that the teacher target came from the
+    FP-stream capture. Today no condition in the verdict can see a capture's stream
+    provenance, so a run whose teacher read the COMPRESSED stream is labelled
+    faithful -- the fidelity hole Lane 2 closes.
+
+    Isolated by positive control, not by hand: the baseline record satisfies all
+    fifteen conditions, so each sub-case below varies ONLY the capture provenance
+    field and any negative label is load-bearing by construction. Without the
+    baseline, a negative assert can pass because some unrelated condition is false,
+    which is exactly how the first draft of this test went soft.
+    """
+    import quantibbler.qk_report as R
+
+    keys = [k for k, *_ in R._STAGE_LINES]
+    # tune_scales_kd counts as executed only when its payload carries an artifact
+    # (qk_report.py:474), so a uniform payload cannot satisfy all fifteen and the
+    # baseline is per-stage rather than generic.
+    base = [
+        (k, {"artifact": "scales.json"} if k == "tune_scales_kd" else {"executed": True})
+        for k in keys
+    ]
+
+    def _with_capture(**prov):
+        return [*base, ("capture", {"capture_index": 1, **prov})]
+
+    # --- positive control: every condition satisfied, fp-stream provenance -----
+    baseline = _with_capture(teacher_source="fp", x_b_stream="fp", y_b_stream="fp")
+    label0, conds0 = R.fidelity_verdict("admm", [], baseline, requested=True)
+    assert label0 is True, (
+        "the positive control does not satisfy the verdict: "
+        f"{sorted(k for k, v in conds0.items() if not v)}. Every sub-case below would "
+        "be riding on this condition, so stop until the baseline is clean."
+    )
+
+    # --- (a) capture carries no stream provenance at all ----------------------
+    label_a, conds_a = R.fidelity_verdict("admm", [], _with_capture(), requested=True)
+    assert label_a is False, (
+        "a capture with no stream provenance was labelled paper_faithful; the label "
+        "must require evidence that the teacher came from the fp stream"
+    )
+    assert any("stream" in n for n in conds_a), (
+        f"no stream-aware condition exists in the verdict: {sorted(conds_a)}"
+    )
+
+    # --- (b) the capture explicitly came from the compressed stream -----------
+    comp = _with_capture(teacher_source="compressed", x_b_stream="compressed")
+    label_b, conds_b = R.fidelity_verdict("admm", [], comp, requested=True)
+    assert label_b is False, "a compressed-stream teacher capture was labelled faithful"
+    assert any("stream" in n for n in conds_b), (
+        f"no stream-aware condition exists in the verdict: {sorted(conds_b)}"
+    )
+
+    # --- (c) fp-stream provenance is the baseline: covered by the positive control,
+    # so no second assertion is needed -- label0 is True above with only these
+    # fields differing from (a) and (b).
+
+    # --- (d) the documented dual-stream deviation must not flip the label -----
+    label_d, conds_d = R.fidelity_verdict(
+        "admm",
+        [],
+        _with_capture(
+            teacher_source="fp",
+            x_b_stream="fp",
+            y_b_stream="fp",
+            deviation="dual_stream_teacher_target",
+        ),
+        requested=True,
+    )
+    assert label_d is True, (
+        "the documented dual-stream deviation flipped the label; a declared deviation "
+        f"is not a fidelity failure: {sorted(k for k, v in conds_d.items() if not v)}"
+    )

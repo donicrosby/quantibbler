@@ -415,3 +415,74 @@ def copy_weights(module: nn.Module) -> nn.Module:
     for param in clone.parameters():
         param.requires_grad_(False)
     return clone
+
+
+# --------------------------------------------------------------------------
+# Scenario guards (task 5): named pins over the behaviour above
+# --------------------------------------------------------------------------
+
+
+def test_guard_zero_grad_zero_residual_means_broken_plumbing() -> None:
+    """Scenario ``guard_zero_grad_zero_residual_means_broken_plumbing``.
+
+    A zero first-step gradient WITH a zero initial residual is not "nothing to
+    optimise". When the teacher target is the block's own current output, a
+    gradient of exactly zero w.r.t. the block's own parameters means the tuning
+    graph is not reaching the weights it claims to tune -- broken plumbing, not a
+    converged state. The guard must report BOTH norms so the two zeros are
+    distinguishable from the detached-student case (grad 0, residual > 0), and it
+    must not continue silently.
+    """
+    d = 8
+    x_b = torch.cat(_calib(d), dim=0)
+    cfg = PTQConfig(solver_backend="numpy", rank=4, stage_pre=StageHyper(1e-4, 4, 2))
+    block = _TwoLinearBlock(d, seed=0)
+    with torch.no_grad():
+        y_b = block(x_b)
+    sink: list = []
+    stats = _tune_fp(
+        block,
+        x_b,
+        y_b,
+        cfg,
+        cfg.stage_pre.batch_size,
+        label="b0",
+        factorized_in_block=0,
+        recorder=_recorder(sink),
+    )
+    events = [info for event, info in sink if event == "tune_fp_vacuous_teacher"]
+    assert len(events) == 1, "the plumbing guard must emit exactly one event"
+    ev = events[0]
+    assert ev["gradient_norm"] == 0.0, "the guard must carry the gradient norm it observed"
+    assert ev["initial_residual_norm"] == 0.0, (
+        "the guard must carry the residual norm it observed, so a zero-zero pair is "
+        "distinguishable from the detached-student pair (grad 0, residual > 0)"
+    )
+    assert stats["vacuous"] is True and stats["steps"] == 0
+
+
+def test_guard_rationale_rewritten() -> None:
+    """Scenario ``guard_rationale_rewritten`` -- RED until Phase 2 ships the text.
+
+    The shipped rationale treats first-target vacuity as inherent to the single
+    stream. Under Lane 2's dual-stream fix the target-1 gradient is no longer ~0,
+    because Y_b comes from a different input than the block's forward, so the
+    skip's justification becomes "nothing to compensate yet" rather than "vacuous
+    by construction". This pins the rewritten text so the old rationale cannot
+    survive against new code, and it stays RED until Phase 2 lands that wording.
+    """
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    blk = (repo / "src/quantibbler/ptq/block_recon.py").read_text()
+    cfg_txt = (repo / "src/quantibbler/ptq/config.py").read_text()
+    combined = blk + cfg_txt
+
+    assert "nothing to compensate yet" in combined, (
+        "the dual-stream rationale is not present: the skip's justification must be "
+        "rewritten from 'vacuous by construction' to 'nothing to compensate yet', "
+        "since under dual streams the target-1 gradient is no longer ~0"
+    )
+    lowered = combined.lower()
+    assert "inherently vacuous" not in lowered and "vacuous by construction" not in lowered, (
+        "an 'inherent/inherently' vacuity claim survives; under dual streams target-1 "
+        "vacuity is a single-stream artifact, not an inherent property"
+    )

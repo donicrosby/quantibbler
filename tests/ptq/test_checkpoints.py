@@ -8,6 +8,10 @@ missing fingerprint (v6's lesson: stale state must crash, never blend).
 """
 
 import dataclasses
+import inspect
+import json
+import pathlib
+import re
 
 import pytest
 import torch
@@ -148,3 +152,54 @@ def _seed_one_block_checkpoint(ckpt_dir, cfg, batches):
     finally:
         br.reconstruct_block = real
     assert completed_blocks(ckpt_dir) == [1]  # lin1 = child index 1 (embed=0)
+
+
+def test_scn_prefix_probe_and_checkpoint_fingerprints_unchanged_in_shape(tmp_path):
+    """Scenario ``prefix_probe_and_checkpoint_fingerprints_unchanged_in_shape``.
+
+    Pins the two shapes Lane 2 must NOT move. Both are contracts other code reads:
+    the driver's probe is called positionally by its wiring, and the checkpoint
+    fingerprint payload is read back on resume. A lane that changes either breaks
+    probe wiring or resume without touching the behaviour it meant to change, and
+    the failure would appear somewhere other than the edit. Expected GREEN today --
+    this test's job is to keep it that way.
+    """
+
+    repo = pathlib.Path(__file__).resolve().parents[2]
+
+    # (1) The driver's probe signature and its positional call shape. _probe is a
+    # closure inside main(), so it is pinned from source rather than imported.
+    driver = (repo / "tools/quantize_hf_model.py").read_text()
+    sig = re.search(r"def _probe\(([^)]*)\)", driver)
+    assert sig is not None, "the driver's _probe closure is gone; probe wiring changed"
+    params = [p.strip().split(":")[0].split("=")[0].strip() for p in sig.group(1).split(",")]
+    assert params == ["host_model", "depth", "name"], (
+        f"_probe signature is {params}, expected ['host_model', 'depth', 'name']: probe "
+        "call sites pass these positionally, so a reorder or rename silently misbinds"
+    )
+
+    # (2) The fingerprint payload's key set: the digest plus the provenance fields a
+    # bare hash cannot answer questions about (backend/dtype on resume).
+    from quantibbler.ptq.checkpoints import (
+        _FINGERPRINT_PROVENANCE,
+        config_fingerprint,
+        write_fingerprint,
+    )
+
+    assert _FINGERPRINT_PROVENANCE == (
+        "solver_backend",
+        "compute_dtype",
+        "solver",
+        "rank",
+        "factor_mode",
+    ), f"provenance field set moved: {_FINGERPRINT_PROVENANCE}"
+    cfg = _cfg()
+    write_fingerprint(tmp_path, cfg)
+
+    record = json.loads((tmp_path / "fingerprint.json").read_text(encoding="utf-8"))
+    expected = {"fingerprint", *_FINGERPRINT_PROVENANCE}
+    assert set(record) == expected, (
+        f"fingerprint payload keys are {sorted(record)}, expected {sorted(expected)}"
+    )
+    assert record["fingerprint"] == config_fingerprint(cfg)
+    assert inspect.isfunction(config_fingerprint)
