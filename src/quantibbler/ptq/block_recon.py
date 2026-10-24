@@ -1360,6 +1360,16 @@ def reconstruct_block(
 
         w = linear.weight.detach().to(torch.float64).cpu().numpy()
         d_in_t, d_out_t = robust_diag(entry.d_in_raw, entry.d_out_raw, tau=cfg.tau, gamma=cfg.gamma)
+        # [NQ] B.1 Eq. 26 folds the preconditioner as a square root on each side:
+        #   W~ = sqrt(D~_out) W sqrt(D~_in)
+        # Folding the raw diagonals charges the scales' magnitude twice across the
+        # factor pair. Lane 0 measured the sqrt fold (Arm B) beating the raw fold on
+        # every probed layer (mean delta +0.0825), which is why this ships and the
+        # shipped raw fold is retired. Both the factorization and the balance below
+        # consume these values, so the fold and its un-fold stay consistent by
+        # construction rather than by two matching edits.
+        d_in_t = np.sqrt(d_in_t)
+        d_out_t = np.sqrt(d_out_t)
         w_tilde = (d_out_t[:, None] * w) * d_in_t[None, :]
         w_tilde = w_tilde.astype(dt)
         if cfg.solver == "svd":

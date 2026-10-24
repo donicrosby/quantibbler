@@ -12,11 +12,11 @@ Gates on Lane 0 (`qk-nanoquant-alignment-lane0`, the decisive preconditioner exp
 
 ## 3. Red-first: per-token clip fixture
 
-- [ ] Add `tests/ptq/test_calibration.py::test_scn_per_token_clip_before_squaring` (scenarios `per_token_clip_before_squaring`, `clip_quantile_is_robust_max`): a batch with one extreme token (norm many × the 99.9th percentile); assert the statistic equals the analytic mean of squares of the CLIPPED vectors and the extreme token contributes exactly cap². Record RED (no clip exists today).
+- [ ] Add `tests/ptq/test_calibration.py::test_scn_per_token_clip_before_squaring` (scenarios `per_token_clip_before_squaring`, `clip_quantile_is_robust_max`): a batch with one extreme token (norm many × the 99.9th percentile); assert the extreme token contributes exactly cap² to the squared-sum, and the clip threshold is the 99.9th order statistic (not interpolated). Also assert `d_in_raw == E[x²]` — see coupled task 4. Record RED (no clip exists today). **This task and task 4 SHALL land in one commit.**
 
-## 4. Implement the real-loss gradient path in `collect_stats`
+## 4. Implement the real-loss gradient path — coupled with task 3
 
-- [ ] `src/quantibbler/ptq/calibration.py`: CE backward through the model head for whole-model collection ([NQ] App. C :3011), documented caller-supplied head/cotangent for bare blocks, fail-closed when neither exists; `d_out = E[g²]` from output-activation gradients (hook-captured, f64, chunked backward accumulates raw grads and squares once per batch); `d_in = E[x²]` only — remove the gradient term from `_layer_statistic` and update `LayerStatsEntry` docs. Run task-1 test — GREEN.
+- [ ] `src/quantibbler/ptq/calibration.py`: CE backward through the model head for whole-model collection ([NQ] App. C :3011), documented caller-supplied head for bare blocks (`head=`: callable receiving layer output, returning scalar loss; gradient flows via `.backward()` — the harness derives the cotangent), fail-closed when neither exists; `d_out = E[g²]` from output-activation gradients (hook-captured, f64, chunked backward accumulates raw grads and squares once per batch); `d_in = E[x²]` only — remove the gradient term from `_layer_statistic` and update `LayerStatsEntry` docs. **One commit with task 3's fixture and this implementation.** Run task-1 and task-3 tests — GREEN.
 
 ## 5. Implement per-token norm clipping before squaring
 

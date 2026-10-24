@@ -23,6 +23,8 @@ regime where the A-8 logit bound is a pipeline check rather than a lottery.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 import torch
 from torch import nn
@@ -31,6 +33,33 @@ from .api import QuantizedModel, quantize_model
 from .config import PTQConfig, StageHyper
 
 __all__ = ["TinyGateModel", "build_gate_batches", "gate_config", "run_e2e_gate"]
+
+
+class TrunkOutput:
+    """Minimal HF-shaped trunk output: the one attribute collect_stats reads."""
+
+    __slots__ = ("last_hidden_state",)
+
+    def __init__(self, last_hidden_state: torch.Tensor) -> None:
+        self.last_hidden_state = last_hidden_state
+
+
+class HiddenTrunk(nn.Module):
+    """Adapter exposing a model's hidden-state path as a separately reachable trunk.
+
+    collect_stats routes whole-model CE from the trunk: head(trunk(input_ids).
+    last_hidden_state). A model whose forward already ends in a head cannot serve
+    that, because applying a head to headed output double-applies it. Exposing the
+    two halves separately is what the production wrapper does
+    (tools/quantize_hf_model.py:200-205), and what these fixtures mirror.
+    """
+
+    def __init__(self, hidden: Callable) -> None:
+        super().__init__()
+        self._hidden = hidden
+
+    def forward(self, input_ids: torch.Tensor | None = None, **_kw) -> TrunkOutput:  # noqa: ANN003
+        return TrunkOutput(self._hidden(input_ids))
 
 
 class TinyGateModel(nn.Module):
@@ -48,7 +77,7 @@ class TinyGateModel(nn.Module):
     def __init__(self, d: int = 32, wide: int = 128, rank: int = 4, seed: int = 0) -> None:
         super().__init__()
         self.d = d
-        self.embed = nn.Embedding(64, d, dtype=torch.float64)
+        self.embed = nn.Embedding(16, d, dtype=torch.float64)
         self.head = nn.Linear(d, 16, dtype=torch.float64)  # "logits" over 16
         blocks = []
         for b in range(2):
@@ -80,21 +109,25 @@ class TinyGateModel(nn.Module):
                 fc2.bias.zero_()
             blocks.append(nn.Sequential(fc1, nn.GELU(), fc2))
         self.block0, self.block1 = blocks
+        self.trunk = HiddenTrunk(self._hidden)
         with torch.no_grad():
             g = torch.Generator().manual_seed(seed)
-            self.embed.weight.copy_(torch.randn(64, d, generator=g, dtype=torch.float64) * 0.5)
+            self.embed.weight.copy_(torch.randn(16, d, generator=g, dtype=torch.float64) * 0.5)
             self.head.weight.copy_(torch.randn(16, d, generator=g, dtype=torch.float64) * 0.1)
             self.head.bias.zero_()
 
-    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+    def _hidden(self, tokens: torch.Tensor) -> torch.Tensor:
         x = self.embed(tokens)
         x = x + self.block0(x)
         x = x + self.block1(x)
-        return self.head(x)
+        return x
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        return self.head(self.trunk(input_ids=tokens).last_hidden_state)
 
 
 def build_gate_batches(
-    n_samples: int = 8, seq: int = 64, vocab: int = 64, seed: int = 0
+    n_samples: int = 8, seq: int = 64, vocab: int = 16, seed: int = 0
 ) -> list[torch.Tensor]:
     """Gate calibration batches (OQ-4 proposal: 8 samples x 64 tokens)."""
     gen = torch.Generator().manual_seed(seed)

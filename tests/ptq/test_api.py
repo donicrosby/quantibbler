@@ -19,7 +19,7 @@ class _TinyApiModel(nn.Module):
     def __init__(self, d: int = 8, seed: int = 0) -> None:
         super().__init__()
         gen = torch.Generator().manual_seed(seed)
-        self.embed = nn.Embedding(32, d, dtype=torch.float64)
+        self.embed = nn.Embedding(10, d, dtype=torch.float64)
         self.lin1 = nn.Linear(d, d, dtype=torch.float64)
         self.act = nn.GELU()
         self.lin2 = nn.Linear(d, d, dtype=torch.float64)
@@ -34,7 +34,7 @@ class _TinyApiModel(nn.Module):
             self.lin2.weight.copy_(a2 @ b2 * 0.08)
             for m in (self.lin1, self.lin2, self.head):
                 m.bias.zero_()
-            self.embed.weight.copy_(torch.randn(32, d, generator=gen, dtype=torch.float64) * 0.5)
+            self.embed.weight.copy_(torch.randn(10, d, generator=gen, dtype=torch.float64) * 0.5)
             self.head.weight.copy_(torch.randn(10, d, generator=gen, dtype=torch.float64) * 0.1)
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
@@ -43,7 +43,7 @@ class _TinyApiModel(nn.Module):
         return self.head(x)
 
 
-def _calib(seed: int = 5, vocab: int = 32) -> list[torch.Tensor]:
+def _calib(seed: int = 5, vocab: int = 10) -> list[torch.Tensor]:
     gen = torch.Generator().manual_seed(seed)
     return [torch.randint(0, vocab, (2, 8), generator=gen) for _ in range(2)]
 

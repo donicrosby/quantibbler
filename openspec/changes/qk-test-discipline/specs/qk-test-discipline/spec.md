@@ -99,3 +99,19 @@ Any transform claiming to modify its input SHALL be born with a property test as
 
 - **WHEN** a claimed transform's output equals its input on the class it exists to act on (entries above `tau_max`, for a clip)
 - **THEN** the property test goes red in seconds against a single planted vector, and the transform is a no-op defect regardless of what its docstring cites
+
+### Requirement: error_messages_name_the_invariant_the_code_tests
+
+Any error message emitted by a guard SHALL state the invariant the code tests, and every remedy SHALL be valid for every instance of that condition. The message text is part of the line's contract; a fixture SHALL assert the emitted message names the invariant.
+
+#### Scenario: correct_condition_with_wrong_remedy_is_red
+
+- **WHEN** a guard tests condition C (e.g. `loss.requires_grad`) and states a remedy valid only for a strict subset of C's instances (e.g. "unfreeze your weights" — irrelevant to a detached head with a correct value but a severed graph)
+- **THEN** the guard is a defect: the remedy sends the caller to fix something that isn't broken, and the condition itself — which IS correct — gets disbelieved because the message undermined it
+- **AND** the fix states the invariant explicitly in the message ("The invariant being guarded is the GRAPH, not the weights…") so the caller can diagnose from the text alone without reading source
+
+#### Scenario: invariant_naming_is_testable
+
+- **WHEN** a guard's fixture asserts the emitted error message names the invariant the code tests (e.g. "GRAPH" for `loss.requires_grad`)
+- **THEN** pinning text to contract is a mechanical assertion no different from pinning output to input — the guard's test proves it names the right thing the same way the property test proves the transform does the thing
+- **AND** the three instances from Lane 1 (robust_clip_shrink cited Eq. 3 while clipping at its own max; the guard tested the graph and blamed the weights; the guard tested the graph and offered a remedy irrelevant to detached heads) prove the failure class: text attached to a line is part of its contract, and disbelieving a correct guard because its error message was wrong is the same outcome as a wrong guard with a correct message — the caller gets wrong information either way

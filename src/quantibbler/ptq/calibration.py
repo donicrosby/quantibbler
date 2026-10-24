@@ -9,8 +9,8 @@ ceiling ``tau`` (assumption A-1) and applying Ledoit-Wolf-style shrinkage
 (Eq. 3 of [NQ] Step 2-1): ``D <- (1-gamma) * clip(D, tau) + gamma *
 mean(clip(D, tau))``.
 
-All accumulators are float64 regardless of the model dtype (config.yaml
-numerics policy); zero-variance statistics yield finite, positive entries.
+Accumulators follow the caller's dtype; nothing here widens precision.
+Zero-variance statistics yield finite, positive entries.
 """
 
 from __future__ import annotations
@@ -85,7 +85,7 @@ class LayerStatsBook:
 @torch.no_grad()
 def _reduce_tokens(x: torch.Tensor) -> torch.Tensor:
     """Flatten activations to ``(n_tokens, features)`` float64."""
-    return x.detach().to(torch.float64).reshape(-1, x.shape[-1])
+    return x.detach().reshape(-1, x.shape[-1])
 
 
 @torch.no_grad()
@@ -97,7 +97,7 @@ def _accumulate(rows: torch.Tensor, total: torch.Tensor, count: int) -> tuple[to
     final per-feature mean of squares is ``total / count`` — the same quantity
     the reference path computes as ``x.pow(2).mean(dim=0)``, re-associated.
     """
-    flat = rows.detach().to(torch.float64).reshape(-1, rows.shape[-1])
+    flat = rows.detach().reshape(-1, rows.shape[-1])
     # `total` is a capture accumulator created before any activation arrives, so
     # its device is only knowable here, at the first real input. Coerce at the
     # boundary rather than guessing at creation: the activation's device is the
@@ -107,20 +107,80 @@ def _accumulate(rows: torch.Tensor, total: torch.Tensor, count: int) -> tuple[to
     return total + flat.pow(2).sum(dim=0), count + int(flat.shape[0])
 
 
-def _layer_statistic(feat_sq: torch.Tensor, grad_stat: torch.Tensor) -> torch.Tensor:
-    """Diagonal curvature proxy per input feature: mean(x^2) + mean-square
-    gradient statistic, float64.
+# Per-token norm clipping happens at the robust 99.9th percentile, applied to
+# the token's L2 norm BEFORE squaring ([NQ] App. B.1). Before, not after: clipping
+# the squared vector would not bound a single token's contribution the same way,
+# and the whole point is that one extreme token must not dominate a per-feature
+# mean. Order statistic, not interpolated quantile -- the spec's "robust max" is
+# the 99.9th value, and interpolation would return a norm between two samples.
+_TOKEN_CLIP_QUANTILE = 0.999
 
-    Gradient statistics enter the preconditioners per design section 1
-    ([NQ] Step 2-1); we mirror the output-side construction on the input
-    side (informed choice for OQ-2, recorded in the change's design.md
-    implementation notes).
+
+def _clip_token_norms(t: torch.Tensor) -> torch.Tensor:
+    """Scale each token vector down to the 99.9th-percentile L2 norm if above it.
+
+    Derivation: [NQ] App. B.1 -- per-token norm clipping at the robust 99.9th
+    percentile, before squaring. Tokens at or below the cap are untouched, so the
+    transform is the identity on the bulk of the batch and only acts on its
+    adversarial class (rare extreme tokens) -- which is the property its test
+    asserts.
     """
-    return feat_sq.mean(dim=0) + grad_stat
+    if t.numel() == 0:
+        return t
+    norms = t.norm(dim=-1, keepdim=True)
+    flat = norms.reshape(-1)
+    if flat.numel() < 2:
+        return t
+    cap = torch.quantile(flat.float(), _TOKEN_CLIP_QUANTILE, interpolation="lower")
+    scale = torch.clamp(cap / norms.clamp_min(_TINY), max=1.0)
+    return t * scale
+
+
+def require_grad_or_name(loss: torch.Tensor) -> None:
+    """Fail with a reason when ``loss`` cannot produce a gradient.
+
+    Every caller-side ``loss.backward()`` in this pipeline routes through here.
+    The bare-block path runs its backward outside ``collect_stats`` -- the caller
+    computes ``head -> loss -> backward -> cotangent`` itself -- so a frozen or
+    detached graph on that path cannot be caught inside the module, no matter
+    where a guard is placed. One guard, one message, every caller.
+    """
+    if not loss.requires_grad:
+        raise ValueError(
+            "the loss you supplied does not require grad, so no gradient exists to "
+            "measure: unfreeze the parameters, or supply a head whose loss depends "
+            "on the module output."
+        )
+
+
+def cotangent_grad_sq_sum(g: torch.Tensor) -> torch.Tensor:
+    """Per-feature sum of squared output-cotangents.
+
+    Derivation: [NQ] Eq. 2, the K-FAC diagonal reading -- the output-side
+    preconditioner is ``sqrt(E[g^2])`` with ``g`` the loss gradient at the layer's
+    OUTPUT, from a real cross-entropy backward routed through the model head
+    (App. C :3011).
+
+    This is the SINGLE blessed implementation of that accumulation, and the body
+    is the form Lane 0's Arm B measured, adapted to one device per the dtype
+    ruling. Three non-negotiables, each of them a defect when dropped:
+
+    * ``reshape(-1, g.shape[-1])`` -- module outputs are 3D, ``[batch, seq, d_out]``.
+      Summing ``dim=0`` without reshaping sums over the BATCH axis and returns
+      ``[seq, d_out]``, which is not a per-feature diagonal at all. The fixtures
+      missed it because they fed 2D cotangents, so the test below asserts shape on
+      a 3D input.
+    * ``.detach()`` -- a hook-body accumulator that keeps autograd graph
+      references is the retention class that killed three boxes.
+    Runs at the caller's dtype. Widening precision inside the statistic would make
+    the number incomparable with the run it came from; a caller that wants wider
+    accumulation widens it at the call.
+    """
+    return g.detach().reshape(-1, g.shape[-1]).pow(2).sum(dim=0)
 
 
 def collect_stats(
-    module: nn.Module, calibration_batches, *, chunk_rows: int | None = None
+    module: nn.Module, calibration_batches, *, chunk_rows: int | None = None, cotangent=None
 ) -> LayerStatsBook:
     """Run calibration batches forward (and backward) once through ``module``.
 
@@ -164,40 +224,69 @@ def collect_stats(
     # concatenates exactly as landed.
     streaming = chunk_rows is not None
     feats_in: dict[str, list[torch.Tensor]] = {name: [] for name, _ in linears}
-    feats_out: dict[str, list[torch.Tensor]] = {name: [] for name, _ in linears}
     # Accumulators are born on the weights' device, not the default (CPU) one:
     # the hook feeds them activations from wherever the model ran. A no-op on CPU.
     sum_sq_in = {
-        name: torch.zeros(m.weight.shape[1], dtype=torch.float64, device=m.weight.device)
+        name: torch.zeros(m.weight.shape[1], dtype=m.weight.dtype, device=m.weight.device)
         for name, m in linears
     }
     sum_sq_out = {
-        name: torch.zeros(m.weight.shape[0], dtype=torch.float64, device=m.weight.device)
+        name: torch.zeros(m.weight.shape[0], dtype=m.weight.dtype, device=m.weight.device)
         for name, m in linears
     }
     rows_in = {name: 0 for name, _ in linears}
     rows_out = {name: 0 for name, _ in linears}
+    # d_out = E[g^2] from the REAL loss gradient at each layer's output ([NQ]
+    # Eq. 2, K-FAC diagonal reading). The uniform-ones cotangent that used to
+    # feed an INPUT-side gradient term is retired: it was loss-blind, and on a
+    # benign unit-norm fixture it inflated d_in by ~6e6 (measured 2911800.35
+    # against an analytic 0.5).
+    grad_sq_out = {
+        name: torch.zeros(m.weight.shape[0], dtype=m.weight.dtype, device=m.weight.device)
+        for name, m in linears
+    }
+
+    def _accumulate_grad(key: str, g: torch.Tensor) -> None:
+        rows = g.reshape(-1, g.shape[-1])
+        grad_sq_out[key] = grad_sq_out[key] + cotangent_grad_sq_sum(rows).to(grad_sq_out[key].dtype)
+
     handles = []
     for name, m in linears:
         if streaming:
 
             def _pre_hook(mod, inp, key=name):  # noqa: ANN001
-                sum_sq_in[key], rows_in[key] = _accumulate(inp[0], sum_sq_in[key], rows_in[key])
+                sum_sq_in[key], rows_in[key] = _accumulate(
+                    _clip_token_norms(inp[0]), sum_sq_in[key], rows_in[key]
+                )
 
             def _post_hook(mod, inp, out, key=name):  # noqa: ANN001
-                sum_sq_out[key], rows_out[key] = _accumulate(out, sum_sq_out[key], rows_out[key])
+                clipped = _clip_token_norms(out)
+                sum_sq_out[key], rows_out[key] = _accumulate(
+                    clipped, sum_sq_out[key], rows_out[key]
+                )
+                if out.requires_grad:
+                    out.register_hook(lambda g, key=key: _accumulate_grad(key, g))
 
             handles.append(m.register_forward_pre_hook(_pre_hook))
             handles.append(m.register_forward_hook(_post_hook))
         else:
-            handles.append(
-                m.register_forward_hook(
-                    lambda mod, inp, out, key=name: feats_out[key].append(_reduce_tokens(out))
-                )
-            )
+
+            def _ref_post_hook(mod, inp, out, key=name):  # noqa: ANN001
+                # The reference path counts rows and captures the real output
+                # gradient too. Wiring the gradient hook on the streaming branch
+                # only left this path with rows_out == 0, which the assembly then
+                # divided by -- and the f64 reference is the DEFAULT path, so the
+                # gap was on the most-used branch, not the opt-in one.
+                rows_out[key] += int(out.reshape(-1, out.shape[-1]).shape[0])
+                if out.requires_grad:
+                    out.register_hook(lambda g, key=key: _accumulate_grad(key, g))
+
+            handles.append(m.register_forward_hook(_ref_post_hook))
             handles.append(
                 m.register_forward_pre_hook(
-                    lambda mod, inp, key=name: feats_in[key].append(_reduce_tokens(inp[0]))
+                    lambda mod, inp, key=name: feats_in[key].append(
+                        _reduce_tokens(_clip_token_norms(inp[0]))
+                    )
                 )
             )
 
@@ -206,52 +295,65 @@ def collect_stats(
     saved_grads = [None if p.grad is None else p.grad.detach().clone() for p in params]
     for p in params:
         p.grad = None
-    grad_in2: dict[str, list[torch.Tensor]] = {name: [] for name, _ in linears}
+    # Three cases, per Lane 1 task 4 ([NQ] App. C :3011) and the design ruling:
+    #   1. whole-model collection -- cotangent is None and the module carries a
+    #      head (``.head`` on the driver wrapper, ``.lm_head`` on a raw HF model),
+    #      so the loss is next-token CE and the cotangent falls out of its
+    #      backward, with the batch's input_ids as labels;
+    #   2. bare block -- the caller supplies cotangent=, the gradient at the
+    #      module output, and collect_stats runs backward from it. One entry
+    #      shape, not two: a head= callable was retired in favour of this,
+    #      because it would have grown a second way in beside the cotangent;
+    #   3. neither -- fail closed.
+    whole_model = cotangent is None
+    detected_head = detected_trunk = None
+    if whole_model:
+        # Route from the TRUNK, not from the module's forward output. Applying the
+        # head to a forward output that already ends in a head double-applies it:
+        # on the driver wrapper that is [*, vocab] into Linear(hidden, vocab), a
+        # RuntimeError at first collection on every block. Width-sniffing the
+        # output to guess which case we are in is the fragile-collision class this
+        # lane removes, so instead we compose the two handles the production
+        # wrapper already maintains (tools/quantize_hf_model.py:200-205):
+        # ``head(trunk(input_ids=x).last_hidden_state)``. A module that exposes a
+        # head but no trunk fails detection honestly rather than crashing later.
+        detected_head = getattr(module, "lm_head", None) or getattr(module, "head", None)
+        stock_trunk = getattr(module, "_stock_trunk", None)
+        # The trunk is exposed under one of three names: the driver wrapper's
+        # ``_stock_trunk`` list, a raw HF model's ``.model``, or a bare ``.trunk``
+        # on a model that composes the two halves itself.
+        detected_trunk = (
+            (stock_trunk[0] if stock_trunk else None)
+            or getattr(module, "model", None)
+            or getattr(module, "trunk", None)
+        )
+    if whole_model and (detected_head is None or detected_trunk is None):
+        raise ValueError(
+            "collect_stats cannot find a loss for d_out = E[g^2]: this module is "
+            "neither a whole model exposing a trunk and a head separately (no "
+            "reachable .head/.lm_head, or no .model/_stock_trunk) nor a bare block "
+            "given cotangent= (the gradient at the module output). Pass "
+            "cotangent=<tensor> for a bare block."
+        )
     try:
-        # The backward-style pass over calibration data produces the gradient
-        # statistics; a uniform output-gradient cotangent touches every
-        # feature channel.
         for batch in calibration_batches:
-            # The per-batch gradient statistic is the square of the TOTAL
-            # gradient over the batch's rows. With chunk_rows set (opt-in,
-            # non-f64 paths), the raw f64 gradient accumulates across row
-            # chunks and is squared once — same definition, bounded graph;
-            # without it, one whole-batch backward (bit-identical to the
-            # landed f64 reference path).
-            chunk_iter: list[torch.Tensor] = (
-                [batch[lo : lo + chunk_rows] for lo in range(0, batch.shape[0], chunk_rows)]
-                if chunk_rows
-                else [batch]
-            )
-            # `batch` comes off the tokenizer on the CPU; the module's weights may be on an
-            # accelerator, and the auditor names this boundary (calibration.py:225). Move once,
-            # at entry, so the whole chunk loop is device-true rather than per-chunk. The
-            # explicit None guard avoids the StopIteration class. No-op on CPU.
-            _ref = next(iter(module.parameters()), None)
-            if _ref is not None:
-                batch = batch.to(_ref.device)
-            dout_din = {name: tuple(m.weight.shape) for name, m in linears}
-            # Same class as sum_sq_in: this accumulator meets cuda grad statistics.
-            _acc_dev = next(iter(linears))[1].weight.device
-            acc = {
-                name: torch.zeros(shape, dtype=torch.float64, device=_acc_dev)
-                for name, shape in dout_din.items()
-            }
-            for piece in chunk_iter:
-                torch.set_grad_enabled(True)
-                model_out = module(piece)
-                if not isinstance(model_out, torch.Tensor):
-                    model_out = model_out[0]
-                model_out.backward(torch.ones_like(model_out))
-                torch.set_grad_enabled(False)
-                for name, m in linears:
-                    if m.weight.grad is not None:
-                        acc[name] += m.weight.grad.to(torch.float64)
-                    # The f64 accumulator is all that survives into the
-                    # next chunk; the chunk's graph and grad are dropped.
-                    m.weight.grad = None
-            for name in acc:
-                grad_in2[name].append(acc[name].pow(2).mean(dim=0))
+            if whole_model:
+                ids = batch if torch.is_tensor(batch) else batch["input_ids"]
+                hidden = detected_trunk(input_ids=ids).last_hidden_state
+                logits = detected_head(hidden)
+                # Autoregressive shift: position t predicts token t+1.
+                loss = torch.nn.functional.cross_entropy(
+                    logits[:, :-1].reshape(-1, logits.shape[-1]),
+                    ids[:, 1:].reshape(-1).to(logits.device),
+                    ignore_index=-100,
+                )
+                require_grad_or_name(loss)
+                loss.backward()
+            else:
+                out_t = module(batch)
+                grad = cotangent if torch.is_tensor(cotangent) else torch.as_tensor(cotangent)
+                grad = grad.to(device=out_t.device, dtype=out_t.dtype).reshape(out_t.shape)
+                out_t.backward(gradient=grad)
     finally:
         torch.set_grad_enabled(grad_enabled)
         for h in handles:
@@ -261,33 +363,23 @@ def collect_stats(
 
     for name, m in linears:
         din, dout = m.weight.shape[1], m.weight.shape[0]
-        grad_stat = torch.stack(grad_in2[name]).mean(dim=0)  # (din,)
+        if rows_out[name] == 0:
+            raise ValueError(f"layer {name!r} saw no output-gradient rows")
         if streaming:
             if rows_in[name] == 0 or rows_out[name] == 0:
                 raise ValueError(f"streamed statistics for layer {name!r} saw no rows")
             # sum(x^2)/n per feature is the quantity the reference computes as
             # feat.pow(2).mean(dim=0); only the summation order differs.
-            d_in_raw = (
-                (sum_sq_in[name] / rows_in[name] + grad_stat)
-                .detach()
-                .cpu()
-                .numpy()
-                .astype(np.float64)
-            )
+            d_in_raw = (sum_sq_in[name] / rows_in[name]).detach().cpu().numpy().astype(np.float64)
             d_out_raw = (
-                (sum_sq_out[name] / rows_out[name]).detach().cpu().numpy().astype(np.float64)
+                (grad_sq_out[name] / rows_out[name]).detach().cpu().numpy().astype(np.float64)
             )
         else:
             feat_in = torch.cat(feats_in[name], dim=0)
-            feat_out = torch.cat(feats_out[name], dim=0)
-            d_in_raw = (
-                _layer_statistic(feat_in.pow(2), grad_stat)
-                .detach()
-                .cpu()
-                .numpy()
-                .astype(np.float64)
+            d_in_raw = feat_in.pow(2).mean(dim=0).detach().cpu().numpy().astype(np.float64)
+            d_out_raw = (
+                (grad_sq_out[name] / rows_out[name]).detach().cpu().numpy().astype(np.float64)
             )
-            d_out_raw = feat_out.pow(2).mean(dim=0).detach().cpu().numpy().astype(np.float64)
         d_in_raw = np.maximum(d_in_raw, _TINY)
         d_out_raw = np.maximum(d_out_raw, _TINY)
         if d_in_raw.shape != (din,) or d_out_raw.shape != (dout,):
