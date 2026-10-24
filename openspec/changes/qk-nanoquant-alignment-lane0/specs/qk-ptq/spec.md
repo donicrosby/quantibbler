@@ -141,6 +141,7 @@ The accumulation hooks SHALL gate on `torch.is_grad_enabled()` so each row is co
 - **THEN** it starts at ONE batch measuring the true per-batch peak from `torch.cuda.max_memory_reserved`; the full 16-batch endurance run proceeds only if that peak lands at or under 15G; and the refire happens only after the 16-batch peak leaves solve-compatible headroom under 32G, the red artifacts, and both fixtures are green
 - **AND** the rehearsal constructs its batches through the same packed loader as the protocol run — one batch is one packed batch of BATCH×seq_len tokens, never a degenerate corpus-sized blob — with explicit rehearsal sequences recorded as provenance (`rehearsal=true, sequences=N, protocol_sequences=128`) so the artifact cannot be misread as a protocol statistic
 - **AND** the rehearsal SHALL release as it runs: caching allocator disabled, explicit reference release at every chunk boundary, per-chunk empty_cache, 2-second memory telemetry flushed line-by-line to the artifact, and the attention implementation pinned — so a death leaves a trace naming the allocation, and the box survives via the host memory-floor net
+- **AND** no fire SHALL execute a batch count the CPU suite has never run: a rehearsal with N batches requires the e2e fixture to have run N batches red-first, so green-16's batch-2 Arm B death class — first execution of multi-batch Arm B in campaign history — is impossible by construction
 
 #### Scenario: rehearsal_geometry_guard_exempts_explicitly
 
