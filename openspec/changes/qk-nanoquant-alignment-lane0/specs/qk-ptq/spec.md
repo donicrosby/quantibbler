@@ -178,7 +178,12 @@ Every Lane 0 launch SHALL go through `tools/run-ptq-container.sh` under `MODE=la
 
 ### Requirement: container_log_witness
 
-The wrapper SHALL capture the container's stdout/stderr to `$OUT/container.log` — wrapper-level `tee`, no in-container changes, no image rebuild — and SHALL record the container exit status in `launch.env` via POSIX `PIPESTATUS`. A fire of ANY mode — lane0 or ptq production — SHALL fail closed on completion when `container.log` is absent or empty: a death without a trace is a launch defect, not an acceptable outcome — green-16's batch-2 Arm B death and v2's fifth blind death both left no traceback, and the CPU suite cannot be the witness for device-only faults.
+The wrapper SHALL capture the container's stdout/stderr to `$OUT/container.log` — wrapper-level `tee`, no in-container changes, no image rebuild — and SHALL record the container exit status in `launch.env` via POSIX `PIPESTATUS`. A fire of ANY mode SHALL fail closed on completion when `container.log` is absent or empty.
+
+#### Scenario: any_mode_death_leaves_testimony
+
+- **WHEN** any fire — lane0 or ptq production — dies
+- **THEN** its traceback SHALL exist in `container.log`: a death without a trace is a launch defect, not an acceptable outcome — green-16's batch-2 Arm B death and v2's fifth blind death both left none, and the CPU suite cannot be the witness for device-only faults
 
 #### Scenario: witness_mechanics_verify_without_box_time
 
@@ -193,13 +198,13 @@ The wrapper SHALL capture the container's stdout/stderr to `$OUT/container.log` 
 
 ### Requirement: fire_monitoring_cadence
 
-Every fire SHALL announce its poll cadence at launch with a named owner, alongside its announced wall time — a fire nobody is scheduled to look at is unmonitored by construction. When the completion channel is known dead at launch, the launcher SHALL arm the poll at launch, not remember it later. v2 — a 21.8-hour letter-of-the-paper fire with a known-dead notification channel and no poll order — died at 03:43:42Z and went unread for 21 hours: that class SHALL NOT exist again.
+Every fire SHALL announce its poll cadence at launch with a named owner, alongside its announced wall time — a fire nobody is scheduled to look at is unmonitored by construction. When the completion channel is known dead at launch, the launcher SHALL arm the poll at launch, not remember it later.
 
-#### Scenario: dead_channel_poll_armed_at_launch
+#### Scenario: v2_silence_class_shall_not_repeat
 
-- **WHEN** a fire launches with a completion channel known dead (backend-loss)
-- **THEN** the launch announcement names the poll interval and its owner, and the first poll is scheduled at launch time
-- **AND** a fire whose wall time exceeds one hour without an announced poll cadence is a launch defect, refused at staging
+- **WHEN** a fire's wall time exceeds one hour
+- **THEN** a poll cadence with a named owner SHALL exist from launch, and the launch announcement names both
+- **AND** a fire launching with a dead completion channel SHALL have its first poll scheduled at launch — v2, a 21.8-hour fire with a known-dead channel and no poll order, died at 03:43:42Z and went unread for 21 hours; that class SHALL NOT exist again
 
 ### Requirement: launch_env_single_writer
 
