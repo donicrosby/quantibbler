@@ -143,7 +143,7 @@ def completed_blocks(ckpt_dir: Path) -> list[int]:
     return sorted(done)
 
 
-def save_block_checkpoint(ckpt_dir: Path, index: int, layers: list) -> None:
+def save_block_checkpoint(ckpt_dir: Path, index: int, layers: list, *, y_b=None) -> None:
     """Losslessly persist one finished block's QuantizedLayerStates.
 
     int8 bits and float64 scales are stored exactly as the solver left
@@ -165,6 +165,15 @@ def save_block_checkpoint(ckpt_dir: Path, index: int, layers: list) -> None:
             "nothing restored. Fix the solve, not the checkpoint."
         )
     arrays: dict[str, np.ndarray] = {}
+    # Lane 2: the fp-stream teacher target rides along with the block. The resume
+    # path then recovers ``x_fp`` as exactly the activation the solve path
+    # advanced to, so both branches are ``x_fp = y_b`` and there is no conditional
+    # pristine forward whose placement can desync the streams. Stored float64
+    # exactly as produced: the stream feeds a later teacher forward, so a lossy
+    # cast here would silently move every downstream target.
+    if y_b is not None:
+        _yb = y_b.detach().cpu().numpy() if hasattr(y_b, "detach") else np.asarray(y_b)
+        arrays[_YB_KEY] = _yb
     for st in layers:
         p = f"{st.name}"
         arrays[f"{p}|Ub"] = np.asarray(st.Ub, dtype=np.int8)
@@ -182,7 +191,11 @@ def save_block_checkpoint(ckpt_dir: Path, index: int, layers: list) -> None:
 def load_block_checkpoint(ckpt_dir: Path, index: int, layer_cls) -> list:
     """Rebuild QuantizedLayerState objects, bit-exact, from a checkpoint."""
     with np.load(ckpt_dir / f"block-{index}.npz") as npz:
-        names = sorted({key.rsplit("|", 1)[0] for key in npz.files})
+        # Only keys carrying a ``|`` are layer fields. Without this filter the
+        # reserved y_b key derives a bogus layer named "y_b" and the next line
+        # raises KeyError on "y_b|Ub" -- a resume-only failure that appears as a
+        # missing-layer error rather than a checkpoint-format one.
+        names = sorted({key.rsplit("|", 1)[0] for key in npz.files if "|" in key})
         layers = []
         for name in names:
             layers.append(
@@ -196,6 +209,25 @@ def load_block_checkpoint(ckpt_dir: Path, index: int, layer_cls) -> list:
                 )
             )
     return layers
+
+
+#: Reserved npz key for the fp-stream teacher target. Carries no ``|`` by design,
+#: which is why the layer-name derivation filters on that separator.
+_YB_KEY = "y_b"
+
+
+def load_block_yb(ckpt_dir: Path, index: int):
+    """Return the block's stored fp-stream target, or None if it predates Lane 2.
+
+    A checkpoint written before the field existed has no y_b; that is a resume
+    across the change, and the caller falls back to recomputing the stream rather
+    than silently starting from a wrong activation.
+    """
+    path = ckpt_dir / f"block-{index}.npz"
+    with np.load(path) as npz:
+        if _YB_KEY not in npz.files:
+            return None
+        return npz[_YB_KEY]
 
 
 def _archive_key(name: str, block_name: str) -> str:

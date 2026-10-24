@@ -428,3 +428,140 @@ def test_scn_dual_stream_advances_in_lockstep() -> None:
             "record what the pristine reference stream saw at this block, not only "
             "the compressed reading it feeds the student."
         )
+
+
+def test_scn_resumed_run_fp_stream_bitwise_identical(tmp_path) -> None:
+    """Lane 2 gate 2(b): a resumed run's fp stream is BITWISE the uninterrupted one.
+
+    Two distinct claims, asserted separately because they test different mechanisms:
+
+    (1) ROUND-TRIP: a fresh checkpoint's stored ``y_b`` restored on resume must
+        reproduce the uninterrupted run's capture exactly. This tests the float64
+        npz round-trip and nothing else.
+    (2) RECOMPUTE: a legacy checkpoint (written before the field existed) has no
+        stored target, so the stream is recomputed through the pristine copy. Same
+        inputs, same ops, same order -- so this must ALSO be bitwise. If it isn't,
+        the fp advance has chunk-boundary nondeterminism, which is a finding about
+        ``_forward_chunked`` rather than about resume.
+
+    Collapsing these into one tolerance check would let (1) passing stand as
+    evidence about (2), and (2) is the stronger claim.
+
+    The test also ties the provenance LABELS to the feeds: the capture's ``x_fp``
+    and ``y_b`` are compared against the uninterrupted run's computed streams, so a
+    future edit that swaps which stream feeds which label breaks equality here
+    instead of leaving ``x_b_stream="compressed"`` describing fp bytes.
+    """
+    import numpy as np
+
+    from quantibbler.ptq.checkpoints import write_fingerprint
+
+    dim, seed = 8, 0
+    batches = [
+        torch.randint(0, 16, (4, 6), generator=torch.Generator().manual_seed(7)) for _ in range(2)
+    ]
+    cfg = _cfg()
+    clean = _TinyLM(dim, seed=seed)
+    pristine = copy.deepcopy(clean)
+
+    def _run(model, ckpt_dir=None):
+        sink: list = []
+        book = collect_stats(pristine, batches)
+        reconstruct_model(
+            model,
+            batches,
+            cfg,
+            recorder=lambda event, **info: sink.append((event, info)),
+            checkpoint_dir=ckpt_dir,
+            teacher_model=pristine,
+            stats_book=book,
+        )
+        return {i["capture_index"]: i for e, i in sink if e == "capture"}
+
+    # --- baseline: uninterrupted ---
+    baseline = _run(copy.deepcopy(clean))
+
+    # --- (1) fresh checkpoint, partial resume ---
+    # Indices are DERIVED, never hand-counted: capture_index is the child
+    # enumeration index (embed occupies one), not the block ordinal, so a
+    # hand-written constant silently deletes the wrong archive -- or none at all,
+    # which yields a resumed run with zero captures that can read as a vacuous
+    # pass. completed_blocks() is the same enumeration production resume consults.
+    from quantibbler.ptq import checkpoints as _ckpt
+
+    fresh_dir = tmp_path / "fresh"
+    fresh_dir.mkdir()
+    _run(copy.deepcopy(clean), fresh_dir)  # populates one archive per solved block
+    done = sorted(_ckpt.completed_blocks(fresh_dir))
+    assert len(done) >= 2, f"expected several solved blocks to resume from, got {done}"
+
+    keep = done[0]
+    to_resume = [b for b in done if b != keep]
+    for b in to_resume:
+        (fresh_dir / f"block-{b}.npz").unlink()
+
+    resumed = _run(copy.deepcopy(clean), fresh_dir)
+    # Loud non-degeneracy guard: the resumed run must capture EXACTLY the blocks
+    # whose archives were removed. A mis-derived index that deleted nothing would
+    # otherwise give zero captures and every per-event assertion below would be
+    # vacuously true.
+    assert set(resumed) == set(to_resume), (
+        f"resumed run captured {sorted(resumed)}, expected exactly the re-solved "
+        f"blocks {sorted(to_resume)} (kept archive: block {keep}). Either the "
+        "deletion target was derived wrongly or resume did not re-solve what it "
+        "was owed -- both are loud failures, not pass conditions."
+    )
+    assert set(baseline) == set(done), f"baseline captured {sorted(baseline)}"
+
+    for idx in to_resume:
+        # batch schedule first: a fixture comparing different batches would fail
+        # here rather than masquerade as a determinism finding
+        assert torch.equal(resumed[idx]["x_b"], baseline[idx]["x_b"]), (
+            f"block {idx}: resumed run saw different calibration batches (x_b differs); "
+            "the fixture is comparing two different runs, not a resume"
+        )
+        assert torch.equal(resumed[idx]["x_fp"], baseline[idx]["x_fp"]), (
+            f"block {idx}: ROUND-TRIP failed -- a fresh checkpoint's stored y_b "
+            "restored bitwise-unequal to the uninterrupted run's fp stream"
+        )
+        assert torch.equal(resumed[idx]["y_b"], baseline[idx]["y_b"]), (
+            f"block {idx}: ROUND-TRIP failed on the teacher target"
+        )
+
+    # --- (2) legacy checkpoint (no y_b): recompute must also be bitwise ---
+    legacy_dir = tmp_path / "legacy"
+    legacy_dir.mkdir()
+    _run(copy.deepcopy(clean), legacy_dir)
+    from quantibbler.ptq import checkpoints as _ck2
+
+    ldone = sorted(_ck2.completed_blocks(legacy_dir))
+    assert ldone == done, f"legacy run solved {ldone}, fresh run solved {done}"
+    for b in done:
+        path = legacy_dir / f"block-{b}.npz"
+        if not path.exists():
+            continue
+        # Simulate a checkpoint written before the field existed.
+        with np.load(path) as npz:
+            kept = {k: npz[k] for k in npz.files if k != "y_b"}
+        path.unlink()
+        np.savez(path, **kept)
+    write_fingerprint(legacy_dir, cfg)
+    lkeep = done[0]
+    lexp = [b for b in done if b != lkeep]
+    for b in lexp:
+        (legacy_dir / f"block-{b}.npz").unlink()
+
+    legacy = _run(copy.deepcopy(clean), legacy_dir)
+    assert set(legacy) == set(lexp), (
+        f"legacy resumed run captured {sorted(legacy)}, expected {sorted(lexp)}"
+    )
+    probe = lexp[0]
+    assert legacy[probe]["x_fp"] is not None, (
+        "legacy resume produced no fp-stream reading; the recompute path did not run"
+    )
+    assert torch.equal(legacy[probe]["x_fp"], baseline[probe]["x_fp"]), (
+        "RECOMPUTE failed: the fp stream recomputed through the pristine copy "
+        "differs bitwise from the uninterrupted run's. Same inputs, ops and order "
+        "are expected to give bitwise equality, so this is chunk-boundary "
+        "nondeterminism in the fp advance, not a resume defect."
+    )

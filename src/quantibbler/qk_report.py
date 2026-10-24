@@ -464,6 +464,7 @@ def fidelity_conditions(
     flip_pass = False
     rescope = False
     vacuous = False
+    captures: list[dict] = []
     executions: dict[str, int] = {}
     for entry in stages or []:
         event, info = _stage_pair(entry)
@@ -488,6 +489,8 @@ def fidelity_conditions(
                     flip_pass = True
                 if rec.get("declared") == "scale_only" or rec.get("rescope_marker"):
                     rescope = True
+        elif event == "capture":
+            captures.append(fields)
         elif event == "tune_fp_vacuous_teacher":
             vacuous = True
     conditions = {
@@ -497,6 +500,18 @@ def fidelity_conditions(
         "no_discrete_flip_pass": not flip_pass,
         "no_scale_only_rescope": not rescope,
         "no_vacuous_teacher": not vacuous,
+        # Lane 2: a paper_faithful claim owes evidence that the TEACHER TARGET came
+        # from the fp-stream capture. Before this condition every capture event was
+        # accepted as a teacher source, so a run whose teacher read the compressed
+        # stream was labelled faithful -- the fidelity hole the lane closes.
+        #
+        # Scoped to captures that EXIST: a record with no capture event is already
+        # denied by required_capture_executed, and making this condition deny it too
+        # would flip the label on records whose provenance was never at issue.
+        # A capture present with no y_b_stream field is a pre-Lane-2 writer or a
+        # mislabelled feed, and that denies: absence of provenance on a capture that
+        # exists is not evidence of an fp-stream teacher.
+        "capture_is_fp_stream": not captures or all(c.get("y_b_stream") == "fp" for c in captures),
         "no_stage_failure": not bool(stage_failure),
         "solver_is_admm": solver == "admm",
     }

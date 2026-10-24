@@ -188,7 +188,11 @@ class PTQConfig:
     # ``tune_fp_vacuous_teacher`` event instead of continuing with pristine
     # weights: under the [NQ] Figure 3 placement the operative TuneFP call
     # always has factorized in-block layers, so a zero first-step gradient is
-    # a construction defect, never legitimate nothing-to-compensate. Default
+    # a construction defect, never legitimate nothing-to-compensate. The
+    # per-target loop's first-target skip is distinct and remains correct:
+    # under Lane 2's dual streams its justification is "nothing to compensate
+    # yet" -- the block is still entirely FP and the teacher is its deepcopy,
+    # so no factorization has degraded anything for TuneFP to repair. Default
     # False keeps the diagnostic semantics (event recorded, stage skipped).
     # Solver state: it joins the checkpoint fingerprint.
     paper_faithful: bool = False

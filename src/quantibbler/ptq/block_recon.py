@@ -33,6 +33,13 @@ the letter"):
   placement with the still-FP remainder as its tunable set; a zero
   first-step gradient aborts with ``tune_fp_vacuous_teacher`` carrying both
   the gradient norm and the initial residual norm (A3).
+  Under Lane 2's dual streams the first target's skip is NOT a vacuity
+  claim: ``Y_b`` comes from the fp reference reading a different input than
+  the block's own forward, so the target-1 gradient is no longer ~0 and the
+  engine has real work. The skip stands only as "nothing to compensate yet"
+  -- at ``idx == 0`` the block is still entirely FP and the teacher is its
+  deepcopy, so there is genuinely nothing to tune until something is
+  factorized.
 * ``qk-fix-ste-sign-adaptation`` — per-linear, per-factor flip
   instrumentation, per-layer refinement on the just-factorized linear with
   a deterministic split of the line-19 T_post budget, and flip acceptance
@@ -597,7 +604,13 @@ def _tune_fp(
     the figure rules out) — aborts with the recorder event
     ``tune_fp_vacuous_teacher`` carrying BOTH the gradient norm and the
     initial residual norm (gradient-zero + residual-zero = broken teacher;
-    gradient-zero + residual-nonzero = detached student). In a diagnostic
+    gradient-zero + residual-nonzero = detached student).
+
+    The per-target loop's first-target skip is a separate matter and is NOT
+    this guard: under dual streams it is justified as "nothing to compensate
+    yet" (the block is still entirely FP and the teacher is its deepcopy),
+    not as inherent vacuity. Only a call that actually runs and returns a
+    zero first-step gradient reaches the fail-closed path below. In a diagnostic
     run the stage continues with pristine weights and the event stays on
     record; in a run claiming paper fidelity it raises
     :class:`VacuousTeacherError` — there is no trivial-zero carve-out under
@@ -1132,6 +1145,7 @@ def reconstruct_block(
     *,
     x_b: torch.Tensor | None = None,
     y_b: torch.Tensor | None = None,
+    x_fp: torch.Tensor | None = None,
     stats_book=None,
     recorder=None,
     layer_offset: int = 0,
@@ -1235,7 +1249,10 @@ def reconstruct_block(
     # downstream would inherit the poison. Fail at the exact boundary,
     # naming the block — never let it surface later as a cryptic solver
     # error or a silently garbage artifact.
-    for tag, t in (("x_b", x_b), ("y_b", y_b)):
+    # Both streams: x_fp is the fp reference reading, so a non-finite value there
+    # is a broken reference forward rather than a poisoned quantized prefix, and
+    # the message should say which.
+    for tag, t in (("x_b", x_b), ("y_b", y_b), ("x_fp", x_fp)):
         if t is not None and not torch.isfinite(t).all():
             n_bad = int((~torch.isfinite(t)).sum())
             raise ValueError(
@@ -1249,6 +1266,18 @@ def reconstruct_block(
             "capture",
             x_b=x_b.detach().clone(),
             y_b=y_b.detach().clone(),
+            # Lane 2: the fp-stream activation at this block. Recorded so the
+            # lockstep advance is verifiable from the artifact -- a capture that
+            # carries only the compressed reading cannot distinguish "both streams
+            # advanced together" from "only the student's did".
+            x_fp=x_fp.detach().clone() if x_fp is not None else None,
+            # Stream provenance, by construction rather than by inspection: x_b is
+            # the compressed prefix's reading (the student's input) and y_b is the
+            # fp reference's (the teacher target). Lane 2 exists precisely to make
+            # y_b come from the fp stream, so these labels are what the verdict's
+            # provenance condition reads.
+            x_b_stream="compressed",
+            y_b_stream="fp",
             teacher_source=teacher_source,
             teacher_fingerprint=teacher_fingerprint,
             capture_index=capture_index,
@@ -1797,6 +1826,11 @@ def reconstruct_model(
     if _stem_param is not None:
         _batches = _batches.to(_stem_param.device)
     x_running = _forward_chunked(stem, _batches).detach()
+    # Lane 2: the fp reference stream. Identical at the stem (so block 1's skip
+    # stays the documented identity case), then advanced through the PRISTINE
+    # children while ``x_running`` advances through the quantized ones. The
+    # divergence between the two IS the lane.
+    x_fp = x_running.clone()
     _note_block_progress(0, None, x_running)
 
     # Snapshot the fp outputs of any fp stem layer that sits AFTER the last
@@ -1826,6 +1860,24 @@ def reconstruct_model(
             # advances exactly as a fresh run's would), skip the solve.
             layers = ckpt.load_block_checkpoint(ckpt_dir, i, QuantizedLayerState)
             ckpt.apply_layer_states(block, name, layers, expected_names=expected_names)
+            # Resume: recover the fp stream from the checkpoint rather than
+            # recomputing it, so the resumed stream is exactly the activation the
+            # interrupted solve had advanced to. A legacy checkpoint predating the
+            # field has no y_b, and there the stream is recomputed through the
+            # pristine copy -- never silently started from a wrong activation.
+            _yb = ckpt.load_block_yb(ckpt_dir, i)
+            if _yb is not None:
+                x_fp = torch.as_tensor(_yb, dtype=x_fp.dtype, device=x_fp.device)
+            else:
+                # Legacy fallback: no stored target, so recompute the stream through
+                # this block's pristine copy. ``teacher_block`` is resolved HERE and
+                # not hoisted: the solve branch below resolves its own, and a hoisted
+                # binding is what the checkpoint simplification removed. Referencing
+                # the solve branch's name from this branch is an UnboundLocalError on
+                # exactly the legacy-resume path, which has no other test.
+                _tb = teacher_children.get(name)
+                with torch.no_grad():
+                    x_fp = _forward_chunked(_tb if _tb is not None else block, x_fp)
             results.append(BlockReconResult(layers))
             print(
                 f"[checkpoint] block {i} ({name}): restored from checkpoint, skipping solve",
@@ -1838,15 +1890,18 @@ def reconstruct_model(
             # silently turn the teacher into a quantized-prefix teacher.
             teacher_block = teacher_children.get(name)
             with torch.no_grad():
-                y_b = _forward_chunked(
-                    teacher_block if teacher_block is not None else block, x_running
-                )
+                # Lane 2: the teacher target is the fp-stream reading
+                # Y_b = B^FP_b(x_fp), NOT the compressed stream. Feeding x_running
+                # here made the teacher a function of the quantized prefix, which
+                # is the defect tasks 1 and 3 pin.
+                y_b = _forward_chunked(teacher_block if teacher_block is not None else block, x_fp)
             result = reconstruct_block(
                 block,
                 batches,
                 cfg,
                 x_b=x_running.clone(),
                 y_b=y_b,
+                x_fp=x_fp.clone(),
                 stats_book=_block_stats_slice(stats_book, name, block, cfg),
                 recorder=recorder,
                 name_prefix=name,
@@ -1857,10 +1912,16 @@ def reconstruct_model(
                 else None,
                 capture_index=i,
             )
+            # y_b already IS the next fp activation: Y_b = B^FP_b(x_fp) is the
+            # same computation as x_fp_next = B^FP_b(x_fp). Assigning it makes the
+            # invariant structural -- the stream block b+1's teacher reads is
+            # by-construction the target block b recorded -- and avoids a second
+            # pristine forward per block (and its chunk-boundary reassociation).
+            x_fp = y_b
             layers = result.layers
             results.append(result)
             if ckpt_dir is not None and expected_names:
-                ckpt.save_block_checkpoint(ckpt_dir, i, layers)
+                ckpt.save_block_checkpoint(ckpt_dir, i, layers, y_b=y_b)
         # Prefix advances through the block with its factorized layers active
         # (frozen binaries already written back by reconstruct_block).
         with torch.no_grad():

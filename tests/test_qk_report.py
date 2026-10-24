@@ -1479,7 +1479,7 @@ def test_abort_report_dumps_strict_and_writes_non_finite_as_null():
 def _stage_fixture() -> list:
     return [
         ("phase1_statistics", {"linears": ["attn.q"], "num_linears": 7, "chunk_rows": None}),
-        ("capture", {"teacher_source": "frozen_reference_copy"}),
+        ("capture", {"teacher_source": "frozen_reference_copy", "y_b_stream": "fp"}),
         ("tune_fp", {"gradient_norm": 1.5, "initial_residual_norm": 0.4, "steps": 8}),
         ("lb_admm", {"polish_rounds": 4}),
         (
@@ -1549,7 +1549,7 @@ def _clean_stages() -> list:
     """The mechanism-clean record of a faithful run (no deviations at all)."""
     return [
         ("phase1_statistics", {"num_linears": 7}),
-        ("capture", {"teacher_source": "frozen_reference_copy"}),
+        ("capture", {"teacher_source": "frozen_reference_copy", "y_b_stream": "fp"}),
         (
             "tune_fp",
             {
@@ -1592,6 +1592,10 @@ def test_fidelity_label_is_true_only_when_every_condition_holds():
     label, conditions = fidelity_verdict("admm", [], _clean_stages(), requested=True)
     assert label is True
     assert set(conditions) == {
+        # Lane 2's stream-provenance condition: the verdict now denies a faithful
+        # label when a capture lacks fp-stream provenance, so it is part of the
+        # exact condition set a clean run carries.
+        "capture_is_fp_stream",
         "paper_faithful_flag",
         "no_runtime_deviations",
         "polish_off",
@@ -1876,7 +1880,7 @@ def test_abort_and_stage_failure_reports_carry_a_false_verdict_with_reasons():
             initial_residual_norm=0.25,
         ),
         identity,
-        [{"event": "capture"}],
+        [{"event": "capture", "y_b_stream": "fp"}],
     )
     assert failure["paper_faithful"] is False
     assert failure["fidelity_conditions"]["no_stage_failure"] is False
@@ -1905,7 +1909,7 @@ def test_stage_failure_report_is_failed_and_carries_both_guard_norms():
     report = stage_failure_report(
         exc,
         {"model": "fixture", "paper_faithful": True, "stages": []},
-        [{"event": "capture"}],
+        [{"event": "capture", "y_b_stream": "fp"}],
     )
     assert report["status"] == FAILED
     assert report["artifact_exported"] is False
@@ -1918,7 +1922,10 @@ def test_stage_failure_report_is_failed_and_carries_both_guard_norms():
         "gradient_norm": 0.0,
         "initial_residual_norm": 0.25,
     }
-    assert report["stages"] == [{"event": "capture"}]
+    # output == input, both sides carrying the same payload: this asserts the
+    # report echoes its stages verbatim, which is invariant under the capture
+    # fixture gaining its stream-provenance field.
+    assert report["stages"] == [{"event": "capture", "y_b_stream": "fp"}]
     for key in ("ppl_quant_native", "ppl_ratio", "effective_bpw", "qpk1_layer_bytes"):
         assert report[key] is None, key
     payload, faithful = dump_report(report)
@@ -2079,7 +2086,7 @@ def test_non_completion_report_shapes_carry_the_evaluation_record():
             initial_residual_norm=0.25,
         ),
         identity,
-        [{"event": "capture"}],
+        [{"event": "capture", "y_b_stream": "fp"}],
     )
     for report in (aborted, failure):
         assert report["evaluation"] == record
@@ -2108,9 +2115,15 @@ def test_scn_label_requires_fp_stream_teacher_provenance():
     # tune_scales_kd counts as executed only when its payload carries an artifact
     # (qk_report.py:474), so a uniform payload cannot satisfy all fifteen and the
     # baseline is per-stage rather than generic.
+    # ``capture`` is excluded here and supplied by _with_capture below: a base
+    # entry for it would be an unprovenanced second capture, and the provenance
+    # condition correctly denies the label when ANY capture lacks provenance.
+    # Carrying a generic base entry alongside the real one made the positive
+    # control fail for a reason that had nothing to do with the sub-cases.
     base = [
         (k, {"artifact": "scales.json"} if k == "tune_scales_kd" else {"executed": True})
         for k in keys
+        if k != "capture"
     ]
 
     def _with_capture(**prov):
