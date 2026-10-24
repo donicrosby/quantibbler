@@ -4,20 +4,33 @@
 
 ### Requirement: suite_time_budget
 
-The full test suite SHALL complete within 30 seconds of wall time per 100
-collected tests, measured on the CI lane with the BLAS determinism pin, and
-recorded in the run report. The budget is a hard gate: a suite over budget is
-red, not advisory. Baseline measured 2026-10-24: 349.36s for 628 tests
-(55.6s/100) — the fix is profiling the slow tail and splitting oversized test
-modules, never weakening assertions or shrinking coverage to meet the clock.
+The default (hot) lane SHALL complete within 30 seconds of wall time per 100 collected tests, measured with the BLAS determinism pin, and recorded in the run report. The budget is a hard gate: a suite over budget is red, not advisory. Baseline measured 2026-10-24: 349.36s for 628 tests (55.6s/100); after the honest split, 621 tests in 71.48s (11.5s/100). The fix is profiling the slow tail and splitting oversized test modules, never weakening assertions or shrinking coverage to meet the clock.
 
 #### Scenario: over_budget_suite_is_red
 
-- **WHEN** a full-suite run exceeds 30s per 100 collected tests
-- **THEN** the run reports the ratio against the baseline and the suite is
-  treated as failed
-- **AND** the response is a measured slow-tail fix with the profile attached,
-  not a coverage cut
+- **WHEN** a hot-lane run exceeds 30s per 100 collected tests
+- **THEN** the run reports the ratio against the baseline and the suite is treated as failed
+- **AND** the response is a measured slow-tail fix with the profile attached, not a coverage cut
+
+### Requirement: integration_marker_admission
+
+`integration` means the test loads a real model or executes the driver end-to-end. A CPU stub harness test is a unit test — calling `build_real_arms` on a `tiny_model` stub is a harness unit test, and that classification is its entire value. Over-marking is a red: it moved the guards born from the last four deaths (the two-batch Arm B fixture, the four-row surface-table pin, the capture-binding sentinel, the stubbed-corpus e2e) out of the hot lane at zero clock savings — the three stage-map driver runs were the entire 222.85s, the stubs were never the cost.
+
+#### Scenario: death_class_guards_stay_hot
+
+- **WHEN** a test is marked integration
+- **THEN** it SHALL be one that loads a real model or runs the driver end-to-end — the three real stage-map driver runs, and nothing cheaper
+- **AND** the lane0 stub fixtures born from each death class SHALL remain in the default lane, because the default lane is where the suite actually runs
+
+### Requirement: integration_lane_mandatory_before_fire
+
+The integration lane (`pytest -m integration`) SHALL be green before staging any fire, and a default-lane run that deselects it SHALL announce the deselection loudly rather than silently. The fire staging proof SHALL carry the integration-lane record.
+
+#### Scenario: fire_requires_integration_lane
+
+- **WHEN** a fire is staged
+- **THEN** the staging proof includes a green integration-lane run and the hot-lane clock record
+- **AND** a default run that skipped integration without the loud banner is refused as a staging artifact
 
 ### Requirement: no_production_fire_in_tests
 
