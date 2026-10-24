@@ -210,6 +210,16 @@ Every fire SHALL announce its poll cadence at launch with a named owner, alongsi
 
 `launch.env` SHALL have exactly one writer at a time: concurrent appends are a provenance defect, not a race to tolerate — v2's launch.env ended in a corrupted bare-`?` append line. Writers SHALL serialize (one append path) or write atomically (write-then-replace); a malformed launch.env invalidates the artifact's provenance block.
 
+#### Scenario: corrupted_provenance_invalidates_artifact
+
+- **WHEN** launch.env carries a corrupted line (v2's bare-`?` append)
+- **THEN** the artifact's provenance block is refused as evidence until the writer defect is fixed — provenance that can be interleaved by two writers is not provenance
+
 ### Requirement: infrastructure_interception_proof
 
 A test that overrides `PATH` to intercept a command which launches real infrastructure SHALL prove the interception took effect in-band — assert the resolved binary is the shim — before invoking the code under test. A silent fall-through to the real binary is not a red test; it is real infrastructure with the test's own timeout as the only alarm.
+
+#### Scenario: shim_proven_before_code_runs
+
+- **WHEN** a test shims a command that launches real infrastructure (docker, container runtimes)
+- **THEN** the test SHALL assert the resolved binary is the shim in the same environment handed to the code under test, before that code runs — a standalone probe that passes while the real test falls through is the exact failure the rule catches
