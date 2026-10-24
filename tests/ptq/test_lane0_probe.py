@@ -1160,3 +1160,29 @@ def test_tau_max_override_is_fail_closed(tool, monkeypatch) -> None:
     monkeypatch.setenv("TAU_MAX", "0.5")
     out = tool.robust_clip_shrink(np.array([1.0, 2.0]), gamma=0.0)
     assert out.max() == pytest.approx(0.5)
+
+
+def test_cotangent_grad_sq_sum_matches_the_inline_form_it_replaced(tool) -> None:
+    """The extraction is behaviour-preserving, pinned against the old expression."""
+    import torch
+
+    g = torch.randn(3, 5, requires_grad=True)
+    expected = (g.detach().reshape(-1, g.shape[-1]).float().cpu().numpy() ** 2).sum(axis=0)
+    assert np.allclose(tool.cotangent_grad_sq_sum(g), expected)
+
+
+def test_cotangent_and_ce_forms_are_different_documented_quantities(tool) -> None:
+    """The two gradient forms must not collapse into one another.
+
+    `cotangent_grad_sq_sum` accumulates what a caller's head routed in;
+    `ce_gradient_statistic` runs its own bare-block CE. If a refactor ever made
+    them interchangeable, one of the two documented forms would have silently
+    become a reimplementation of the other -- the class this sweep exists for.
+    """
+    import inspect
+
+    cot = inspect.signature(tool.cotangent_grad_sq_sum)
+    ce = inspect.signature(tool.ce_gradient_statistic)
+    assert list(cot.parameters) == ["g"], cot
+    assert list(ce.parameters) == ["linear", "x", "labels"], ce
+    assert "Eq. 2" in tool.cotangent_grad_sq_sum.__doc__

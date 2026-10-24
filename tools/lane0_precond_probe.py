@@ -249,6 +249,29 @@ def uniform_cotangent_statistic(linear: Any, x: Any) -> np.ndarray:
     return (grad**2).mean(axis=0)
 
 
+def cotangent_grad_sq_sum(g: Any) -> np.ndarray:
+    """Per-feature sum of squared output-cotangents from a head-routed backward.
+
+    Derivation: [NQ] Eq. 2, the K-FAC diagonal reading -- the output-side
+    preconditioner is ``sqrt(E[g^2])`` with ``g`` the loss gradient at the layer's
+    OUTPUT, taken from a real cross-entropy backward routed through the model
+    head (App. C :3011). This is the caller-supplied head/cotangent form the
+    alignment spec blesses for bare-block use.
+
+    ``ce_gradient_statistic`` is the OTHER documented form: a self-contained
+    bare-block CE that runs its own forward and backward and therefore never sees
+    a caller's cotangent. The two compute different quantities and neither
+    reimplements the other, which is why this is a separate named function rather
+    than a fold into that one.
+
+    Named rather than inlined because the inline form repeated this expression
+    twice inside a single lambda, where a def-listing sweep cannot see it and the
+    name cannot tell the truth about what is computed.
+    """
+    arr = g.detach().reshape(-1, g.shape[-1]).float().cpu().numpy()
+    return (arr**2).sum(axis=0)
+
+
 def ce_gradient_statistic(linear: Any, x: Any, labels: Any) -> np.ndarray:
     """Per-feature mean square of the REAL cross-entropy weight gradient.
 
@@ -774,12 +797,9 @@ def collect_intended_statistics(
                 out.register_hook(
                     lambda g, key=key: grads.__setitem__(
                         key,
-                        (g.detach().reshape(-1, g.shape[-1]).float().cpu().numpy() ** 2).sum(axis=0)
+                        cotangent_grad_sq_sum(g)
                         if grads[key] is None
-                        else grads[key]
-                        + (g.detach().reshape(-1, g.shape[-1]).float().cpu().numpy() ** 2).sum(
-                            axis=0
-                        ),
+                        else grads[key] + cotangent_grad_sq_sum(g),
                     )
                 )
 
