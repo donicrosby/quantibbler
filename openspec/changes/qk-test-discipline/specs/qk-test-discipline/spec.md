@@ -4,7 +4,7 @@
 
 ### Requirement: suite_time_budget
 
-The default (hot) lane SHALL complete within 30 seconds of wall time per 100 collected tests, measured with the BLAS determinism pin, and recorded in the run report. The budget is a hard gate: a suite over budget is red, not advisory.
+The default (hot) lane SHALL complete within 30 seconds of wall time per 100 collected tests, measured with the BLAS determinism pin, and recorded in the run report. The budget is a hard gate: a suite over budget is red, not advisory. The measurement SHALL be serial (`-n 0` / default execution) — pytest-xdist parallel wall time is a different quantity with different variance, and is never the budget's denominator.
 
 #### Scenario: over_budget_suite_is_red
 
