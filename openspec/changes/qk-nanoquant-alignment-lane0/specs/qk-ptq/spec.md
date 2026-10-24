@@ -215,7 +215,14 @@ A guard whose verification step fails SHALL refuse, never proceed. Three states:
 - **WHEN** a guard's verification call returns rc≠0 or the payload lands on stderr
 - **THEN** the guard refuses with the captured stderr in the refusal message — both collapse modes produce exit 2, not 0
 - **AND** the fix lands red-first against two stub fixtures: one answering rc≠0, one emitting the payload on stderr; both currently yield rc=0, both SHALL yield exit 2 after the fix
-- **AND** the stub logs argv per call, so form-selective dispatch cannot hide inside a pass
+- **AND** the stub logs three lines per invocation — argv, emitted stdout, rc — so form-selective dispatch cannot hide inside a pass
+
+#### Scenario: seam_oracle_is_dry_run_rc
+
+- **WHEN** a wrapper gate test runs
+- **THEN** the wrapper SHALL execute under `DRY_RUN=1` — DRY_RUN walks every gate in order (digest probe, rocm-tag, name guard) and exits before anything can launch, so the run's rc IS the seam oracle at zero launch risk
+- **AND** the stub SHALL be form-selective: the `{{.Id}}` probe answers with the pinned digest via the `LANE0_IMAGE_DIGEST_ALLOW` door (a stub must satisfy the pin to reach the guard), and the name-inspect answers with a held payload
+- **AND** one run proves the seam and the guard together: rc=0 means the seam is dead and the wrapper talked to the real daemon; rc=2 means the seam is alive AND the guard refused through the full chain — the 2026-10-24 dead-seam run read as a guard pass precisely because nothing stubby ever answered
 
 #### Scenario: fail_direction_audit_required
 
