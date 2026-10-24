@@ -605,7 +605,7 @@ def _tune_fp(
     Returns the honest stage record (steps, gradient/residual norms, the fp
     weight delta versus the pre-tune snapshot) for the run artifact.
 
-    Bulletproofing (r137 run #3b autopsy): a single inf/NaN gradient in
+    Bulletproofing (measured): a single inf/NaN gradient in
     bf16 poisons EVERY parameter of a tensor at the next opt.step(), and
     the NaN then cascades through statistics/preconditioning into the
     solver (observed: an entire o_proj weight all-NaN by the lb_admm
@@ -790,7 +790,7 @@ def _tune_latent_ste(
     }
     if not params:
         return stats
-    # Per-tensor RELATIVE lr (r137-v7 post-mortem, user-directed fix): one
+    # Per-tensor RELATIVE lr: one
     # absolute lr for all four tensors let Adam step s1 — measured
     # post-polish scale class 1e-7 vs s2's 1e4 — by ~5e4x its own magnitude
     # per step, taking block-26 o_proj from nr 0.475 to 4.5e4 (cos negative)
@@ -847,7 +847,7 @@ def _tune_latent_ste(
             rec["residual_after"] = residual_before
             rec["gradient_norm"] = 0.0
         return stats
-    # Same finiteness armor as TuneFP (r137 run #3b): a NaN loss or a
+    # Same finiteness armor as TuneFP: a NaN loss or a
     # poisoned step must not kill the run or corrupt latents that the
     # exported binaries come from.
     snapshot = {name: [p.detach().clone() for p in _fac_params(fac)] for name, fac in facs.items()}
@@ -1211,7 +1211,7 @@ def reconstruct_block(
             del teacher
     else:
         teacher_source = teacher_source or "caller_supplied_frozen_capture"
-    # Boundary finiteness check (r137 run #3b autopsy): non-finite inputs
+    # Boundary finiteness check (measured): non-finite inputs
     # here mean the PREVIOUS block's quantized artifact is broken (its
     # forward produces inf/NaN), and every statistic, solve, and export
     # downstream would inherit the poison. Fail at the exact boundary,
@@ -1350,7 +1350,7 @@ def reconstruct_block(
         w_tilde = (d_out_t[:, None] * w) * d_in_t[None, :]
         w_tilde = w_tilde.astype(dt)
         if cfg.solver == "svd":
-            # Ablation-measured path (v8 post-mortem): the truncated-SVD
+            # Ablation-measured path: the truncated-SVD
             # warm start itself, fed through the identical balance+polish.
             # Lands within ~0.003 cos of the full ADMM run on production
             # layers while skipping 66-83 s/layer of iterations at rank
@@ -1377,7 +1377,7 @@ def reconstruct_block(
             cfg,
         )
         _record_solver_probe(name, w, bal, res, cfg)
-        # Greedy bit-flip polish (r137 root-cause line of work): the
+        # Greedy bit-flip polish: the
         # continuous stages never perform a discrete move on the packed
         # binaries (measured: 4,096 STE steps flip zero sign bits), so the
         # stored artifacts carried whatever signs the ADMM init produced
@@ -1633,7 +1633,7 @@ def check_layer_magnitude(name, U, V, s1, s2, W, cfg) -> float:
     The norm ratio (not a median of entries) is the gated statistic:
     scale-floor rows from degenerate statistics leave it untouched, while
     the balance-amplified divergence it exists to catch is an energy
-    explosion by mechanism (r137 block 0 measured ~250x on the median and
+    explosion by mechanism (measured: block 0 ~250x on the median and
     more in norm).
 
     Called at balance time per layer, this trips within the first minutes

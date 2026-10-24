@@ -100,8 +100,8 @@ def verdict(ratio: Any) -> str:
 
     The missing / non-finite check runs FIRST and is the only thing that can
     catch a NaN ratio: every comparison against NaN is False, so a bare
-    ``ratio > COLLAPSE_LINE`` gate silently passes the exact shape that
-    r137-v3/v4 wrote into their reports. A missing (``None``) or non-finite
+    ``ratio > COLLAPSE_LINE`` gate silently passes the exact shape real
+    collapsed runs produce. A missing (``None``) or non-finite
     ratio is a measurement or numerics defect in the artifact path — there is
     no legitimate successful run that produces one.
     """
@@ -265,7 +265,7 @@ def abort_report(exc: Any, identity_fields: dict, history: list) -> dict:
     ``identity_fields`` is everything the driver knows at the moment of the
     abort — model identity, regime, the ``probe`` block without its history,
     wall time. ``history`` is the probe trajectory so far: an aborted run keeps
-    it, because the trajectory that ended in a collapse is the autopsy nobody
+    it, because the trajectory that ended in a collapse is the forensic record nobody
     otherwise has. The unmeasured end-of-run numerics are forced to ``None``
     and the status to ``FAILED`` here rather than at the call site, so "an
     aborted run is never reported healthy" is structural instead of copied by
@@ -635,13 +635,10 @@ def provenance(
 ) -> dict:
     """Report provenance fields derived from the ACTUAL run arguments.
 
-    The driver used to hardcode ``regime.artifact`` as
-    ``"qpk1: +-1 bitplanes + float16 scales"`` while ``--scale-dtype`` had
-    already defaulted to float32, so every forensic report lied about its own
-    artifact, and ``solver`` (the only field distinguishing the r512-svd line
-    from the r137 line) was never recorded at all. These strings are emitted
-    from the arguments rather than from a constant, so a report cannot
-    disagree with the run it describes.
+    These strings are emitted from the run arguments rather than from a
+    constant, so a report cannot disagree with the run it describes (a past
+    hardcode shipped reports mislabeling their own storage dtype, and
+    ``solver`` went unrecorded entirely).
     """
     return {
         "solver": solver,

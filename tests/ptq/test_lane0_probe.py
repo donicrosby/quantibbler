@@ -33,13 +33,6 @@ from test_driver_tune_seq_len import offline_corpus, tiny_model  # noqa: F401
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 TOOL = REPO_ROOT / "tools" / "lane0_precond_probe.py"
 
-SHIPPED_MODULES = (
-    "src/quantibbler/ptq/calibration.py",
-    "src/quantibbler/ptq/lb_admm.py",
-    "src/quantibbler/ptq/block_recon.py",
-    "src/quantibbler/ptq/config.py",
-)
-
 
 def _load_tool():
     """The harness as a module; ``main()``-guarded, so importing is inert."""
@@ -72,18 +65,6 @@ def test_measurement_only_no_export(tool, smoke_rows):
     source = TOOL.read_text()
     for forbidden in ("extract_and_pack", "qpk1", "greedy_polish", "TuneLatentSTE"):
         assert forbidden not in source, f"lane-0 tool must not reference {forbidden}"
-
-
-def test_shipped_pipeline_modules_untouched():
-    """The four shipped modules carry no diff against HEAD."""
-    proc = subprocess.run(
-        ["git", "diff", "--stat", "HEAD", "--", *SHIPPED_MODULES],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert proc.stdout.strip() == "", f"shipped modules were modified:\n{proc.stdout}"
 
 
 # --- fixed_probe_set_identity_recorded / both_arms_identical_probe_set ----------

@@ -1,7 +1,7 @@
 """Greedy bit-flip polish: discrete local search on the stored objective.
 
 The pipeline's continuous stages (LB-ADMM init, TuneLatentSTE) never
-perform a single discrete move on the packed binaries (measured, r137:
+perform a single discrete move on the packed binaries (measured:
 4,096 STE steps flipped zero sign bits; exported artifacts carried
 per-layer cos ~0.02-0.17 with the fp weights). This module closes that
 gap: coordinate-descent sign flips on ``Ub``/``Vb`` minimizing
@@ -32,7 +32,7 @@ single corrective GEMM. Descent decisions match the naive path up to
 float64 associativity (parity-tested against a reference copy of the
 naive loop). Measured on Qwen3-0.6B block-0 production geometry: cos
 0.09 -> 0.51 (q_proj), 0.08 -> 0.45 (gate_proj), 0.17 -> 0.39
-(down_proj); ~10 s/layer naive at r137, fraction-of-a-second class at
+(down_proj); ~10 s/layer naive, fraction-of-a-second class at
 any rank with the Gram table.
 """
 
@@ -146,8 +146,8 @@ def greedy_polish(
             R -= ub_s1 @ (dv * s2[:, None]).T
         total_flips += v_flips
         # --- alternating least-squares scale refit (bits held) ---
-        # Two hard invariants, both learned from r137-v4 (108,691 negative
-        # s1 entries; s1~1e-4 paired against s2>=233):
+        # Two hard invariants, both from measured polish excursions
+        # (108,691 negative s1 entries; s1~1e-4 paired against s2>=233):
         # (1) SIGN-FOLD: the per-row LS optimum may come out negative when
         #     bits sit anti-aligned; a negative scale is legal in weight
         #     space but inverts that row of the effective matrix and (at
@@ -158,7 +158,7 @@ def greedy_polish(
         #     denominator degenerate and the refit explodes the paired
         #     scale. Reject any refit that moves a scale outside
         #     [1/8x, 8x] of its pre-refit value.
-        # (3) ENERGY GATE (r137-v7 post-mortem): the trust region turned
+        # (3) ENERGY GATE (measured): the trust region turned
         #     explosion into "finite but insane" — degenerate columns'
         #     refits rode the 8x-per-round ceiling to s2max 2.7e7
         #     (|Wq|/|W| median 1888, ppl ratio 5518). A binary row/column
@@ -195,7 +195,7 @@ def greedy_polish(
     # Exit re-balance: collapse any s1/s2 scale-class split WITHOUT
     # touching the product. diag(s1)·Ub·Vbᵀ·diag(s2) is EXACTLY invariant
     # under s1*=gamma, s2/=gamma (float64 rounding aside), so pick the
-    # geometric mean: r137-v7 measured polish legitimately exiting at
+    # geometric mean: polish measurably exits at
     # s1~1e-7 / s2~1e4 — an 11-decade split that is fine for the product
     # but hands any absolute-lr consumer two incomparable parameter
     # classes. Downstream stages are now relative-lr, so this is hygiene

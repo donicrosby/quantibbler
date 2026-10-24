@@ -307,7 +307,7 @@ def robust_diag(d_in_raw, d_out_raw=None, *, tau=None, gamma=0.2):
     cap at max(D) is a no-op and clipping a concentrated vector measurably
     degrades healthy quantization (tiny-gate logit 0.795 -> 1.43; see the
     qk-divergence-guards change). Block-0-style heavy tails (raw embedding
-    statistics, r137 incident) exceed the gate by orders of magnitude and
+    statistics) exceed the gate by orders of magnitude and
     are clipped. Then shrinkage toward the clipped mean with coefficient
     ``gamma``: ``D <- (1-gamma)*clip(D, tau) + gamma*mean(clip(D, tau))``.
     A tiny positive floor keeps zero-variance statistics finite and

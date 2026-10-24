@@ -121,7 +121,7 @@ class PTQConfig:
             initializations (pre-STE/KD), and the measured honest range on
             production layers spans 0.0002-6.3 across preconditioner
             regimes and solver basins. Default 10000.0 passes that range
-            with >=5x margin on both sides and trips the r137 block-0
+            with >=5x margin on both sides and trips the measured block-0
             divergence (6.3e4) with ~6x margin.
         admm_max_iter: K, the ADMM iteration cap ([NQ] App. C: 400).
         rho_start / rho_end: linear penalty schedule endpoints over K
@@ -162,7 +162,7 @@ class PTQConfig:
     divergence_band_factor: float = 10000.0
     polish_rounds: int = 4
     admm_max_iter: int = 400
-    # SVD path (v8 post-mortem ablation): plain truncated SVD warm start
+    # SVD path (ablation-measured): plain truncated SVD warm start
     # through the same balance+polish lands within 0.003 cos of the full
     # 400-iteration LB-ADMM (measured on production layers) while ADMM
     # spends 66-83 s/layer at rank 512. Off = SVD init, balance, polish.

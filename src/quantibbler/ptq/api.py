@@ -158,11 +158,11 @@ def quantize_model(
     # scales, forward equality at float64 round-off, D4).
     scale_dt = np.float16 if config.scale_dtype == "float16" else np.float32
     for st in layers.values():
-        # Storage-cast finiteness (r137-v5 post-mortem): KD's f64 scales
+        # Storage-cast finiteness (measured): KD's f64 scales
         # were all finite (armor never fired), then astype(float16) sent
         # 54/196 layers' s2 to inf — anything above 65,504 overflows and
         # the cast is silent. Default storage is now float32 (tag 2,
-        # +~0.03 BPW at r137); if float16 is ever opted back in, an
+        # +~0.03 BPW); if float16 is ever opted back in, an
         # overflow must die HERE with a message naming the real stage,
         # not downstream at the export gate.
         s1_cast = st.s1.astype(scale_dt).astype(np.float64)

@@ -362,8 +362,8 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
     # Scale normalization: the rho schedule and epsilon are ABSOLUTE
     # constants (A-2/A-3), so the solve must happen in the O(1) scale
     # class they were calibrated in. Robust preconditioning on real
-    # calibration statistics can crush ||W~||_F to ~1e-4 (r137: s1~2e-4,
-    # s2~0.3), where the consensus term dominates the data term by ~1e8
+    # calibration statistics can crush ||W~||_F to ~1e-4 (measured:
+    # s1~2e-4, s2~0.3), where the consensus term dominates the data term by ~1e8
     # and the solve "converges" to mush in a handful of iterations
     # (measured: 4/400 iterations, binary cos 0.02 — every production
     # artifact ever exported had cos ~0.001 per layer). Solving on

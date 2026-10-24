@@ -113,7 +113,7 @@ def calibrate_scales(
     pre_s2 = {n: t.numpy().copy() for n, t in s2_params.items()}
     for t in (*s1_params.values(), *s2_params.values()):
         t.requires_grad_(True)
-    # Per-tensor RELATIVE lr (r137-v7 post-mortem, user-directed fix): an
+    # Per-tensor RELATIVE lr: an
     # absolute lr 1e-3 is irrelevant to the tensors it steps — at polish
     # exit s1 can live at 1e-7 while s2 lives at 1e4, so one absolute rate
     # is 1e4x too small for one side and 1e4x too big for the other. Each
@@ -241,7 +241,7 @@ def calibrate_scales(
     # Write the tuned scales back into the layer artifacts (float64).
     tmp.cleanup()  # release the disk-backed teacher cache
 
-    # Finiteness armor + trust region (r137-v4 post-mortem): this stage had
+    # Finiteness armor + trust region (measured): this stage had
     # NO armor while every tuning stage upstream got it, and its absolute
     # lr (1e-3, 128 steps) is orders of magnitude larger than the polished
     # scales it tunes (q_proj s1 ~ 1e-2..1e-1). One early blow-up poisons

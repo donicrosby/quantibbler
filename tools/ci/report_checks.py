@@ -259,7 +259,7 @@ def abort_findings(
     if not isinstance(history, list) or not history:
         problems.append(
             "the abort report carries no probe history: the trajectory that collapsed "
-            "is the autopsy"
+            "is the forensic record"
         )
     elif history[-1].get("depth") != depth or history[-1].get("block") != abort.get("block"):
         problems.append(

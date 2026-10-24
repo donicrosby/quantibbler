@@ -1,7 +1,7 @@
 """Per-block solve checkpoints for reconstruct_model (resume mid-run).
 
-Rationale (2026-10 session data): four consecutive production runs
-(r137 v3-v6) died in the pipeline TAIL - KD, eval, storage cast, export
+Rationale: four consecutive production runs
+died in the pipeline TAIL - KD, eval, storage cast, export
 - after the ~91-minute solver had finished, burning the entire solve
 each time. The solve is deterministic and block-sequential, so its
 results are exactly resumable: finished blocks are stored losslessly
