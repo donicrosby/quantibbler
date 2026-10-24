@@ -45,6 +45,10 @@ quantibbler-kernels = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not integration'"
+markers = [
+    "integration: real-model/driver end-to-end runs (minutes each). Excluded from the default run; `pytest -m integration` is the mandatory pre-fire staging lane.",
+]
 
 [tool.ruff]
 line-length = 100

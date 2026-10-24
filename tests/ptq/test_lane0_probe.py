@@ -753,6 +753,7 @@ def test_telemetry_stop_takes_a_final_sample_with_the_live_phase(tool, tmp_path)
     assert calls[-1] == "stats_intended", calls
 
 
+@pytest.mark.integration
 def test_build_real_arms_runs_end_to_end_on_a_stubbed_corpus(tool, tiny_model, monkeypatch):  # noqa: F811
     """The only end-to-end exercise of build_real_arms, and why it has to exist.
 
@@ -793,6 +794,7 @@ def test_build_real_arms_runs_end_to_end_on_a_stubbed_corpus(tool, tiny_model, m
     assert diagnostics["packed_batches"] == 1
 
 
+@pytest.mark.integration
 def test_shipped_arm_is_row_chunked_like_production(tool, tiny_model, monkeypatch):  # noqa: F811
     """The shipped arm must run in the configuration the pipeline runs it in.
 
@@ -865,6 +867,7 @@ def test_arm_a_threads_the_config_into_robust_diag(tool, monkeypatch):
     assert all(kw.get("tau") == 0.5 and kw.get("gamma") == 0.35 for kw in seen), seen
 
 
+@pytest.mark.integration
 def test_arm_a_captures_each_probed_block_separately(tool, tiny_model, monkeypatch):  # noqa: F811
     """Two probed blocks at NON-ZERO indices, with per-layer sentinels.
 
@@ -942,6 +945,7 @@ def test_arm_a_captures_each_probed_block_separately(tool, tiny_model, monkeypat
     # anyway, so the scaling is belt-and-braces, not the assertion.
 
 
+@pytest.mark.integration
 def test_build_real_arms_runs_two_batches(tool, tiny_model, monkeypatch):  # noqa: F811
     """The batch count the CPU suite must have run before any fire runs it.
 
