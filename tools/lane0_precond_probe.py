@@ -504,7 +504,17 @@ def load_layer_weight(model_id: str, block_idx: int, layer_name: str) -> tuple[n
         )
         for path in sorted(glob.glob(pattern)):
             with safe_open(path, framework="pt") as handle:
-                if key in handle:
+                # `safe_open` is not iterable: `key in handle` raises TypeError.
+                # `keys()` is the API. This sat one line below the hub/ offset and
+                # was unreachable until that was fixed -- the glob never matched,
+                # so this line had never executed. Same class, one line deeper,
+                # and the end-to-end fixture is what would have caught both.
+                #
+                # `noqa` because SIM118's autofix is to *remove* `.keys()` -- the
+                # rule assumes a mapping, and `safe_open` is precisely the object
+                # that is not one. Applying it silently restores the TypeError, so
+                # this is the rare case where the linter's fix is the bug.
+                if key in handle.keys():  # noqa: SIM118
                     weight = handle.get_slice(key)[:, :].float().numpy().astype(np.float64)
                     return np.ascontiguousarray(weight), pathlib.Path(path).name
     raise FileNotFoundError(f"{key} not found in any offline HF cache root: {_hf_cache_roots()}")

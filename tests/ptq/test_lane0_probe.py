@@ -991,3 +991,35 @@ def test_cache_root_normalizes_hf_home_to_its_hub_dir(tool, tmp_path):
     bare = tmp_path / "empty"
     bare.mkdir()
     assert tool._as_hub_root(bare) == bare
+
+
+def test_load_layer_weight_walks_the_full_glob_and_key_path(tool, tmp_path, monkeypatch):
+    """The whole target-load path, through a real safetensors file.
+
+    This is the fixture whose absence cost two fires. The first defect (`hub/`
+    offset) concealed the second (`key in handle`, where `safe_open` is not
+    iterable) because the glob never matched, so the `safe_open` call had never
+    executed. A fixture that only asserts the normalization rule -- which is what
+    I landed first -- leaves the glob, the open, the key probe and the slice all
+    unexercised, and the next defect one line deeper is found by a fire again.
+
+    Staged at the shape the container actually mounts: `HF_HOME=/hf` is the
+    directory *above* the hub, so the shard lives at `hub/models--…/snapshots/…/`
+    one level down.
+    """
+    import torch
+    from safetensors.torch import save_file
+
+    root = tmp_path / "hf"
+    shard_dir = root / "hub" / "models--Qwen--Qwen3-0.6B" / "snapshots" / "c1899de"
+    shard_dir.mkdir(parents=True)
+    key = "model.layers.0.self_attn.q_proj.weight"
+    save_file({key: torch.zeros(4, 8, dtype=torch.bfloat16)}, str(shard_dir / "model.safetensors"))
+
+    monkeypatch.setenv("HF_HUB_CACHE", str(root))
+    monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
+
+    weight, shard = tool.load_layer_weight("Qwen/Qwen3-0.6B", 0, "self_attn.q_proj")
+    assert weight.shape == (4, 8), weight.shape
+    assert weight.dtype == np.float64, weight.dtype
+    assert shard == "model.safetensors", shard
