@@ -14,13 +14,14 @@ The default (hot) lane SHALL complete within 30 seconds of wall time per 100 col
 
 ### Requirement: integration_marker_admission
 
-`integration` SHALL mean the test loads a real model or executes the driver end-to-end. A CPU stub harness test SHALL be classified as a unit test — calling `build_real_arms` on a `tiny_model` stub is a harness unit test, and that classification is its entire value. Over-marking is a red: it moved the guards born from the last four deaths (the two-batch Arm B fixture, the four-row surface-table pin, the capture-binding sentinel, the stubbed-corpus e2e) out of the hot lane at zero clock savings — the three stage-map driver runs were the entire 222.85s, the stubs were never the cost.
+`integration` SHALL mean the test loads a real model or executes the driver end-to-end. A CPU stub harness test SHALL be classified as a unit test — calling `build_real_arms` on a `tiny_model` stub is a harness unit test, and that classification is its entire value.
 
 #### Scenario: death_class_guards_stay_hot
 
 - **WHEN** a test is marked integration
 - **THEN** it SHALL be one that loads a real model or runs the driver end-to-end — the three real stage-map driver runs, and nothing cheaper
 - **AND** the lane0 stub fixtures born from each death class SHALL remain in the default lane, because the default lane is where the suite actually runs
+- **AND** over-marking is a red: the 2026-10-24 sweep moved the two-batch Arm B fixture, the four-row surface-table pin, the capture-binding sentinel, and the stubbed-corpus e2e off the hot lane at zero clock savings — the three stage-map driver runs were the entire 222.85s, the stubs were never the cost
 
 ### Requirement: integration_lane_mandatory_before_fire
 
