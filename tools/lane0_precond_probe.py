@@ -1078,10 +1078,23 @@ def build_real_arms(
 
     collected: dict[int, list[Any]] = {idx: [] for idx in block_indices}
 
-    def _collect(mod, inp, idx: int = 0) -> None:  # noqa: ANN001
-        collected[idx].append(inp[0].detach())
+    # The collector binds its index at REGISTRATION, through a closure. A default
+    # argument cannot do it: register_forward_pre_hook calls the hook with
+    # (module, inputs) and nothing else, so `idx` took its default on every
+    # firing -- all ten probed blocks appended into collected[0], the other nine
+    # keys stayed empty, and the first non-zero probe index crashed on None.
+    # The counterfactual is worse than the crash: block 0's statistic would have
+    # been computed on an interleaved cat of ten different layers' activations,
+    # a confident number measuring no layer that exists.
+    def _collector_for(index: int) -> Any:
+        def _collect(mod, inp) -> None:  # noqa: ANN001
+            collected[index].append(inp[0].detach())
 
-    handles = [trunk.layers[idx].register_forward_pre_hook(_collect) for idx in block_indices]
+        return _collect
+
+    handles = [
+        trunk.layers[idx].register_forward_pre_hook(_collector_for(idx)) for idx in block_indices
+    ]
     try:
         if telemetry is not None:
             telemetry.phase = "capture"

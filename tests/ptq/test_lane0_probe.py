@@ -863,3 +863,80 @@ def test_arm_a_threads_the_config_into_robust_diag(tool, monkeypatch):
     tool.run_arms((("synthetic", 0, "planted-rank16"),), seed=0, cfg=cfg)
     assert seen, "robust_diag was never called"
     assert all(kw.get("tau") == 0.5 and kw.get("gamma") == 0.35 for kw in seen), seen
+
+
+def test_arm_a_captures_each_probed_block_separately(tool, tiny_model, monkeypatch):  # noqa: F811
+    """Two probed blocks at NON-ZERO indices, with per-layer sentinels.
+
+    The single-block stub at index 0 passed while every hook appended into
+    collected[0] -- with only block 0 probed, the wrong binding is accidentally
+    correct. Each layer here scales its input by (index + 2), so the batch
+    captured for block k must be layer k's own input. Cross-wiring fails loudly
+    instead of emitting a confident statistic about no layer that exists.
+    """
+    q = _driver()
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    model = _tiny_fp64_model(tiny_model)
+    trunk = model.get_decoder() if hasattr(model, "get_decoder") else model.model
+    assert len(trunk.layers) >= 3, "need layers 1 and 2 to be distinct"
+
+    # Scale each layer's input by a per-index sentinel via a pre-hook, keeping
+    # the real layers intact: replacing forward would strip the parameters and
+    # the statistics backward has nothing to require grad.
+    def _sentinel(index: int):  # noqa: ANN202
+        def _scale(mod, inp):  # noqa: ANN001
+            return (inp[0] * (index + 2),)
+
+        return _scale
+
+    sentinels = [
+        layer.register_forward_pre_hook(_sentinel(k)) for k, layer in enumerate(trunk.layers)
+    ]
+
+    vocab = int(model.config.vocab_size)
+    monkeypatch.setattr(q, "find_wikitext_shards", lambda split: ["stub"])  # noqa: ARG005
+    monkeypatch.setattr(q, "load_wikitext_text", lambda shards: "stub text")  # noqa: ARG005
+
+    def _stub_tokenizer(*a, **k):  # noqa: ARG001
+        return _FixedTokenizer(8 * 2048, vocab)
+
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", staticmethod(_stub_tokenizer))
+    monkeypatch.setattr(
+        AutoModelForCausalLM,
+        "from_pretrained",
+        staticmethod(lambda *a, **k: model),  # noqa: ARG005
+    )
+
+    seen: dict[int, object] = {}
+    real_collect = tool.collect_stats
+
+    def _spy(block, batches, **kwargs):  # noqa: ANN001, ANN202
+        for idx, layer in enumerate(trunk.layers):
+            if block.inner is layer:
+                seen[idx] = batches[0]
+        return real_collect(block, batches, **kwargs)
+
+    monkeypatch.setattr(tool, "collect_stats", _spy)
+    tool.build_real_arms(
+        (("Qwen/Qwen3-0.6B", 1, "mlp.down_proj"), ("Qwen/Qwen3-0.6B", 2, "mlp.down_proj")),
+        device=None,
+        chunk_tokens=8,
+        max_batches=1,
+    )
+    for handle in sentinels:
+        handle.remove()
+    assert set(seen) == {1, 2}, f"blocks 1 and 2 were not both captured: {sorted(seen)}"
+    # The discriminating property: block 1 and block 2 must have received
+    # DIFFERENT activations. Under the default-argument bug every hook appended
+    # into collected[0], so both would be handed the same tensor -- and with
+    # only block 0 probed, that wrongness is invisible.
+    assert not torch.allclose(seen[1], seen[2]), (
+        "two blocks were handed the same activations -- the capture is cross-wired"
+    )
+    # Distinctness is the discriminating property, and it is enough: under the
+    # default-argument bug every hook appended into collected[0], so both blocks
+    # were handed the same tensor (or None). The sentinels only have to make
+    # layer 1's input differ from layer 2's -- which the real layers would do
+    # anyway, so the scaling is belt-and-braces, not the assertion.
