@@ -875,8 +875,10 @@ def main() -> int:
         default="auto",
         choices=("auto", "cpu", "cuda"),
         help="where the torch stages run (capture, TuneFP, STE, eval). 'auto' takes "
-        "the accelerator when torch can see one and falls back to CPU otherwise, so "
-        "a CPU run is unchanged and a GPU run is one flag. The per-linear SOLVER "
+        "the accelerator or REFUSES -- it never falls back to CPU, because a silent "
+        "fallback is how a production fire ran 21 hours on one socket while its own "
+        "launch record printed device=cpu and nobody read it. A CPU run is still "
+        "available by explicit name: --device cpu. The per-linear SOLVER "
         "stays NumPy/CPU either way: its weights already hand off via .cpu().numpy() "
         "and back, roughly 200 crossings of small matrices across the whole run, "
         "which costs seconds rather than hours -- so moving the autograd stages does "
@@ -898,11 +900,24 @@ def main() -> int:
     # Resolve ONCE, from the same predicate torch uses: a second source of truth
     # for "which device" can disagree with where the parameters actually are, and
     # the mismatch then surfaces frames away from its cause.
-    _device = (
-        "cuda"
-        if (args.device == "auto" and torch.cuda.is_available())
-        else ("cpu" if args.device == "auto" else args.device)
-    )
+    # 'auto' means "the accelerator, or refuse". It deliberately does not fall
+    # back: `:latest` carries CUDA-wheel torch, so on this AMD host
+    # torch.cuda.is_available() is False and 'auto' used to resolve to cpu
+    # without a word -- which is how a production fire spent 21 hours on one
+    # socket while its launch record said `device=cpu`. An explicit
+    # `--device cpu` is still honest and still available; what is not available
+    # is arriving there by accident. Same rule as the solver backend: the
+    # non-accelerator path is reachable by explicit name only.
+    if args.device == "auto" and not torch.cuda.is_available():
+        raise SystemExit(
+            "error: --device auto found no accelerator "
+            "(torch.cuda.is_available()=False). This host is AMD/ROCm: the container "
+            "needs GPU=1 and a rocm-tagged image "
+            "(IMAGE=quantibbler-ptq:rocm-official), or pass --device cpu to ask for "
+            "a CPU run explicitly. Refusing to run the autograd stages on CPU by "
+            "default."
+        )
+    _device = "cuda" if args.device == "auto" else args.device
     causal.to(_device)
     from quantibbler.ptq.device_audit import install_device_auditor
 

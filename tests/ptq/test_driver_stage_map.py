@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from test_driver_tune_seq_len import (  # noqa: F401  (pytest fixtures)
     BATCH,
     SEQ_LEN,
@@ -69,6 +70,7 @@ def _max_eval_batches(
     return len(ids) // seq_len // BATCH
 
 
+@pytest.mark.integration
 def test_paper_faithful_run_records_the_algorithm1_stage_map(
     offline_corpus,  # noqa: ANN001, F811
     tiny_model,  # noqa: ANN001, F811
@@ -275,6 +277,7 @@ def test_paper_faithful_run_records_the_algorithm1_stage_map(
             assert isinstance(rec["zero_crossings"], bool), name
 
 
+@pytest.mark.integration
 def test_a_faithful_claim_on_the_svd_ablation_is_denied_by_the_computed_verdict(
     offline_corpus,  # noqa: ANN001, F811
     tiny_model,  # noqa: ANN001, F811
@@ -333,6 +336,7 @@ def test_diagnostic_run_is_not_labeled_paper_faithful(
     assert json.dumps(report, allow_nan=False)
 
 
+@pytest.mark.integration
 def test_a_split_tune_geometry_is_named_as_a_runtime_deviation(
     offline_corpus,  # noqa: ANN001, F811
     tiny_model,  # noqa: ANN001, F811

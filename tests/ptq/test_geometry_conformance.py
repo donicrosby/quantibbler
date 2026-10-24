@@ -210,6 +210,11 @@ def test_driver_reports_sequences_for_the_calibration_knob(offline_corpus, tiny_
     cmd = [
         sys.executable,
         str(DRIVER),
+        # 'auto' now refuses without an accelerator, and this suite has none:
+        # asking for CPU by name is the point of the change. The silence it
+        # replaces is what let a production fire run 21 hours on one socket.
+        "--device",
+        "cpu",
         "--model",
         str(tiny_model),
         "--rank",

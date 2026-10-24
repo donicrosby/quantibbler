@@ -137,6 +137,11 @@ def _run_driver(
     cmd = [
         sys.executable,
         str(DRIVER),
+        # 'auto' now refuses without an accelerator, and this suite has none:
+        # asking for CPU by name is the point of the change. The silence it
+        # replaces is what let a production fire run 21 hours on one socket.
+        "--device",
+        "cpu",
         "--model",
         str(model_dir),
         "--rank",
