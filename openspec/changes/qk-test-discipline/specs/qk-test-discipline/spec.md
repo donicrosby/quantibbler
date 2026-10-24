@@ -21,20 +21,13 @@ modules, never weakening assertions or shrinking coverage to meet the clock.
 
 ### Requirement: no_production_fire_in_tests
 
-Tests SHALL NOT execute a production driver run, invoke the launch wrapper
-against a real daemon, or start containers. `docker` may appear in a test only
-as text being parsed or asserted on. Any test that must invoke real
-infrastructure SHALL prove its interception in-band (resolved binary is the
-shim) before the code under test runs, and SHALL NOT hold the production
-container name. The PATH-shim fall-through that started `quantibbler-ptq-run`
-from pytest is the defect class this requirement removes.
+Tests SHALL NOT execute a production driver run, invoke the launch wrapper against a real daemon, or start containers. `docker` may appear in a test only as text being parsed or asserted on.
 
 #### Scenario: real_fire_under_pytest_is_a_defect
 
 - **WHEN** a test's invocation path reaches a real daemon or a real container
-- **THEN** the test is red by definition and the interception proof is the
-  only permitted fix
-- **AND** a test holding the production container name is refused at review
+- **THEN** the test is red by definition
+- **AND** any test that must invoke real infrastructure SHALL prove its interception in-band — the resolved binary is the shim — before the code under test runs, and SHALL NOT hold the production container name; the PATH-shim fall-through that started `quantibbler-ptq-run` from pytest is the defect class this requirement removes, and a test holding the production container name is refused at review
 
 ### Requirement: slow_test_justification
 
