@@ -253,6 +253,26 @@ mkdir -p "$OUT" 2>/dev/null || true
 # reads the kfd-visible peak against what the host actually had going in.
 { echo "--- free -g baseline ---"; free -g; } >> "$OUT/launch.env" 2>/dev/null || true
 
+# --- launch identity: a name is shared, an id is not ---------------------------
+# The container name is fixed per mode, so every fire reuses it. Teardown by name
+# is therefore a claim about *a* container, not about *this* one: a stale
+# wall-stop timer or mem-floor net from a dead fire can docker-stop a later fire
+# that inherited the freed name. Near-miss on record -- a test's orphan held the
+# production name and `docker stop` printed the name without error, and no one
+# could say from the outside which container it had actually stopped.
+#
+# So: stamp an id on the container and into launch.env, and make every
+# teardown-by-name verify the id before stopping. A held name is REFUSED, never
+# auto-removed -- a container someone else started is not ours to reap, and
+# "helpfully" removing it is how a live fire gets killed by a bystander.
+LAUNCH_ID="${QKB_LAUNCH_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+_holder="$(docker inspect --format '{{.Config.Image}} running={{.State.Running}} launch_id={{index .Config.Labels "qkb_launch_id"}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+if [ -n "$_holder" ]; then
+  echo "error: container name $CONTAINER_NAME is already held: $_holder" >&2
+  echo "       refusing to launch; a held name is not ours to reap -- inspect it and stop it deliberately" >&2
+  exit 2
+fi
+
 set -- docker run --rm \
   --name "$CONTAINER_NAME" \
   --memory 32g --memory-swap 32g \
@@ -261,6 +281,8 @@ set -- docker run --rm \
   -v /opt/data/hf-cache:/hf \
   -v /opt/data/tmp:/tmp/ptq \
   -v "$OUT:/out" \
+  --label qkb_launch_id="$LAUNCH_ID" \
+  -e QKB_LAUNCH_ID="$LAUNCH_ID" \
   -e HF_HOME=/hf \
   -e HF_HUB_OFFLINE=1 \
   -e TRANSFORMERS_OFFLINE=1 \
@@ -453,7 +475,10 @@ fi
 # cannot hang the box. The fence cannot see kfd memory and the watchdog cannot
 # hear this harness, so the deadline is the binding constraint.
 if [ "$MODE" != "ptq" ] && [ "${WALL_MIN:-0}" -gt 0 ] 2>/dev/null; then
-  nohup sh -c "sleep $((WALL_MIN * 60)); docker stop '$CONTAINER_NAME' >/dev/null 2>&1" \
+  nohup sh -c "sleep $((WALL_MIN * 60)); \
+    id=\$(docker inspect -f '{{index .Config.Labels \"qkb_launch_id\"}}' '$CONTAINER_NAME' 2>/dev/null || true); \
+    if [ \"\$id\" = '$LAUNCH_ID' ]; then docker stop '$CONTAINER_NAME' >/dev/null 2>&1; \
+    else echo \"wall-stop: name '$CONTAINER_NAME' is not launch $LAUNCH_ID (id=\$id); not stopping\" >> '$OUT/watchdog.log'; fi" \
     >/dev/null 2>&1 &
   echo "wall-stop-net: pid=$! deadline=${WALL_MIN}m container=$CONTAINER_NAME" >&2
 fi
@@ -464,7 +489,7 @@ fi
 # floor -- before the box can die. The trace lands in watchdog.log.
 if [ "$MODE" != "ptq" ] && [ "${MEM_FLOOR_GB:-0}" -gt 0 ] 2>/dev/null; then
   nohup sh -c '
-    floor=$1; name=$2; log=$3
+    floor=$1; name=$2; log=$3; want=$4
     while :; do
       state=$(docker inspect -f "{{.State.Running}}" "$name" 2>/dev/null || echo missing)
       # Exit only when the container is genuinely gone or already stopped.
@@ -472,13 +497,18 @@ if [ "$MODE" != "ptq" ] && [ "${MEM_FLOOR_GB:-0}" -gt 0 ] 2>/dev/null; then
       case "$state" in missing|false) break ;; esac
       avail=$(free -g | awk "/^Mem:/{print \$NF}")
       if [ "${avail:-999}" -lt "$floor" ]; then
+        id=$(docker inspect -f '{{index .Config.Labels "qkb_launch_id"}}' "$name" 2>/dev/null || true)
+        if [ "$id" != "$want" ]; then
+          echo "mem-floor: name $name is not launch $want (id=$id); not stopping" >> "$log"
+          break
+        fi
         echo "mem-floor: host available ${avail}G < floor ${floor}G; stopping $name" >> "$log"
         docker stop "$name" >/dev/null 2>&1
         break
       fi
       sleep 3
     done
-  ' sh "$MEM_FLOOR_GB" "$CONTAINER_NAME" "$OUT/watchdog.log" \
+  ' sh "$MEM_FLOOR_GB" "$CONTAINER_NAME" "$OUT/watchdog.log" "$LAUNCH_ID" \
     >/dev/null 2>&1 &
   echo "mem-floor-net: pid=$! floor=${MEM_FLOOR_GB}G container=$CONTAINER_NAME" >&2
 fi
@@ -512,7 +542,7 @@ rm -f "$RC_FILE"
 case "$CONTAINER_RC" in
   ''|*[!0-9]*) CONTAINER_RC=unknown ;;
 esac
-{ echo "--- container exit ---"; echo "container_exit_code=$CONTAINER_RC"; echo "container_log=$CONTAINER_LOG"; } >> "$OUT/launch.env" 2>/dev/null || true
+{ echo "qkb_launch_id=$LAUNCH_ID"; echo "--- container exit ---"; echo "container_exit_code=$CONTAINER_RC"; echo "container_log=$CONTAINER_LOG"; } >> "$OUT/launch.env" 2>/dev/null || true
 # Fail closed: a lane0 run whose witness is absent cannot be read after the
 # fact, and "it died with no reason" is the exact failure this lane keeps
 # paying for. Recorded loudly rather than discovered later.
