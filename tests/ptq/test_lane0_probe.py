@@ -1091,3 +1091,64 @@ def test_heartbeat_fires_on_a_non_cuda_device(tool, tmp_path) -> None:
 
     assert "progress stats" in stream.getvalue(), "no heartbeat on a non-CUDA device"
     assert tel.last_progress, "the heartbeat must also feed the CSV column"
+
+
+def test_robust_clip_shrink_acts_on_its_adversarial_class(tool) -> None:
+    """A transform claiming to clip must change input on entries above tau.
+
+    This is the test that would have caught the no-op in seconds. The line it
+    replaces was `np.minimum(vec, np.max(vec))`, which passes every test that
+    only checks output shape, dtype, or finiteness -- and fails this one on a
+    single vector with an entry above the ceiling. Identity property tests catch
+    no-op formulas; derivation comments catch wrong ones. Both are needed.
+    """
+    vec = np.array([0.1, 0.2, 50.0, 0.3])
+    out = tool.robust_clip_shrink(vec, tau_max=1.0, gamma=0.0)
+
+    assert not np.array_equal(out, vec), "clip did not act: this is the no-op"
+    assert out.max() <= 1.0, out
+    assert np.allclose(out[:2], vec[:2]), "entries under tau must be untouched"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "FINDING, not a fixture problem: production's robust_diag(raw, raw, tau=None, "
+        "gamma=0.0) returns the input UNCLIPPED (max 100.0 on a 0..100 ramp), while "
+        "clip_to_tau's q95 default clips to 95.0. Planner's ruling rests on 'tau=None "
+        "is production's q95 tail-gate, so the fold is the sole variable' -- that "
+        "premise is measurably false. Either production's q95 lives somewhere other "
+        "than robust_diag, or Arm B's default tau must be chosen to match whatever "
+        "production actually does before the fold can be called the sole variable. "
+        "strict=True so this cannot silently start passing: removing the marker is "
+        "the act that records the reconciliation."
+    ),
+)
+def test_clip_to_tau_default_matches_production_not_its_own_constant(tool) -> None:
+    """The default tau is production's q95 gate, pinned against production itself.
+
+    Comparing against `np.percentile(raw, 95)` would be self-referential -- the
+    harness agreeing with the harness, which is how the mirror defects survived
+    review. This calls production's `robust_diag` on the same input with
+    `tau=None, gamma=0.0` and asserts the two agree, so the claim "the default is
+    production's gate" is tested rather than restated.
+    """
+    from quantibbler.ptq.calibration import robust_diag
+
+    raw = np.linspace(0.0, 100.0, 101)
+    out = tool.clip_to_tau(raw)
+    assert not np.array_equal(out, raw), "clip did not act"
+
+    prod_d_in, _ = robust_diag(raw, raw, tau=None, gamma=0.0)
+    assert np.allclose(prod_d_in, out, atol=1e-9), (prod_d_in[:3], out[:3])
+
+
+def test_tau_max_override_is_fail_closed(tool, monkeypatch) -> None:
+    """A malformed TAU_MAX raises rather than silently reverting to the default."""
+    monkeypatch.setenv("TAU_MAX", "not-a-float")
+    with pytest.raises(ValueError, match="TAU_MAX"):
+        tool.robust_clip_shrink(np.array([1.0, 2.0]), gamma=0.0)
+
+    monkeypatch.setenv("TAU_MAX", "0.5")
+    out = tool.robust_clip_shrink(np.array([1.0, 2.0]), gamma=0.0)
+    assert out.max() == pytest.approx(0.5)

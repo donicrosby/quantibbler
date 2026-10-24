@@ -145,10 +145,57 @@ def clip_token_norms(x: Any, *, percentile: float = PERCENTILE) -> tuple[np.ndar
     return arr * scale[:, None], float(percentile)
 
 
-def robust_clip_shrink(raw: np.ndarray, *, gamma: float = GAMMA) -> np.ndarray:
-    """Clip at the per-vector ceiling then shrink toward the mean ([NQ] Eq. 3)."""
-    vec = np.asarray(raw, dtype=np.float64)
-    clipped = np.minimum(vec, float(np.max(vec)) if vec.size else 0.0)
+def _tau_max_override() -> float | None:
+    """Explicit `TAU_MAX` for sensitivity testing; unset means use the default.
+
+    Fail-closed on a malformed value rather than falling back: a typo silently
+    reverting to the default would make a sensitivity run look like a control.
+    """
+    raw = os.environ.get("TAU_MAX")
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"TAU_MAX must be a float, got {raw!r}") from exc
+
+
+def clip_to_tau(vec: np.ndarray, tau_max: float | None = None) -> np.ndarray:
+    """Clip entries above an absolute ceiling ``tau_max > 0``.
+
+    Derivation: [NQ] Eq. 3 (paper :2807) clips the second-moment statistic to a
+    maximum value ``tau_max > 0`` -- an absolute input constant, and the first
+    half of the robustification. Its production counterpart is ``robust_diag``
+    (``src/quantibbler/ptq/calibration.py:299``), where an explicit ``tau`` is
+    used verbatim and ``tau=None`` applies a tail-gated q95. Defaulting to q95
+    here is the same choice production makes, so the fold stays the sole
+    variable between the arms.
+
+    This replaces a line that read ``np.minimum(vec, np.max(vec))`` and was
+    therefore a no-op -- nothing exceeds its own maximum -- while its docstring
+    cited Eq. 3. The paper's clipping step never executed and the arm labelled
+    "intended" computed a shrink-only variant that neither the paper nor
+    production produces.
+    """
+    vec = np.asarray(vec, dtype=np.float64)
+    if tau_max is None:
+        tau_max = float(np.percentile(vec, 95.0)) if vec.size else 0.0
+    return np.minimum(vec, float(tau_max))
+
+
+def robust_clip_shrink(
+    raw: np.ndarray, *, tau_max: float | None = None, gamma: float = GAMMA
+) -> np.ndarray:
+    """Clip to ``tau_max`` then shrink toward the mean ([NQ] Eq. 3).
+
+    Derivation: [NQ] Eq. 3 (paper :2807) -- clip to an absolute ceiling, then
+    shrink toward the mean. ``clip_to_tau`` carries the clip's own derivation and
+    the record of the no-op it replaced; ``TAU_MAX`` overrides ``tau_max`` for
+    sensitivity runs.
+    """
+    override = _tau_max_override()
+    effective_tau = override if override is not None else tau_max
+    clipped = clip_to_tau(raw, effective_tau)
     if gamma <= 0.0:
         return clipped
     return (1.0 - gamma) * clipped + gamma * float(np.mean(clipped))
