@@ -14,7 +14,7 @@ The default (hot) lane SHALL complete within 30 seconds of wall time per 100 col
 
 ### Requirement: integration_marker_admission
 
-`integration` means the test loads a real model or executes the driver end-to-end. A CPU stub harness test is a unit test — calling `build_real_arms` on a `tiny_model` stub is a harness unit test, and that classification is its entire value. Over-marking is a red: it moved the guards born from the last four deaths (the two-batch Arm B fixture, the four-row surface-table pin, the capture-binding sentinel, the stubbed-corpus e2e) out of the hot lane at zero clock savings — the three stage-map driver runs were the entire 222.85s, the stubs were never the cost.
+`integration` SHALL mean the test loads a real model or executes the driver end-to-end. A CPU stub harness test SHALL be classified as a unit test — calling `build_real_arms` on a `tiny_model` stub is a harness unit test, and that classification is its entire value. Over-marking is a red: it moved the guards born from the last four deaths (the two-batch Arm B fixture, the four-row surface-table pin, the capture-binding sentinel, the stubbed-corpus e2e) out of the hot lane at zero clock savings — the three stage-map driver runs were the entire 222.85s, the stubs were never the cost.
 
 #### Scenario: death_class_guards_stay_hot
 
