@@ -179,6 +179,19 @@ def cotangent_grad_sq_sum(g: torch.Tensor) -> torch.Tensor:
     return g.detach().reshape(-1, g.shape[-1]).pow(2).sum(dim=0)
 
 
+def _to_numpy_stat(t: torch.Tensor) -> np.ndarray:
+    """Serialise a collected statistic to the f64 storage schema (boundary).
+
+    Accumulation stays at caller dtype (the dtype ruling); only the recorded
+    schema widens here. bf16/f16 have no NumPy counterpart — lift exactly
+    those to f32 before the ``.numpy()`` hop (bf16's 8-bit mantissa widens
+    to f32 exactly, so nothing is invented); f32/f64 pass through untouched.
+    """
+    if t.dtype in (torch.bfloat16, torch.float16):
+        t = t.to(torch.float32)
+    return t.detach().cpu().numpy().astype(np.float64)
+
+
 def collect_stats(
     module: nn.Module, calibration_batches, *, chunk_rows: int | None = None, cotangent=None
 ) -> LayerStatsBook:
@@ -370,16 +383,12 @@ def collect_stats(
                 raise ValueError(f"streamed statistics for layer {name!r} saw no rows")
             # sum(x^2)/n per feature is the quantity the reference computes as
             # feat.pow(2).mean(dim=0); only the summation order differs.
-            d_in_raw = (sum_sq_in[name] / rows_in[name]).detach().cpu().numpy().astype(np.float64)
-            d_out_raw = (
-                (grad_sq_out[name] / rows_out[name]).detach().cpu().numpy().astype(np.float64)
-            )
+            d_in_raw = _to_numpy_stat(sum_sq_in[name] / rows_in[name])
+            d_out_raw = _to_numpy_stat(grad_sq_out[name] / rows_out[name])
         else:
             feat_in = torch.cat(feats_in[name], dim=0)
-            d_in_raw = feat_in.pow(2).mean(dim=0).detach().cpu().numpy().astype(np.float64)
-            d_out_raw = (
-                (grad_sq_out[name] / rows_out[name]).detach().cpu().numpy().astype(np.float64)
-            )
+            d_in_raw = _to_numpy_stat(feat_in.pow(2).mean(dim=0))
+            d_out_raw = _to_numpy_stat(grad_sq_out[name] / rows_out[name])
         d_in_raw = np.maximum(d_in_raw, _TINY)
         d_out_raw = np.maximum(d_out_raw, _TINY)
         if d_in_raw.shape != (din,) or d_out_raw.shape != (dout,):

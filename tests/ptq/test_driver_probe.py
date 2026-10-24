@@ -32,10 +32,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
 
+from quantibbler.ptq.calibration import collect_stats
 from quantibbler.qk_report import FAILED, MIN_PROBE_DEPTH, exit_code, verdict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -322,3 +324,31 @@ def test_device_auto_refuses_without_an_accelerator(monkeypatch):
     monkeypatch.setattr(driver.torch.cuda, "is_available", lambda: True)
     assert driver._resolve_device("auto") == "cuda"
     assert driver._resolve_device("cpu") == "cpu"
+
+
+def test_scn_wrapper_instance_serves_collect_stats(tiny_model):
+    """The driver wrapper instance feeds collect_stats's whole-model CE route.
+
+    Locks the trunk-routing fix (Lane 1, qk-nanoquant-alignment-lane1):
+    ``CausalLMLogits`` composes trunk and head handles exactly as the wrapper's
+    forward does, and collect_stats must build its CE from those handles
+    WITHOUT applying the head twice. A reintroduced always-route would crash
+    here with ``lm_head`` applied to vocab-wide logits — hidden-wide Linear —
+    which is the exact shape that killed the first cut of this fix.
+    """
+    import importlib.util
+
+    qhm_path = Path(__file__).resolve().parents[2] / "tools" / "quantize_hf_model.py"
+    spec = importlib.util.spec_from_file_location("quantize_hf_model_under_test", qhm_path)
+    qhm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(qhm)
+
+    causal = Qwen3ForCausalLM.from_pretrained(tiny_model)
+    wrapper = qhm.CausalLMLogits(causal)
+    torch.manual_seed(0)
+    batches = [torch.randint(0, VOCAB, (2, 16)) for _ in range(3)]
+    book = collect_stats(wrapper, batches)
+    assert len(book) > 0
+    for entry in book:
+        assert np.isfinite(entry.d_out_raw).all()
+        assert float(entry.d_out_raw.max()) > 0.0  # the CE cotangent has real magnitude

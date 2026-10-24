@@ -10,8 +10,27 @@ from quantibbler.ptq.block_recon import (
     QuantizedLayerState,
     extract_and_pack,
     reconstruct_block,
+    reconstruct_model,
 )
+from quantibbler.ptq.calibration import collect_stats
 from quantibbler.ptq.config import PTQConfig
+
+
+def _fixed_cot(module, batches, *, seed: int = 9):
+    """Caller-supplied output cotangent (spec: caller_supplied_head_for_bare_block).
+
+    A bare block carries no scalar loss, so the local statistics pass takes
+    the gradient at the module output from the caller. The probe runs the
+    CONCATENATED batch stream — the local pass feeds ``[x_b]`` with
+    ``x_b = cat(batches)``, so the cotangent must carry those rows. Fixed
+    seed so runs asserting on recorded events stay reproducible.
+    """
+    x = torch.cat(batches, dim=0) if len(batches) > 1 else batches[0]
+    with torch.no_grad():
+        probe = module(x)
+    return torch.randn(
+        probe.shape, generator=torch.Generator().manual_seed(seed), dtype=probe.dtype
+    )
 
 
 class _TinyBlock(nn.Module):
@@ -56,14 +75,18 @@ def test_scn_block_loop_order():
 
     # Two-block model, both blocks reconstructed through the public loop.
     model = nn.Sequential(b0, b1)
-    from quantibbler.ptq.block_recon import reconstruct_model
 
     x = torch.cat(_calib(d), dim=0)
     # FP reference captured BEFORE the loop mutates the blocks (the fp
     # prefix output the quantized prefix must differ from).
     with torch.no_grad():
         fp0 = b0(x)
-    reconstruct_model(model, _calib(d), cfg, recorder=recorder)
+    calib = _calib(d)
+    # collect_stats reshapes the cotangent against EVERY batch's output, so
+    # the book's cotangent is single-batch-shaped (unlike reconstruct_block's
+    # concatenated local pass).
+    book = collect_stats(model, calib, cotangent=_fixed_cot(model, [calib[0]]))
+    reconstruct_model(model, calib, cfg, recorder=recorder, stats_book=book)
     assert captured["inputs"][1].shape == x.shape
 
     # Stage order per block: capture -> tune_fp -> lb_admm -> ste. Additional
@@ -98,7 +121,12 @@ def test_block_loop_consumes_the_phase1_book_entry_for_entry(monkeypatch):
     model = nn.Sequential(_TinyBlock(d, seed=0), _TinyBlock(d, seed=1))
     batches = _calib(d, seed=4)
     cfg = PTQConfig(solver_backend="numpy", rank=4)
-    book = collect_stats(model, batches)
+    # Bare Sequential: no trunk/head, so the book needs a caller-supplied
+    # cotangent (spec: caller_supplied_head_for_bare_block).
+    with torch.no_grad():
+        probe = model(batches[0])
+    cot = torch.randn(probe.shape, generator=torch.Generator().manual_seed(9), dtype=probe.dtype)
+    book = collect_stats(model, batches, cotangent=cot)
     assert sorted(entry.name for entry in book) == ["0.fc1", "0.fc2", "1.fc1", "1.fc2"]
 
     handed: list = []
@@ -187,7 +215,7 @@ def test_scn_ste_refinement():
     stats_probe["mse_drop"] = first_loss - last_loss
 
     # reconstruct_block runs the whole per-block pipeline with refinement.
-    result = reconstruct_block(block, batches, cfg)
+    result = reconstruct_block(block, batches, cfg, cotangent=_fixed_cot(block, batches))
     assert result is not None
     assert len(result.layers) == 2
     for st in result.layers:

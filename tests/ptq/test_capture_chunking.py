@@ -87,8 +87,14 @@ def test_capture_forward_and_stats_backward_chunking_compose():
 
     torch.testing.assert_close(_forward_chunked(m, x, 8), m(x), rtol=1e-5, atol=1e-6)
 
-    ref = collect_stats(m, batches)
-    chunked = collect_stats(m, batches, chunk_rows=4)
+    # Fixed caller-supplied cotangent, identical object both calls, shaped to
+    # ONE batch (collect_stats reshapes it against every batch's output):
+    # parity is about chunk re-association, measured on a loss-bearing gradient.
+    with torch.no_grad():
+        probe = m(batches[0])
+    cot = torch.randn(probe.shape, generator=torch.Generator().manual_seed(9), dtype=probe.dtype)
+    ref = collect_stats(m, batches, cotangent=cot)
+    chunked = collect_stats(m, batches, chunk_rows=4, cotangent=cot)
     assert ref.layer_names == chunked.layer_names
     for a, b in zip(ref, chunked, strict=True):
         torch.testing.assert_close(

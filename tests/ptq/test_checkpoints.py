@@ -15,6 +15,7 @@ from test_api import _calib, _TinyApiModel
 
 import quantibbler.ptq.block_recon as block_recon
 from quantibbler.ptq.api import quantize_model
+from quantibbler.ptq.calibration import collect_stats
 from quantibbler.ptq.checkpoints import completed_blocks
 from quantibbler.ptq.config import PTQConfig, StageHyper
 
@@ -136,7 +137,12 @@ def _seed_one_block_checkpoint(ckpt_dir, cfg, batches):
 
     br.reconstruct_block = crashing
     try:
-        br.reconstruct_model(_TinyApiModel(seed=3), batches, cfg, checkpoint_dir=ckpt_dir)
+        model = _TinyApiModel(seed=3)
+        # Whole-model book (trunk+head CE route) — a bare reconstruct_model
+        # call fail-closes on the local pass by design (no loss source), so
+        # the seeding wrapper supplies the Phase-1 book a real driver would.
+        book = collect_stats(model, batches)
+        br.reconstruct_model(model, batches, cfg, checkpoint_dir=ckpt_dir, stats_book=book)
     except RuntimeError:
         pass
     finally:

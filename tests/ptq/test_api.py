@@ -11,6 +11,30 @@ from torch import nn
 
 from quantibbler.ptq.api import QuantizedModel, quantize_model
 from quantibbler.ptq.config import PTQConfig
+from quantibbler.ptq.e2e import TrunkOutput
+
+
+class _TinyTrunkView:
+    """Callable view of ``_TinyApiModel``'s hidden path (see ``trunk``)."""
+
+    def __init__(
+        self,
+        embed: nn.Module,
+        lin1: nn.Module,
+        act: nn.Module,
+        lin2: nn.Module,
+    ) -> None:
+        self._embed, self._lin1, self._act, self._lin2 = embed, lin1, act, lin2
+
+    def __call__(
+        self,
+        tokens: torch.Tensor | None = None,
+        input_ids: torch.Tensor | None = None,
+    ) -> TrunkOutput:
+        ids = input_ids if input_ids is not None else tokens
+        x = self._embed(ids)
+        x = x + self._lin2(self._act(self._lin1(x)))
+        return TrunkOutput(x)
 
 
 class _TinyApiModel(nn.Module):
@@ -41,6 +65,18 @@ class _TinyApiModel(nn.Module):
         x = self.embed(tokens)
         x = x + self.lin2(self.act(self.lin1(x)))
         return self.head(x)
+
+    @property
+    def trunk(self) -> _TinyTrunkView:
+        """Detection-reachable view of the hidden path (embed -> residual block).
+
+        Not a registered submodule on purpose: ``collect_stats`` discovers
+        linears via ``named_modules()``, and registering the trunk a second
+        time would rename ``lin1``/``lin2`` under a nested path. The view runs
+        the same computation ``forward`` does, so whole-model detection finds
+        trunk and head separately while every leaf keeps its name.
+        """
+        return _TinyTrunkView(self.embed, self.lin1, self.act, self.lin2)
 
 
 def _calib(seed: int = 5, vocab: int = 10) -> list[torch.Tensor]:

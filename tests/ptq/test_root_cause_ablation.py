@@ -85,13 +85,31 @@ def _calib(d: int, n: int = 4, seq: int = 8, seed: int = 1) -> list[torch.Tensor
     return [torch.randn(n, seq, d, generator=gen, dtype=torch.float64) for _ in range(2)]
 
 
+def _fixed_cot(module, batches, *, seed: int = 9):
+    """Caller-supplied output cotangent (spec: caller_supplied_head_for_bare_block).
+
+    A bare block carries no scalar loss, so the local statistics pass takes
+    the gradient at the module output from the caller. The probe runs the
+    CONCATENATED batch stream — the local pass feeds ``[x_b]`` with
+    ``x_b = cat(batches)``, so the cotangent must carry those rows. Fixed
+    seed so runs asserting on recorded events stay reproducible.
+    """
+    x = torch.cat(batches, dim=0) if len(batches) > 1 else batches[0]
+    with torch.no_grad():
+        probe = module(x)
+    return torch.randn(
+        probe.shape, generator=torch.Generator().manual_seed(seed), dtype=probe.dtype
+    )
+
+
 def _events(cfg: PTQConfig, block: nn.Module, d: int = 6) -> list[tuple[str, dict]]:
     seen: list[tuple[str, dict]] = []
 
     def recorder(event: str, **info) -> None:
         seen.append((event, info))
 
-    reconstruct_block(block, _calib(d), cfg, recorder=recorder)
+    calib = _calib(d)
+    reconstruct_block(block, calib, cfg, cotangent=_fixed_cot(block, calib), recorder=recorder)
     return seen
 
 
@@ -432,11 +450,20 @@ def test_fp_run_makes_no_layers_and_writes_a_different_weight():
     the sign constraint: same seed, same geometry, DIFFERENT host weight."""
     fp = _ScopedBlock(6, seed=12)
     binary = _ScopedBlock(6, seed=12)
+    calib = _calib(6, seed=13)
     result = reconstruct_block(
-        fp, _calib(6, seed=13), PTQConfig(solver_backend="numpy", rank=3, factor_mode="fp")
+        fp,
+        calib,
+        PTQConfig(solver_backend="numpy", rank=3, factor_mode="fp"),
+        cotangent=_fixed_cot(fp, calib),
     )
     assert result.layers == [], "an fp measurement must fabricate no binary layer states"
-    reconstruct_block(binary, _calib(6, seed=13), PTQConfig(solver_backend="numpy", rank=3))
+    reconstruct_block(
+        binary,
+        calib,
+        PTQConfig(solver_backend="numpy", rank=3),
+        cotangent=_fixed_cot(binary, calib),
+    )
     w_fp = fp.self_attn["q_proj"].weight
     w_binary = binary.self_attn["q_proj"].weight
     assert not torch.equal(w_fp, w_binary), (
@@ -481,8 +508,14 @@ def test_d7_streamed_statistics_match_the_reference_at_1e_12():
     """The streamed path is a re-association of the same sums, nothing more."""
     model = _TwoLinear()
     batches = _d7_batches()
-    reference = calibration.collect_stats(model, batches)
-    streamed = calibration.collect_stats(model, batches, chunk_rows=4)
+    # Fixed caller-supplied cotangent (spec: caller_supplied_head_for_bare_block)
+    # — identical object both calls, so the chunking parity below is
+    # apples-to-apples on a loss-bearing gradient, not a vacuous uniform one.
+    with torch.no_grad():
+        probe = model(batches[0])
+    cot = torch.randn(probe.shape, generator=torch.Generator().manual_seed(9), dtype=probe.dtype)
+    reference = calibration.collect_stats(model, batches, cotangent=cot)
+    streamed = calibration.collect_stats(model, batches, chunk_rows=4, cotangent=cot)
 
     assert streamed.layer_names == reference.layer_names
     for got, want in zip(streamed, reference, strict=True):
@@ -498,14 +531,19 @@ def test_d7_streamed_path_never_materializes_full_activations(monkeypatch):
         seen.append(tuple(x.shape))
         raise AssertionError("the chunked path materialized a full activation tensor")
 
+    # Same fixed caller-supplied cotangent for both paths (see the parity
+    # test above): the spy criterion is chunking behavior, not the gradient.
+    with torch.no_grad():
+        probe = _TwoLinear()(_d7_batches()[0])
+    cot = torch.randn(probe.shape, generator=torch.Generator().manual_seed(9), dtype=probe.dtype)
     monkeypatch.setattr(calibration, "_reduce_tokens", _spy)
-    streamed = calibration.collect_stats(_TwoLinear(), _d7_batches(), chunk_rows=4)
+    streamed = calibration.collect_stats(_TwoLinear(), _d7_batches(), chunk_rows=4, cotangent=cot)
     assert seen == [], f"chunked collect_stats called the materializing reducer: {seen}"
     assert len(streamed) == 2
 
     # Non-vacuity: the spy really can detect a materializing path.
     with pytest.raises(AssertionError, match="materialized"):
-        calibration.collect_stats(_TwoLinear(), _d7_batches())
+        calibration.collect_stats(_TwoLinear(), _d7_batches(), cotangent=cot)
     assert seen, "the spy never fired on the reference path — it proves nothing"
 
 

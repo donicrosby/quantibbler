@@ -1140,6 +1140,7 @@ def reconstruct_block(
     teacher_source: str | None = None,
     teacher_fingerprint: str | None = None,
     capture_index: int | None = None,
+    cotangent: torch.Tensor | None = None,
 ) -> BlockReconResult:
     """Run the full Phase 2 pipeline for one block (Algorithm 1 lines 8-24).
 
@@ -1157,6 +1158,10 @@ def reconstruct_block(
             element-wise with ``quantizable_linears`` (built on demand when
             omitted — the inputs are first embedded to the block's float
             dtype so raw token-id batches never reach a ``nn.Linear``).
+        cotangent: caller-supplied output gradient for the on-demand local
+            statistics pass — the fail-closed guard's remedy for a bare block
+            (spec: caller_supplied_head_for_bare_block). Ignored when
+            ``stats_book`` is supplied.
         recorder: optional callable invoked as ``recorder(event, **info)``
             with events ``capture`` (x_b, y_b, teacher provenance),
             ``tune_fp`` (with the stage record), ``lb_admm``, ``ste`` (with
@@ -1268,10 +1273,22 @@ def reconstruct_block(
     # they are the statistics source; the embedding-adapter path is the
     # fallback for direct reconstruct_block calls with token-id batches.
     if stats_book is None:
+        # Fail-closed (qk-nanoquant-alignment-lane1: caller_supplied_head_for_bare_block):
+        # a bare block carries no scalar loss, so collection refuses rather
+        # than invent one. Measured 2026-10-24: the natural candidate — the
+        # teacher reconstruction loss ``2*(block(x_b) - y_b)/N`` — is
+        # IDENTICALLY ZERO here, because at collection time the live block is
+        # still pristine and the teacher is its frozen deepcopy (same
+        # function, same input). Zero cotangent means E[g^2] clamps to _TINY
+        # and the whitened solve trips the magnitude divergence gate on every
+        # fixture. The paper's gradient source is the task loss itself
+        # (App. C :3011, CE through the model) — a real solve supplies the
+        # Phase-1 book; direct callers supply a documented loss-bearing
+        # cotangent (the spec's ``0.5*||z - t||**2`` factory shape).
         if x_b.dtype == torch.float64:
             # The float64 reference path (executable-spec fixtures): one
             # whole-batch backward, bit-identical to the landed behavior.
-            stats_book = collect_stats(block, [x_b])
+            stats_book = collect_stats(block, [x_b], cotangent=cotangent)
         elif x_b.dtype.is_floating_point:
             # Lower-precision (real-model) float activations: row-chunked
             # backwards through the block — the statistic definition is
@@ -1279,9 +1296,9 @@ def reconstruct_block(
             # once per batch), but a whole-batch backward retains attention
             # graphs for every row at once (~15GB on a 28-layer bf16 trunk)
             # and OOMs under container caps.
-            stats_book = collect_stats(block, [x_b], chunk_rows=4)
+            stats_book = collect_stats(block, [x_b], chunk_rows=4, cotangent=cotangent)
         else:
-            stats_book = collect_stats(_input_adapter(block, batches), batches)
+            stats_book = collect_stats(_input_adapter(block, batches), [x_b], cotangent=cotangent)
         scope = {n for n, _ in quantizable_linears}
         if any(entry.name not in scope for entry in stats_book):
             aligned = LayerStatsBook()

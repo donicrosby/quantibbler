@@ -29,7 +29,26 @@ from quantibbler.ptq.block_recon import (
     reconstruct_block,
     reconstruct_model,
 )
+from quantibbler.ptq.calibration import collect_stats
 from quantibbler.ptq.config import PTQConfig, StageHyper
+
+
+def _fixed_cot(module, batches, *, seed: int = 9):
+    """Caller-supplied output cotangent (spec: caller_supplied_head_for_bare_block).
+
+    A bare block carries no scalar loss, so the local statistics pass takes
+    the gradient at the module output from the caller. The probe runs the
+    CONCATENATED batch stream — the local pass feeds ``[x_b]`` with
+    ``x_b = cat(batches)``, so the cotangent must carry those rows. Fixed
+    seed so runs asserting on recorded events stay reproducible.
+    """
+    x = torch.cat(batches, dim=0) if len(batches) > 1 else batches[0]
+    with torch.no_grad():
+        probe = module(x)
+    return torch.randn(
+        probe.shape, generator=torch.Generator().manual_seed(seed), dtype=probe.dtype
+    )
+
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 MODULE_PATH = REPO_ROOT / "src" / "quantibbler" / "ptq" / "block_recon.py"
@@ -219,6 +238,7 @@ def test_scn_diagnostic_run_records_the_vacuous_event_and_continues():
         block,
         _calib(8, seed=9),
         PTQConfig(solver_backend="numpy", rank=4, stage_pre=StageHyper(1e-4, 4, 1)),
+        cotangent=_fixed_cot(block, _calib(8, seed=9)),
         recorder=_recorder(sink),
     )
     assert result is not None
@@ -249,6 +269,7 @@ def test_scn_tunefp_fires_per_target_cycle():
         block,
         _calib(8, seed=17),
         PTQConfig(solver_backend="numpy", rank=4, stage_pre=StageHyper(1e-3, 4, 2)),
+        cotangent=_fixed_cot(block, _calib(8, seed=17)),
         recorder=_recorder(sink),
     )
     names = [event for event, _ in sink]
@@ -323,12 +344,16 @@ def test_scn_teacher_is_pinned_to_pristine_weights_with_provenance(tmp_path):
     pristine = [copy_weights(b) for b in model]
     batches = _calib(8, seed=13)
     sink: list = []
+    # Single-batch-shaped cotangent: collect_stats reshapes it against every
+    # batch's output (unlike reconstruct_block's concatenated local pass).
+    book = collect_stats(model, batches, cotangent=_fixed_cot(model, [batches[0]]))
     reconstruct_model(
         model,
         batches,
         PTQConfig(solver_backend="numpy", rank=4, stage_pre=StageHyper(1e-4, 4, 0)),
         recorder=_recorder(sink),
         checkpoint_dir=tmp_path / "ck",
+        stats_book=book,
     )
 
     captures = [info for event, info in sink if event == "capture"]

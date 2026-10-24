@@ -28,6 +28,24 @@ from quantibbler.ptq.block_recon import (
 from quantibbler.ptq.config import PTQConfig, StageHyper
 from quantibbler.qk_report import STEPS_EFFECT_EPS
 
+
+def _fixed_cot(module, batches, *, seed: int = 9):
+    """Caller-supplied output cotangent (spec: caller_supplied_head_for_bare_block).
+
+    A bare block carries no scalar loss, so the local statistics pass takes
+    the gradient at the module output from the caller. The probe runs the
+    CONCATENATED batch stream — the local pass feeds ``[x_b]`` with
+    ``x_b = cat(batches)``, so the cotangent must carry those rows. Fixed
+    seed so runs asserting on recorded events stay reproducible.
+    """
+    x = torch.cat(batches, dim=0) if len(batches) > 1 else batches[0]
+    with torch.no_grad():
+        probe = module(x)
+    return torch.randn(
+        probe.shape, generator=torch.Generator().manual_seed(seed), dtype=probe.dtype
+    )
+
+
 SEVEN = [
     "self_attn.q_proj",
     "self_attn.k_proj",
@@ -187,7 +205,10 @@ def test_scn_zero_flip_completion_is_never_silent():
     block = _SevenLinearBlock(seed=31)
     sink: list = []
     cfg = PTQConfig(solver_backend="numpy", rank=3, stage_latent=StageHyper(1e-8, 4, 8))
-    reconstruct_block(block, _calib(8, seed=31), cfg, recorder=_recorder(sink))
+    calib = _calib(8, seed=31)
+    reconstruct_block(
+        block, calib, cfg, cotangent=_fixed_cot(block, calib), recorder=_recorder(sink)
+    )
     ste = [info for event, info in sink if event == "ste"][0]
     per = ste["per_linear"]
     assert per, "the STE stage produced no per-linear record at all"
@@ -222,7 +243,10 @@ def test_scn_refinement_covers_every_factorized_linear_with_full_budget():
     block = _SevenLinearBlock(seed=41)
     sink: list = []
     cfg = PTQConfig(solver_backend="numpy", rank=3, stage_latent=StageHyper(1e-3, 4, 8))
-    reconstruct_block(block, _calib(8, seed=41), cfg, recorder=_recorder(sink))
+    calib = _calib(8, seed=41)
+    reconstruct_block(
+        block, calib, cfg, cotangent=_fixed_cot(block, calib), recorder=_recorder(sink)
+    )
     ste = [info for event, info in sink if event == "ste"][0]
 
     assert sorted(ste["per_linear"]) == sorted(SEVEN), (
@@ -267,7 +291,10 @@ def test_full_budget_is_per_linear_not_a_pooled_split():
     block = _SevenLinearBlock(seed=47)
     sink: list = []
     cfg = PTQConfig(solver_backend="numpy", rank=3, stage_latent=StageHyper(1e-3, 4, 1))
-    reconstruct_block(block, _calib(8, seed=47), cfg, recorder=_recorder(sink))
+    calib = _calib(8, seed=47)
+    reconstruct_block(
+        block, calib, cfg, cotangent=_fixed_cot(block, calib), recorder=_recorder(sink)
+    )
     ste = [info for event, info in sink if event == "ste"][0]
     assert "allocation" not in ste
     total = ste["total_steps"]
@@ -308,7 +335,9 @@ def test_scn_paper_faithful_hands_ste_continuous_latents(monkeypatch):
         return real(block, facs, x_b, y_b, cfg, batch_size, steps=steps, label=label)
 
     monkeypatch.setattr(br, "_tune_latent_ste", spy)
-    br.reconstruct_block(_SevenLinearBlock(seed=91), _calib(8, seed=91), _faithful_cfg())
+    blk = _SevenLinearBlock(seed=91)
+    calib = _calib(8, seed=91)
+    br.reconstruct_block(blk, calib, _faithful_cfg(), cotangent=_fixed_cot(blk, calib))
     assert seen, "the faithful run never reached the STE stage"
     for name, u in seen.items():
         assert not torch.all(u.abs() == 1.0), (
@@ -329,8 +358,10 @@ def test_scn_paper_faithful_disables_greedy_polish(monkeypatch):
 
     monkeypatch.setattr(br, "greedy_polish", spy)
     sink: list = []
+    blk = _SevenLinearBlock(seed=91)
+    calib = _calib(8, seed=91)
     br.reconstruct_block(
-        _SevenLinearBlock(seed=91), _calib(8, seed=91), _faithful_cfg(), recorder=_recorder(sink)
+        blk, calib, _faithful_cfg(), cotangent=_fixed_cot(blk, calib), recorder=_recorder(sink)
     )
     assert calls == [], "the faithful path ran the extra-paper greedy polish"
     lb = [info for event, info in sink if event == "lb_admm"][0]
@@ -339,10 +370,13 @@ def test_scn_paper_faithful_disables_greedy_polish(monkeypatch):
     # The production (non-faithful) binary path keeps the polish unchanged.
     calls.clear()
     sink2: list = []
+    blk = _SevenLinearBlock(seed=91)
+    calib = _calib(8, seed=91)
     br.reconstruct_block(
-        _SevenLinearBlock(seed=91),
-        _calib(8, seed=91),
+        blk,
+        calib,
         PTQConfig(solver_backend="numpy", rank=3, stage_latent=StageHyper(1e-8, 4, 8)),
+        cotangent=_fixed_cot(blk, calib),
         recorder=_recorder(sink2),
     )
     assert calls == [1] * len(SEVEN), "the production path must polish every scoped linear"
@@ -367,7 +401,10 @@ def test_scn_paper_faithful_records_measured_crossings_with_no_rescope():
     sink: list = []
     block = _SevenLinearBlock(seed=71)
     cfg = _faithful_cfg(ste_flip_pass_budget=3)
-    reconstruct_block(block, _calib(8, seed=71), cfg, recorder=_recorder(sink))
+    calib = _calib(8, seed=71)
+    reconstruct_block(
+        block, calib, cfg, cotangent=_fixed_cot(block, calib), recorder=_recorder(sink)
+    )
     ste = [info for event, info in sink if event == "ste"][0]
     assert ste["per_linear"], "no per-linear STE record"
     for name, rec in ste["per_linear"].items():
@@ -395,7 +432,10 @@ def test_scn_flip_pass_accepts_only_on_the_block_objective():
     )
     block = _SevenLinearBlock(seed=51)
     sink: list = []
-    reconstruct_block(block, _calib(8, seed=51), cfg, recorder=_recorder(sink))
+    calib = _calib(8, seed=51)
+    reconstruct_block(
+        block, calib, cfg, cotangent=_fixed_cot(block, calib), recorder=_recorder(sink)
+    )
     ste = [info for event, info in sink if event == "ste"][0]
     ran = {n: r["flip_pass"] for n, r in ste["per_linear"].items() if "flip_pass" in r}
     assert ran, "the discrete flip pass never ran on a zero-crossing block"
@@ -427,8 +467,10 @@ def test_scn_flip_pass_is_reproducible():
     records = []
     for _ in range(2):
         sink: list = []
+        blk = _SevenLinearBlock(seed=61)
+        calib = _calib(8, seed=61)
         reconstruct_block(
-            _SevenLinearBlock(seed=61), _calib(8, seed=61), cfg, recorder=_recorder(sink)
+            blk, calib, cfg, cotangent=_fixed_cot(blk, calib), recorder=_recorder(sink)
         )
         ste = [info for event, info in sink if event == "ste"][0]
         records.append(
@@ -525,7 +567,12 @@ def test_the_divergence_gate_fires_on_a_band_the_live_block_cannot_meet():
         stage_latent=StageHyper(1e-3, 4, 1),
         divergence_band_factor=1e6,
     )
-    assert reconstruct_block(block, calib, generous, recorder=_recorder([])) is not None
+    assert (
+        reconstruct_block(
+            block, calib, generous, cotangent=_fixed_cot(block, calib), recorder=_recorder([])
+        )
+        is not None
+    )
 
     # Firing side: a rank-3 balanced reconstruction of this block cannot have
     # ||Wq||_F/||W||_F within 1e-4 of 1.0, so a band that tight must fire.
@@ -536,4 +583,6 @@ def test_the_divergence_gate_fires_on_a_band_the_live_block_cannot_meet():
         divergence_band_factor=1.0001,
     )
     with pytest.raises(QuantizationDivergenceError):
-        reconstruct_block(block, calib, tight, recorder=_recorder([]))
+        reconstruct_block(
+            block, calib, tight, cotangent=_fixed_cot(block, calib), recorder=_recorder([])
+        )
