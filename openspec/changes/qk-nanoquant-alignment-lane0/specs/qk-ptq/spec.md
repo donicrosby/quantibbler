@@ -206,6 +206,15 @@ Every fire SHALL announce its poll cadence at launch with a named owner, alongsi
 - **THEN** a poll cadence with a named owner SHALL exist from launch, and the launch announcement names both
 - **AND** a fire launching with a dead completion channel SHALL have its first poll scheduled at launch — v2, a 21.8-hour fire with a known-dead channel and no poll order, died at 03:43:42Z and went unread for 21 hours; that class SHALL NOT exist again
 
+### Requirement: launch_lines_derived_at_firing
+
+A staged launch line SHALL be re-derived against the tree at firing time — the wrapper's preflight is the derivation, and its printed launch record is what gets fired, not a remembered line. A knob value recorded under an old semantic is a defect to catch at the gate, not a launch to replay: v3 fast-failed because the staged line carried `EVAL_SEQS=18` in the old batches unit, which the re-expressed sequence-counting knob correctly refused.
+
+#### Scenario: replayed_line_refused_at_gate
+
+- **WHEN** a launch line recorded before a knob re-expression is replayed verbatim
+- **THEN** the fire SHALL fail fast at the gate with the traceback in the witness — the correct response is re-deriving the value against HEAD (18 batches → 144 sequences), never bypassing the gate
+
 ### Requirement: launch_env_single_writer
 
 `launch.env` SHALL have exactly one writer at a time: concurrent appends are a provenance defect, not a race to tolerate — v2's launch.env ended in a corrupted bare-`?` append line. Writers SHALL serialize (one append path) or write atomically (write-then-replace); a malformed launch.env invalidates the artifact's provenance block.
