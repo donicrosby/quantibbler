@@ -115,3 +115,13 @@ Any error message emitted by a guard SHALL state the invariant the code tests, a
 - **WHEN** a guard's fixture asserts the emitted error message names the invariant the code tests (e.g. "GRAPH" for `loss.requires_grad`)
 - **THEN** pinning text to contract is a mechanical assertion no different from pinning output to input — the guard's test proves it names the right thing the same way the property test proves the transform does the thing
 - **AND** the three instances from Lane 1 (robust_clip_shrink cited Eq. 3 while clipping at its own max; the guard tested the graph and blamed the weights; the guard tested the graph and offered a remedy irrelevant to detached heads) prove the failure class: text attached to a line is part of its contract, and disbelieving a correct guard because its error message was wrong is the same outcome as a wrong guard with a correct message — the caller gets wrong information either way
+
+### Requirement: green_tests_prove_detection_power
+
+A test asserted green on current bytes SHALL have its detection power demonstrated before it counts in any tally or sign-off number. The standard is mutation: flip the guarded mechanism, assert the test fails on the real mechanism, restore, verify the tree byte-identical. A green that cannot be made to fail under any plausible regression is an instrument or theater, not coverage.
+
+#### Scenario: mutation_proves_the_guard
+
+- **WHEN** a newly green test joins the suite (e.g. a vacuity probe asserting a skip is by omission)
+- **THEN** the guarded condition is mutated once (`idx >= 1` → `idx >= 0`), the test is shown to fail naming the real mechanism, the mutation is restored, and the tree is verified byte-identical afterward
+- **AND** a green whose failure mode cannot fire — the Lane 2 task-4 vacuity assertion before its gradient measurement gave it teeth — is excluded from phase tallies and sign-off counts, or upgraded until it can fail
