@@ -1,27 +1,5 @@
 # Test discipline delta
 
-## Why
-
-The user set a hard budget: tests SHALL NOT exceed 30 seconds per 100 tests.
-Measured baseline 2026-10-24: 349.36s wall for 628 tests = 55.6s/100 — red by
-85%. A second class of defect is the production fire executed "as a test":
-a PATH-shim test silently fell through to the real docker daemon and started
-the production container name with no authorization. Both become law.
-
-## What Changes
-
-- `qk-test-discipline`: the suite time budget is a hard gate, a production
-  fire under pytest is a defect by definition, and slow tests must justify
-  themselves in their docstrings.
-
-## Impact
-
-- Test code and CI gating only; no production code paths change.
-- Fixing the budget requires profiling the suite's slow tail (top offenders
-  are the 2088-line `tests/test_qk_report.py` and the 1066-line
-  `tests/test_ci_referee.py`) — behavior-preserving splits, never assertion
-  weakening.
-
 ## ADDED Requirements
 
 ### Requirement: suite_time_budget
