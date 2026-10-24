@@ -114,6 +114,21 @@ class ProgressReporter:
             + (" complete" if record.get("complete") else "")
         )
 
+    def _emit(self, record: dict[str, Any]) -> None:
+        """Fan out to every live sink, swallowing sink failures individually.
+
+        Instrumentation must never be able to kill a fire. An unwritable probe
+        path, a closed stdout, a full disk -- each of those is a reason for one
+        sink to go quiet, never a reason for a six-hour solve to die. The other
+        sinks still receive the record, so a broken breadcrumb path cannot take
+        the witness channel down with it.
+        """
+        for sink in self._sinks:
+            try:
+                sink(record)
+            except Exception:  # noqa: BLE001 - deliberate: see docstring
+                continue
+
     # -- the one call a loop makes ------------------------------------------
 
     def tick(self, current: int | None = None, *, force: bool = False) -> dict[str, Any] | None:
@@ -135,8 +150,7 @@ class ProgressReporter:
             return None
 
         record = self._record(now)
-        for sink in self._sinks:
-            sink(record)
+        self._emit(record)
         self._last_emit = now
         self._last_emit_iter = self._current
         self._emitted += 1
@@ -158,8 +172,7 @@ class ProgressReporter:
             self._current = current
         record = self._record(self._clock())
         record["complete"] = True
-        for sink in self._sinks:
-            sink(record)
+        self._emit(record)
         self._emitted += 1
         return record
 

@@ -58,6 +58,7 @@ from .bit_polish import greedy_polish
 from .calibration import LayerStatsBook, collect_stats, robust_diag
 from .config import PTQConfig
 from .lb_admm import lb_admm, magnitude_balance
+from .progress import ProgressReporter
 
 # Artifact markers (greppable in code, spec, and the run record).
 #
@@ -653,7 +654,13 @@ def _tune_fp(
     snapshot = [p.detach().clone() for p in params]
     before_residual = _residual()
     skipped = 0
+    # TuneFP is one of the two stages that dominate wall time, so it is the one
+    # the user is most blind during without progress output.
+    reporter = ProgressReporter("tunefp", total)
+    steps_done = 0
     for step in range(total):
+        steps_done = step + 1
+        reporter.tick(steps_done)
         if cfg.cosine_schedule and total > 1:
             import math
 
@@ -739,6 +746,7 @@ def _tune_fp(
     stats["skipped_steps"] = skipped
     if skipped:
         print(f"[tune_fp:{label}] skipped {skipped}/{total} non-finite-loss steps", flush=True)
+    reporter.complete(steps_done)  # tunefp: the count actually run, never the budget
     return stats
 
 
@@ -858,7 +866,11 @@ def _tune_latent_ste(
     }
     first_grad_norm = 0.0
     skipped = 0
+    reporter = ProgressReporter("ste", total)
+    steps_done = 0
     for step in range(total):
+        steps_done = step + 1
+        reporter.tick(steps_done)
         if cfg.cosine_schedule and total > 1:
             import math
 
@@ -937,6 +949,7 @@ def _tune_latent_ste(
         print(
             f"[tune_latent_ste:{label}] skipped {skipped}/{total} non-finite-loss steps", flush=True
         )
+    reporter.complete(steps_done)  # ste: the count actually run, never the budget
     return stats
 
 
