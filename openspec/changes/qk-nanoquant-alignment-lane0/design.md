@@ -92,3 +92,7 @@ The first Lane 0 fire OOM-killed the whole box ~10 min after launch. Diagnosis, 
 ## Checkpoint fingerprints / solver state
 
 No new solver state: no `PTQConfig` fields, no solver-stage changes, no artifact-format changes. Therefore no checkpoint-fingerprint update is owed by this lane. If a later lane promotes any lane-0 construction into the pipeline, THAT lane updates the fingerprint per D-6.
+
+## Decision record: decisive fire authorized with guard work unlanded
+
+- **2026-10-24, decisive fire (`lane0-fire-20261024`):** authorized by @user's word with the tri-state pre-flight fix, the hermetic red fixtures, and the stub-seam proof still unlanded — a deliberate waiver of `refusal_branch_proven_before_fire` for this one fire. Compensating controls at staging: name verified free against the real daemon at firing, DRY_RUN gate-walk passed (digest pin, rocm tag, name guard) moments before launch, no stale nets on the box, and the nets aboard this fire are fresh with the teardown label-decline check (landed, fail-safe) — a stale net cannot stop this container. The waiver does not transfer: the guard work remains required before any further fire, and coder's commit (tri-state fix + two red fixtures + stub self-check, red-first) stands as that precondition's only legal closer.
