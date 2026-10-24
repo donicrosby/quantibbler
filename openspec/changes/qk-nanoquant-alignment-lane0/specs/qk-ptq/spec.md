@@ -4,7 +4,7 @@
 
 ### Requirement: Lane 0 SHALL be a measurement-only decisive experiment that lands nothing in the artifact path
 
-The lane SHALL be a decisive preconditioner-divergence experiment built on the existing `lb_admm` + `magnitude_balance` solver pair and the repo's ablation/probe conventions, adding measurement code only. It SHALL NOT modify any shipped pipeline module, SHALL NOT reach the qpk1 export path, and SHALL NOT emit any OK/DEGRADED/FAILED verdict band. Any non-default measurement knob SHALL be recorded in provenance.
+The lane SHALL be a decisive preconditioner-divergence experiment built on the existing `lb_admm` + `magnitude_balance` solver pair and the repo's ablation/probe conventions, adding measurement code only. It SHALL NOT modify any shipped pipeline module's algorithm, SHALL NOT reach the qpk1 export path, and SHALL NOT emit any OK/DEGRADED/FAILED verdict band. Any non-default measurement knob SHALL be recorded in provenance.
 
 #### Scenario: measurement_only_no_export
 
@@ -14,7 +14,8 @@ The lane SHALL be a decisive preconditioner-divergence experiment built on the e
 #### Scenario: shipped_pipeline_modules_untouched
 
 - **WHEN** the lane executes against the repo
-- **THEN** `calibration.py`, `lb_admm.py`, `block_recon.py`, and `config.py` are byte-identical to their pre-lane state (empty diff), and all new code lives in a new tool module plus its test file
+- **THEN** `calibration.py`, `lb_admm.py`, `block_recon.py`, and `config.py` carry no algorithm changes (empty diff on their solver logic), and all new code lives in a new tool module plus its test file
+- **AND** progress instrumentation imports in `lb_admm.py` and `block_recon.py` (the `ProgressReporter` belt code from `qk-progress-instrumentation`) are the sole allowed diff — they are additive instrumentation that changes no solver behavior, and their presence is expected state, not a drift
 
 ### Requirement: The decisive probe SHALL run a fixed set of real production layers with full identity recorded
 
