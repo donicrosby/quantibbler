@@ -206,6 +206,16 @@ Every fire SHALL announce its poll cadence at launch with a named owner, alongsi
 - **THEN** a poll cadence with a named owner SHALL exist from launch, and the launch announcement names both
 - **AND** a fire launching with a dead completion channel SHALL have its first poll scheduled at launch — v2, a 21.8-hour fire with a known-dead channel and no poll order, died at 03:43:42Z and went unread for 21 hours; that class SHALL NOT exist again
 
+### Requirement: wrapper_failclosed_branches_hermetic_tests
+
+Every fail-closed branch of the wrapper SHALL be exercised by a hermetic test — a stub `docker` answering `inspect` with a fixture payload, the interception proven in-band before the wrapper runs — never by "verified by construction". The named class: the pre-flight name-refusal branch was claimed verified and a hermetic stub test measured it NOT firing (wrapper exited 0 through to `container: exit=0`). The branch list SHALL include: pre-flight held-name refusal, digest pin, rocm-tag gate, GPU gate, witness fail-closed, the nets' label-decline, and the watchdog's kill-path label check.
+
+#### Scenario: refusal_branch_proven_before_fire
+
+- **WHEN** a lane0 refire or decisive fire is staged
+- **THEN** the staging proof includes the hermetic refusal test green — a fire SHALL NOT ride a guard that cannot be demonstrated
+- **AND** a guard whose red test is reverted to keep the suite green is a staging blocker, not a silent gap
+
 ### Requirement: launch_lines_derived_at_firing
 
 A staged launch line SHALL be re-derived against the tree at firing time — the wrapper's preflight is the derivation, and its printed launch record is what gets fired, not a remembered line. A knob value recorded under an old semantic is a defect to catch at the gate, not a launch to replay: v3 fast-failed because the staged line carried `EVAL_SEQS=18` in the old batches unit, which the re-expressed sequence-counting knob correctly refused.
