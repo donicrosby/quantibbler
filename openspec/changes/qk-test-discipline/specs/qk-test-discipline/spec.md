@@ -68,7 +68,7 @@ Tests SHALL NOT execute a production driver run, invoke the launch wrapper again
 - **THEN** the test is red by definition
 - **AND** any test that must invoke real infrastructure SHALL prove its interception in-band before the code under test runs, and SHALL NOT hold the production container name; the PATH-shim fall-through that started `quantibbler-ptq-run` from pytest is the defect class this requirement removes, and a test holding the production container name is refused at review
 - **AND** in-band proof means a logged call from an *executed* shim — the fixture SHALL execute the shim once and observe its log line before trusting it; a resolution check (`command -v`, `chmod`) is not proof, because PATH resolution and executability are different properties (`/tmp` is mounted `noexec`: the 2026-10-24 seam showed a resolved, executable-bit-carrying stub that returned EACCES on every call, indistinguishable from a free name by any resolution check)
-- **AND** executable test fixtures SHALL stage on an exec-capable mount — `/tmp` and pytest's `tmp_path` are `noexec` on this host and silently inherit the trap to every future fixture; the self-exec check is the belt that makes this violation fail loudly instead of silently
+- **AND** executable test fixtures SHALL stage on an exec-capable mount — every tmpfs on this host (`/tmp`, `/dev/shm`, `/var/tmp`) is mounted `noexec`, and pytest's default `tmp_path` lives under `/tmp`, so the default fixture location IS the trap; executables stage under `/opt/data` (ext4), e.g. `/opt/data/tmp/…` or pytest `--basetemp` pointed there, and the self-exec check is the belt that makes any drift back onto a tmpfs fail loudly instead of silently
 
 ### Requirement: slow_test_justification
 
