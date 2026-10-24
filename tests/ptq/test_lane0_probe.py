@@ -151,8 +151,13 @@ def test_gradient_side_real_ce_backward(tool):
     loss.backward()
     planted = (linear.weight.grad**2).mean(dim=0).numpy()
     np.testing.assert_allclose(ce_stat, planted, rtol=1e-10)
-    # and it is not the uniform-cotangent statistic
-    uniform = tool.uniform_cotangent_statistic(linear, x)
+    # and it is not the uniform-cotangent statistic: ones cotangent, mean square
+    # of the resulting weight gradient -- the shipped quantity, inlined as the
+    # test's own reference (the harness copy was deleted as dead code)
+    linear.zero_grad(set_to_none=True)
+    out = linear(x)
+    out.backward(torch.ones_like(out))
+    uniform = (linear.weight.grad**2).mean(dim=0).numpy()
     assert not np.allclose(ce_stat, uniform, rtol=1e-6)
 
 

@@ -236,18 +236,6 @@ def fold_intended(
     return w_tilde, d_out, d_in
 
 
-def uniform_cotangent_statistic(linear: Any, x: Any) -> np.ndarray:
-    """The shipped gradient-side statistic: mean square under a ones-cotangent."""
-    import torch
-
-    x_t = torch.as_tensor(np.asarray(x), dtype=torch.float64)
-    out = linear(x_t)
-    linear.zero_grad(set_to_none=True)
-    out.backward(torch.ones_like(out))
-    grad = linear.weight.grad.detach().numpy()
-    linear.zero_grad(set_to_none=True)
-    return (grad**2).mean(axis=0)
-
 
 def cotangent_grad_sq_sum(g: Any) -> np.ndarray:
     """Per-feature sum of squared output-cotangents from a head-routed backward.
