@@ -23,6 +23,22 @@ The default (hot) lane SHALL complete within 30 seconds of wall time per 100 col
 - **AND** the lane0 stub fixtures born from each death class SHALL remain in the default lane, because the default lane is where the suite actually runs
 - **AND** over-marking is a red: the 2026-10-24 sweep moved the two-batch Arm B fixture, the four-row surface-table pin, the capture-binding sentinel, and the stubbed-corpus e2e off the hot lane at zero clock savings — the three stage-map driver runs were the entire 222.85s, the stubs were never the cost
 
+#### Scenario: guards_home_acceptance
+
+- **WHEN** the marker correction lands
+- **THEN** `uv run pytest tests/ptq/test_lane0_probe.py` prints 36 passed, 0 deselected — the deselection banner's absence IS the test that the guards came home — and the default-lane wall line records the before/after clock
+- **AND** the hot-lane cost of the guards SHALL be driven down by sizing the stub corpus to the property under test (two batches at reduced seq_len preserves the batch-boundary coverage at ~8× less trunk cost), never by re-homing them to another lane
+
+### Requirement: integration_lane_standing_cadence
+
+The integration lane SHALL run on a standing cadence — nightly — with a red run surfaced to the room, so the mandatory pre-fire check is a formality, not a discovery. A gate that runs only at pre-fire discovers its rot at the moment of maximum impatience and gets waived under pressure.
+
+#### Scenario: nightly_integration_red_surfaces
+
+- **WHEN** the standing integration-lane run is red
+- **THEN** the red is surfaced to the room the same night, with the failing test named
+- **AND** a pre-fire integration run is verification of the standing record, never the first execution of the lane since the last fire
+
 ### Requirement: integration_lane_mandatory_before_fire
 
 The integration lane (`pytest -m integration`) SHALL be green before staging any fire, and a default-lane run that deselects it SHALL announce the deselection loudly rather than silently. The fire staging proof SHALL carry the integration-lane record.
