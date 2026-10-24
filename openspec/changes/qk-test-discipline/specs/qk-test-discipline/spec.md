@@ -49,6 +49,15 @@ The integration lane (`pytest -m integration`) SHALL be green before staging any
 - **THEN** the staging proof includes a green integration-lane run and the hot-lane clock record
 - **AND** a default run that skipped integration without the loud banner is refused as a staging artifact
 
+### Requirement: prose_fence_stays_hot
+
+The incident-narrative fence SHALL stay in the hot lane: `tests/test_prose_discipline.py` fails on the incident-ledger token class (`r137`, `run #N`, `post-mortem`, `user-directed`, `lane history`, `autopsy`) anywhere in `src/` or `tools/`. Derivation comments without run tags SHALL pass untouched. A commit that removes or waters down the fence is a red like any other failure.
+
+#### Scenario: fence_regrowth_is_red
+
+- **WHEN** an incident narrative reappears in product source
+- **THEN** the hot lane fails on the token class, and the fix is exiling the story to its openspec change dir — keeping the durable rule and its measured numbers in 1–3 comment lines — never an exception added to the fence
+
 ### Requirement: no_production_fire_in_tests
 
 Tests SHALL NOT execute a production driver run, invoke the launch wrapper against a real daemon, or start containers. `docker` may appear in a test only as text being parsed or asserted on.
