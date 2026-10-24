@@ -240,6 +240,7 @@ Every fail-closed branch of the wrapper SHALL be exercised by a hermetic test �
 - **AND** the branch list SHALL cover: pre-flight held-name refusal, digest pin, rocm-tag gate, GPU gate, witness fail-closed, the nets' label-decline, and the watchdog's kill-path label check
 - **AND** the named class is the 2026-10-24 pre-flight miss: claimed verified by construction, a hermetic stub measured it NOT firing — wrapper exited 0 through to `container: exit=0`
 - **AND** a guard whose red test is reverted to keep the suite green is a staging blocker, not a silent gap
+- **AND** the one legal exception to a red fixture in the lane is `xfail(strict=True)` when the red is a broken fixture harness, not a broken guard: the marker's reason names the harness defect, the docstring names the un-xfail condition, and `strict=True` makes the day the harness gets fixed and the test passes an XPASS failure — the suite itself demands the un-xfail; reverting the test out of the lane is never the exception
 
 ### Requirement: launch_lines_derived_at_firing
 
