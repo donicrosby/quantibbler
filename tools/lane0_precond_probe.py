@@ -467,6 +467,22 @@ def build_verdict(rows: list[dict], *, band_top: float = BAND_TOP) -> dict:
 # --- real-model path -----------------------------------------------------------
 
 
+def _as_hub_root(root: pathlib.Path) -> pathlib.Path:
+    """Normalize a cache root to the directory that actually holds the shards.
+
+    A usable root is a *hub* directory -- the one containing `models--<org>--<name>`.
+    `HF_HOME` is the directory *above* it, so the `/hf` mount has to become
+    `/hf/hub`; without that the shard glob matches nothing and the load reports
+    "not found in any offline HF cache root" while the weights are sitting right
+    there. Measured: that is how the decisive fire died, and the witness named it.
+
+    Already-a-hub roots are untouched, because `~/.cache/huggingface/hub/hub`
+    does not exist. Normalizing here rather than at the call site keeps every
+    consumer honest instead of each one remembering.
+    """
+    return root / "hub" if (root / "hub").is_dir() else root
+
+
 def _hf_cache_roots() -> list[pathlib.Path]:
     roots: list[pathlib.Path] = []
     env = os.environ.get("HF_HUB_CACHE") or os.environ.get("HUGGINGFACE_HUB_CACHE")
@@ -474,7 +490,7 @@ def _hf_cache_roots() -> list[pathlib.Path]:
         roots.append(pathlib.Path(env))
     roots.append(pathlib.Path.home() / ".cache" / "huggingface" / "hub")
     roots.append(pathlib.Path("/hf"))
-    return [r for r in roots if r.exists()]
+    return [r for r in (_as_hub_root(c) for c in roots) if r.exists()]
 
 
 def load_layer_weight(model_id: str, block_idx: int, layer_name: str) -> tuple[np.ndarray, str]:

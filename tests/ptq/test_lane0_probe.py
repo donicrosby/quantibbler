@@ -962,3 +962,32 @@ def test_build_real_arms_runs_two_batches(tool, tiny_model, monkeypatch):  # noq
     assert diagnostics["packed_batches"] == 2, diagnostics
     assert diagnostics["sequences"] == 16, diagnostics
     assert torch.isfinite(torch.as_tensor(arms["intended"][(0, "mlp.down_proj")]["d_in_raw"])).all()
+
+
+def test_cache_root_normalizes_hf_home_to_its_hub_dir(tool, tmp_path):
+    """A cache root is the directory holding `models--…`, not the one above it.
+
+    This is the decisive fire's death, reduced to a fixture. `_hf_cache_roots`
+    returned the `HF_HOME` mount point (`/hf`) while the safetensors shards live
+    one level down (`/hf/hub/models--Qwen--Qwen3-0.6B/snapshots/…/`), so the glob
+    matched nothing and `load_layer_weight` raised "not found in any offline HF
+    cache root" with the weights present on disk. First exercise inside a
+    container: rehearsal mode never calls `real_target`, so the target-load path
+    had never been walked by the time a fire needed it.
+
+    Red against the previous bytes by absence of the normalizer; the end-to-end
+    proof is the refire, which now walks this path for real.
+    """
+    hf_home = tmp_path / "hf"
+    (hf_home / "hub" / "models--Qwen--Qwen3-0.6B" / "snapshots" / "c1899de").mkdir(parents=True)
+    assert tool._as_hub_root(hf_home) == hf_home / "hub"
+
+    # An already-a-hub root is left alone: `…/huggingface/hub/hub` does not exist.
+    already = tmp_path / "cache" / "huggingface" / "hub"
+    (already / "models--Qwen--Qwen3-0.6B").mkdir(parents=True)
+    assert tool._as_hub_root(already) == already
+
+    # A root with no hub child is returned unchanged rather than guessed at.
+    bare = tmp_path / "empty"
+    bare.mkdir()
+    assert tool._as_hub_root(bare) == bare
