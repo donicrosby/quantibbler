@@ -4,7 +4,7 @@
 
 ### Requirement: suite_time_budget
 
-The default (hot) lane SHALL complete within 30 seconds of wall time per 100 collected tests, measured with the BLAS determinism pin, and recorded in the run report. The budget is a hard gate: a suite over budget is red, not advisory. Baseline measured 2026-10-24: 349.36s for 628 tests (55.6s/100); after the honest split, 621 tests in 71.48s (11.5s/100). The fix is profiling the slow tail and splitting oversized test modules, never weakening assertions or shrinking coverage to meet the clock.
+The default (hot) lane SHALL complete within 30 seconds of wall time per 100 collected tests, measured with the BLAS determinism pin, and recorded in the run report. The budget is a hard gate: a suite over budget is red, not advisory.
 
 #### Scenario: over_budget_suite_is_red
 
