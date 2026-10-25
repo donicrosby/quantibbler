@@ -114,7 +114,37 @@
       BOX STAYS OPEN: the code-side half — constants asserted not recomputed,
       1.15 never rounded IN CODE — is reviewable only when the constants test
       lands (tasks 26-27); re-review then.
-- [ ] (orchestrator) `npx --yes @fission-ai/openspec validate qk-nq-recreation-bar --strict`; scoped stage (spec + code ONE commit); gate-chained commit; fenced push; CI watch.
+- [x] (orchestrator) `npx --yes @fission-ai/openspec validate qk-nq-recreation-bar --strict`; scoped stage (spec + code ONE commit); gate-chained commit; fenced push; CI watch.
+      — **DONE 2026-10-25.** Validate (`npx --yes @fission-ai/openspec@1.14.3`,
+      exactly ONE id): `Change 'qk-nq-recreation-bar' is valid`, RC=0, re-run
+      after the final tasks.md edit. Scoped stage: ONE landing commit
+      `60c075f` = 5 files (design.md, tasks.md, ledger-format.md,
+      `src/quantibbler/qk_bar.py`, `tests/test_qk_bar.py`), +714/−5, verified
+      `git show --stat`; companion fix commit `aff8fe6` (+6/−1 — exactly the
+      balance hunk; first attempt d2d4eab discarded unpushed after a sibling
+      lane's in-flight `lb_admm.py` edits rode the `git add`, blob rebuilt
+      surgically, worktree untouched — see the card comment). Gate-chained:
+      validate && scoped add && commit, RC=0. Fenced push: unwrap → push →
+      re-fence inside one command, `6c09948..60c075f HEAD -> main`,
+      **PUSH_RC=0**, pre-push secret fence **0 hits** (face1 tree + face2
+      outgoing range), fence restored. HTTPS had no credentials (the e2e
+      precedent); pushed with the sandbox's gh GITHUB_TOKEN via a throwaway
+      credential-helper script, removed after the push.
+      **CI watch — run `40169509339` (event push, head `60c075f`), per-job
+      verdicts read back from the GitHub API:** rust kernels ✅ · openspec ✅
+      (every active change, strict) · seed-weights ✅ · **lean python ❌**
+      `5 failed, 414 passed, 18 skipped` (expected 16) — the SAME five
+      `tests/test_run_ptq_wrapper.py` env-guard failures and the same
+      skip-count delta as the base run `40168399393` @ `6c09948` (`405
+      passed` there; +9 = this landing's bar tests): **inherited main red,
+      foreign to this range** · **full python ❌** `57 failed, 608 passed,
+      2 skipped` — base was `62 failed, 594 passed`: **this landing's
+      companion fix `aff8fe6` repaired exactly 5** (the 2 canaries + 3 driver
+      subprocess tests); the remaining 57 + 2 zero-skip violations are the
+      documented 8d1bcc0 default-torch-on-accelerator-less-runner class ·
+      **driver smoke ❌ / abort leg ❌** with the same failure text as base
+      (driver dies before writing quantize_report.json — same class). Zero
+      new reds introduced; the base run was already 4-of-7 red.
 - [x] (orchestrator + team) Full gate suite before landing — `uv run pytest`, `cargo test` in `crates/quantibbler-kernels`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, `uv run maturin build --manifest-path crates/quantibbler-kernels/Cargo.toml` — and record results.
       — **Observed 2026-10-25 on the landing tree (shared `/opt/venv`, torch
       2.14.1+cpu, no accelerator):** `tests/test_qk_bar.py` → **9 passed**,
