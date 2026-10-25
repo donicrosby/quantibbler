@@ -22,10 +22,120 @@
       `validate --strict` valid. Design-silent choices, the RED transcript and a
       guard finding are recorded in this change's design.md
       ("Implementation crystallization 2026-10-27").
-- [ ] (bug-hunter) Review: the seq-2048 eval clause cannot be satisfied by eval-at-512; default (flag unset) geometry is behavior-identical to pre-flag; any memory claim comes only from the 32g-container microbench with crumb-format peaks.
-- [ ] (coder) Suite test first per `bar_constants_asserted`/`bar_not_purchased_with_bits`: a torch-free module or test module pinning the four row constants + tolerance arithmetic with the derivation audit (constants asserted, not recomputed). Observe RED.
-- [ ] (coder) Wire the test location per repo layering (torch-free constants live where the band constants live — `qk_report` or a sibling bar module if the change spirit demands separation); GREEN in lean env.
-- [ ] (orchestrator) Author the acceptance-run ledger format (fields per `bar_recorded_not_gated` scenario) as a doc/format note in this change, not code.
+- [x] (bug-hunter) Review: the seq-2048 eval clause cannot be satisfied by eval-at-512; default (flag unset) geometry is behavior-identical to pre-flag; any memory claim comes only from the 32g-container microbench with crumb-format peaks.
+      — **Reviewed on landed bytes @ HEAD 075e7ec.** All three clauses PASS.
+      (1) Eval geometry is `--seq-len` only: the report records `seq_len` and
+      `tune_seq_len` as separate fields, and `qk_report.geometry_deviations`
+      emits a `tune_geometry_split` deviation that `fidelity_conditions` feeds
+      into the computed `paper_faithful` verdict, so a split run cannot carry
+      the faithful label; the split-run transcript shows `calib 2 batches,
+      eval 2 batches` + `calib sliced to 4 windows of 16` (slicing ran, the
+      sequence count did not move). (2) Default path: diff 4617038 shows unset
+      → `tune_seq_len = args.tune_seq_len or args.seq_len` with the slice
+      branch gated on `tune_seq_len != args.seq_len`, so the pre-flag path is
+      skipped entirely (no slicing, no new print); `calibration_rows` keeps
+      the identical `len(calib) * BATCH` expression, hoisted above the slice;
+      `_positive_int` closes the `--tune-seq-len 0` back door. (3) Every
+      memory number in the change cites the death record (container
+      `2d2d4b6df1e0`, 33,480,724 kB vs the 32g memcg, crumb 30.14G at
+      15:57:20Z) or the measured seq-512 transient, and the test tier asserts
+      no memory fact (docstring assigns the location claim to the microbench).
+      RESIDUAL (foreign, not this change's bytes): the two subprocess tests
+      are red on the current tree — `lb_admm.py:586` resolves
+      `get_backend(backend)` with no device and no `QUANTIBBLER_DEVICE` read,
+      so the torch-default solve refuses on CPU mid-driver-run; introduced by
+      8d1bcc0 (2026-10-23, torch-default routing; the split landing predates
+      `solver_backend.py`'s existence), 97a4725's env-threading repaired
+      `lb_admm.py:422` but missed this site. Witness: 1 passed / 2 failed in
+      41.10s + two standalone driver runs, byte-identical RuntimeError at
+      [4/6]. Fix carded to coder; blocks the landing gate's full pytest.
+- [x] (coder) Suite test first per `bar_constants_asserted`/`bar_not_purchased_with_bits`: a torch-free module or test module pinning the four row constants + tolerance arithmetic with the derivation audit (constants asserted, not recomputed). Observe RED.
+      — **RED observed** on `tests/test_qk_bar.py` before any bar module existed:
+      `ImportError: cannot import name 'qk_bar' from 'quantibbler'`, `1 error
+      during collection`, RC=2. Then: the four constants pinned as literals
+      (`FP16_BASELINE_PPL` + the three `BAR_ROWS` entries), the tolerance
+      computed as `TOLERANCE * row` and asserted UNEQUAL to the design table's
+      2dp renderings (31.69/38.86/60.88 are renderings of 31.694/38.8585/60.881),
+      and the derivation audit (`_derivation_findings`, parsing the module's own
+      source) rejecting a row recomputed at import time — four poisoned-source
+      cases (`6.33 * 2.0`, `115 / 100`, `float("27.56")`, a bare name) each
+      produce a named finding against the module's real text, so the tripwire is
+      non-vacuous. Provenance re-read from the pinned copy: line 881 → 12.66,
+      1035 → 27.56, 1079 → 33.79, 1123 → 52.94, each value unique in the file.
+      `9 passed in 0.43s`, RC=0.
+- [x] (coder) Wire the test location per repo layering (torch-free constants live where the band constants live — `qk_report` or a sibling bar module if the change spirit demands separation); GREEN in lean env.
+      — **Landed as a SIBLING module, `src/quantibbler/qk_bar.py`** (torch-free,
+      package root, the `qk_report.py` layering) — task row 27's second option,
+      taken because this change's own `bar_distinct_from_landing_gate` /
+      `bar_never_recalibrates_the_band` spirit wants the bar structurally
+      separate: `qk_report` does not import it and nothing on the run path reads
+      it, so the bar cannot become a per-run verdict. `uv sync --all-groups
+      --extra kernels` RC=0. Lean gate `uv run --no-sync pytest -q` →
+      **437 passed, 0 skipped, RC=0** (428 before this change's 9 tests).
+      Interpreter: a private `UV_PROJECT_ENVIRONMENT` (`uv sync --all-groups
+      --extra kernels`, `torch` absent); the shared `/opt/venv` was re-synced
+      with `--extra torch` by a co-tenant lane mid-run, which collects the ptq
+      tier and its 56 known dev-CPU-wheel `resolve_device` refusals — none of
+      them this file — so the hermetic env is what makes the lean number
+      attributable. `ruff check` + `ruff format --check` RC=0 on both new files.
+      Design-silent choices recorded in this change's design.md
+      ("Implementation crystallization 2026-10-25 — bar constants, tasks 26-27").
+- [x] (orchestrator) Author the acceptance-run ledger format (fields per `bar_recorded_not_gated` scenario) as a doc/format note in this change, not code.
+      — **Authored 2026-10-25: `ledger-format.md` in this change dir.** One
+      append-only JSONL ledger at `docs/acceptance-ledger.jsonl`, one entry per
+      acceptance evaluation, human-authored at gate time from
+      `quantize_report.json`. REQUIRED fields carry the scenario's eight
+      verbatim — `model_id`, `commit` (40-hex), `targeted_row` (closed
+      `qk_bar.BAR_ROWS` label enum; nothing below 0.55 bits is writable),
+      `eval_protocol` (corpus/partition/seq_len/tune_seq_len/calibration),
+      `measured` (`ppl`, `ratio` = ppl/row, `ratio_vs_baseline`,
+      `effective_bpw`, plus copied `row_ppl`/`row_bits`/`bar_ceiling`),
+      `tolerance_provenance` (provisional 1.15 spec pin), `bar_met`
+      (`row_meets_bar` semantics AND paper protocol — surrogate-only entries
+      stay `false`), `operational_gate_verdict` (a recorded COPY of the band +
+      report path, never computed) — plus the human gate (`acceptance`:
+      decision `met`/`not_met`/`equivalence`, `decided_by`, `decided_at`) and
+      integrity fields (`recorded_at`, `run_command`, `report_path`,
+      `artifact_path`, optional `protocol_deviation.equivalence_argument`,
+      `supersedes`). Doc-only by design (proposal Impact: tooling when the
+      first acceptance run is scheduled). Design-silent choices recorded in
+      this change's design.md ("Implementation crystallization 2026-10-25 —
+      ledger format, task 28").
 - [ ] (bug-hunter) Review: the constants match the pinned paper copy by grep (docs/papers/nanoquant-2602.06694v3.md rows 27.56/33.79/52.94/12.66); tolerance is 1.15x verbatim, not rounded in code; the seq-2048 clause cannot be satisfied by seq-512 data; the bar never feeds a per-run verdict.
+      — Paper-match half DELIVERED early (bug-hunter, 2026-10-25, @ HEAD
+      075e7ec): a programmatic parse of the pinned copy's Table 2 puts
+      Q3-0.6 at cell index 15 of 21, and the four values sit exactly there —
+      line 866 FP16 16.00 bits → 12.66; line 1020 NanoQuant Total Bits 1.00 →
+      27.56; line 1064 @0.80 → 33.79; line 1108 @0.55 → 52.94 (grep lines
+      881/1035/1079/1123 agree). The change's pin is verbatim `1.15 * row`
+      (design table: 31.69/38.86/60.88); no bar code exists yet, so nothing
+      rounds the tolerance and nothing gates a per-run verdict on it (the
+      `qk_report` band is LB2/STBLLM-derived: OK_LINE=4, COLLAPSE_LINE=40).
+      BOX STAYS OPEN: the code-side half — constants asserted not recomputed,
+      1.15 never rounded IN CODE — is reviewable only when the constants test
+      lands (tasks 26-27); re-review then.
 - [ ] (orchestrator) `npx --yes @fission-ai/openspec validate qk-nq-recreation-bar --strict`; scoped stage (spec + code ONE commit); gate-chained commit; fenced push; CI watch.
-- [ ] (orchestrator + team) Full gate suite before landing — `uv run pytest`, `cargo test` in `crates/quantibbler-kernels`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, `uv run maturin build --manifest-path crates/quantibbler-kernels/Cargo.toml` — and record results.
+- [x] (orchestrator + team) Full gate suite before landing — `uv run pytest`, `cargo test` in `crates/quantibbler-kernels`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, `uv run maturin build --manifest-path crates/quantibbler-kernels/Cargo.toml` — and record results.
+      — **Observed 2026-10-25 on the landing tree (shared `/opt/venv`, torch
+      2.14.1+cpu, no accelerator):** `tests/test_qk_bar.py` → **9 passed**,
+      RC=0; `tests/ptq/test_solver_backend.py` → **12 passed**, RC=0 (the
+      t_7190f18b canary suite — refusal pins intact with the balance-site
+      fix). Full tier `uv run --no-sync pytest -q -rs` → **53 failed /
+      621 passed / 3 integration deselected** (documented default marker
+      filter), RC=1, 177.32s, 677 collected — the documented dev-CPU-wheel
+      class (implicit torch resolve refuses without an accelerator; driver
+      subprocesses exit 1 and their assertions fail downstream): 56 measured
+      on HEAD+fix by t_7190f18b; the −3 failed / +6 collected delta rides
+      sibling lanes' IN-FLIGHT test edits in the shared tree
+      (`test_admm_convergence.py`, `test_geometry_conformance.py` — not this
+      landing's paths); zero failures in any path this landing stages. Rust,
+      CI's stronger `-p` form: `cargo test --locked -p quantibbler-kernels -p
+      quantibbler-server --all-targets` + `cargo clippy --locked -p
+      quantibbler-kernels -p quantibbler-server --all-targets -- -D warnings`
+      + `cargo fmt --manifest-path crates/quantibbler-kernels/Cargo.toml
+      --all -- --check` + `uv run --no-sync maturin build --manifest-path
+      crates/quantibbler-kernels/Cargo.toml` — **chain exit 0**.
+      `npx --yes @fission-ai/openspec@1.14.3 validate qk-nq-recreation-bar
+      --strict` → `Change 'qk-nq-recreation-bar' is valid`, **RC=0** (exactly
+      one id per invocation). pre-commit on all six changed paths (new files
+      named explicitly) → **RC=0**.

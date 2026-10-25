@@ -234,3 +234,120 @@ row + 1 derivation-guard row); lean tier **354 passed / 16 skipped**, `skip
 discipline holds` (the new module is *ignored*, not skipped, by the tier gate's
 `pytest_ignore_collect`, so the skip count is unchanged); pre-commit **RC=0**;
 `openspec validate qk-nq-recreation-bar --strict` valid.
+
+## Implementation crystallization 2026-10-25 — bar constants, tasks 26-27
+
+**RED first, and recorded.** `tests/test_qk_bar.py` was authored before the
+module it pins existed, and its collection failed:
+`ImportError: cannot import name 'qk_bar' from 'quantibbler'` — `1 error during
+collection`, RC=2. Only then was `src/quantibbler/qk_bar.py` written.
+
+**The bar is a SIBLING module, not a second block in `qk_report.py`.** Task row
+27 licenses both homes; the change's own spirit picks the sibling. The band
+module owns the only per-run verdict, and this delta's
+`bar_distinct_from_landing_gate` / `bar_never_recalibrates_the_band` scenarios
+say the bar is not a verdict. Kept separate, that separation is structural: the
+bar is a torch-free module at the package root (the `qk_report.py` layering, so
+the pin runs in the lean tier instead of silently skipping), the band's
+constants stay in the one module `verdict()` reads, and the bar cannot reach the
+run path quietly because nothing on the run path imports it. Folding the two
+together would have made "the bar never feeds a per-run verdict" a review
+obligation; here it is a property of the import graph.
+
+**Design-silent choices, pinned here so they are reviewable:**
+
+- **Each row value is a copy carrying its paper line.** `BAR_ROWS` is
+  `(label, row_ppl, row_bits, paper_line)` over [NQ] Sec. 4.2 Table 2's
+  Qwen3-0.6B column (lines 881 / 1035 / 1079 / 1123 of the pinned copy). The
+  suite RE-READS those lines and asserts each value occurs exactly once in the
+  file, so a constant that drifts from the paper fails rather than quietly
+  redefining the bar. The values are literals in the module's AST, and the
+  derivation audit rejects a row recomputed at import time (`6.33 * 2.0`,
+  `float("12.66")`, a bare name) — that is `bar_constants_asserted`'s "no
+  runtime path recomputes them", kept non-vacuous by four poisoned-source cases.
+- **The tolerance is computed, never the rounded table value.**
+  `bar_tolerance(row) == TOLERANCE * row` exactly; the design table above
+  renders the ceilings to 2dp (31.69 / 38.86 / 60.88 against 31.694 / 38.8585 /
+  60.881), and the suite asserts the code does NOT equal the rendered values, so
+  "not rounded in code" is a test result rather than a claim.
+- **The bit budgets travel with the rows** (1.00 / 0.80 / 0.55; the FP16
+  baseline's 16.00 bits is not a target row), and `row_meets_bar` makes
+  `bar_not_purchased_with_bits` EXECUTABLE instead of a sentence: a lower
+  perplexity at a higher bit budget returns `False`, so the bit test is a
+  condition and not a tie-breaker, and a defective measurement fails closed on
+  either side (missing / non-numeric / non-finite) — the rule the per-run band
+  already applies. Below the lowest budget (0.55 bits) no row exists
+  (`bar_undefined_below_lowest_row`), and no interpolation is offered anywhere.
+- **`row_meets_bar` has no production caller yet: declared debt, not rot.** The
+  acceptance run is human-gated and its record is the ledger (tasks 28/30,
+  orchestrator); nothing else in this repo classifies an artifact against the
+  bar. It cannot gate a run while it is unwired, and it gets wired to the
+  ledger, never to `verdict()`.
+
+**A test-side correction, observed.** The first green attempt failed on my own
+assertion, not the module: `pytest.approx` at its default 1e-6 relative
+tolerance rejected the design table's 2dp ceilings (max rel diff 1.26e-4). Fixed
+to `abs=5e-3` — half a displayed unit — with exactness asserted separately by
+`bar_tolerance(27.56) != 31.69`, so the approximation is about the table's
+display precision while the non-rounding claim still bites.
+
+**Gates at landing:** `uv sync --all-groups --extra kernels` RC=0; lean tier
+**437 passed, 0 skipped, RC=0** (428 before this change's 9 tests);
+`ruff check` / `ruff format --check` RC=0 on both new files. Interpreter: a
+private `UV_PROJECT_ENVIRONMENT` synced lean (`torch` absent) — the shared
+`/opt/venv` is re-synced by whichever lane runs `uv` last, and a co-tenant's
+`--extra torch` sync collects the ptq tier (56 known dev-CPU-wheel
+`resolve_device` refusals, none of them these files), so the hermetic env is
+what makes this change's lean number attributable.
+
+**Finding for the planner (not this row's bytes):** this change dir dates its
+tune/eval entries "2026-10-27", while `date` and `git log` in this repo read
+2026-10-25. The discrepancy predates this landing and is left untouched here.
+
+## Implementation crystallization 2026-10-25 — ledger format, task 28
+
+Task 28 asked for the acceptance-run ledger FORMAT as a doc/format note, not
+code; the format lives in this change dir as `ledger-format.md`. Deliberately
+documentation: the proposal's Impact section sequences the ledger's
+implementation ("a run-ledger format when an acceptance run is first
+scheduled"), the acceptance run itself is a @user-gated fire (lane authority
+rule), and a format reviewable before the first entry exists is the point of
+authoring it now.
+
+Design-silent choices, pinned here so they are reviewable:
+
+- **One file, `docs/acceptance-ledger.jsonl`, append-only JSONL, versioned in
+  the repo.** Discarded: per-run records under `artifacts/` (the ledger is the
+  release criterion's durable evidence — a record living only beside a run's
+  artifacts is neither diffable in review nor greppable across runs); SQLite
+  (unreviewable in a PR diff); a Markdown table (no schema, mutation-hostile,
+  and append discipline dies in hand-edited prose). Append-only with
+  `supersedes`, because an acceptance record that can be quietly rewritten is
+  not a record; corrections are new lines naming the line they replace.
+- **`targeted_row` is the closed label enum of `qk_bar.BAR_ROWS`.** The format
+  NAMES the labels but never re-lists the values — the constants' single
+  source of truth stays the sibling module and its paper-line audit (a second
+  copy would be a second place to drift). `bar_undefined_below_lowest_row`
+  becomes a format rule: there is no way to write an entry below 0.55 bits,
+  and the FP16 baseline is not a target row.
+- **Two ratios, both defined by arithmetic in the format note.** The
+  scenario's "ratio" is `ppl / row_ppl` (bar-relevant distance to the row);
+  `ratio_vs_baseline = ppl / 12.66` rides alongside because [NQ] Table 2's own
+  ratio column is baseline-relative (the band scenario quotes @0.55 as ratio
+  4.18 = 52.94/12.66), and a ledger number that cannot be compared to the
+  paper column invites misquotation. Full precision, never the 2dp renderings
+  — the same rule the constants test pins.
+- **`bar_met` is `row_meets_bar` AND paper protocol.** The predicate is
+  `qk_bar.row_meets_bar` semantics (both halves, fail-closed on defective
+  measurements); it may read `true` only on the paper's protocol (WT2 test,
+  seq 2048). A surrogate-geometry entry records `protocol_deviation` with its
+  `equivalence_argument` and may carry the human `decision: "equivalence"` —
+  which NEVER flips `bar_met`: the spec's bar stays met on the paper protocol
+  only, and the proposal's equivalence clause is encoded as a recorded human
+  acceptance of a deviation, not a redefinition of the bar.
+- **The operational-gate verdict rides as a COPY** (`band` + `report_path`
+  from the run's quantize_report.json); the ledger never computes it and
+  nothing reads the ledger on the run path. The sibling-module
+  crystallization above ("wired to the ledger, never to `verdict()`") is
+  preserved at the ledger layer by construction: a doc the pipeline does not
+  import cannot gate a run.
