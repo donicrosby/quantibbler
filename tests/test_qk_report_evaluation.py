@@ -163,8 +163,8 @@ def test_scn_label_requires_fp_stream_teacher_provenance():
 
     keys = [k for k, *_ in R._STAGE_LINES]
     # tune_scales_kd counts as executed only when its payload carries an artifact
-    # (qk_report.py:474), so a uniform payload cannot satisfy all fifteen and the
-    # baseline is per-stage rather than generic.
+    # (the ``artifact`` clause in ``fidelity_conditions``), so a uniform payload
+    # cannot satisfy all fifteen and the baseline is per-stage rather than generic.
     # ``capture`` is excluded here and supplied by _with_capture below: a base
     # entry for it would be an unprovenanced second capture, and the provenance
     # condition correctly denies the label when ANY capture lacks provenance.
