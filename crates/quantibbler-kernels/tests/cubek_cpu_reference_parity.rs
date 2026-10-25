@@ -60,7 +60,7 @@ use serde_json::Value;
 ///
 /// **Shape — the two-part rule this change already accepted and measured for
 /// the Python and device faces** (design.md, "Implementation crystallization
-/// 2026-10-20", decision 2026-10-27): (1) infinity-norm relative
+/// 2026-10-20", decision 2026-10-20): (1) infinity-norm relative
 /// `max|a-e| <= RTOL * max(|a|,|e|)`, which covers the whole row; (2)
 /// per-element relative `<= RTOL` restricted to entries within `BAND` of their
 /// row's maximum. The unbanded per-element statistic that reddened this file
@@ -71,7 +71,7 @@ use serde_json::Value;
 /// — both sub-ulp at the accumulator scale, so that clause reads softmax
 /// cancellation rather than either implementation. Same reason the other two
 /// faces are already gated this way. `the_witness_budget_still_rejects_an_o1_convention_defect`
-/// pins the reformulation's cost (sec-eng, 2026-10-27).
+/// pins the reformulation's cost (sec-eng, 2026-10-20).
 const RTOL: f64 = 1e-5;
 const BAND: f64 = 1e-1;
 
@@ -465,7 +465,7 @@ fn fully_masked_row_conventions_differ() {
     );
 }
 
-/// Proof of power (sec-eng, 2026-10-27 — mandatory component of the
+/// Proof of power (sec-eng, 2026-10-20 — mandatory component of the
 /// reformulated budget): a widened shape must not swallow the defect class the
 /// device battery catches. One O(1) convention defect — the GQA group mapping
 /// replaced by `head h reads kv head h % kv_heads` instead of `h / group` — is

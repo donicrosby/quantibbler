@@ -23,6 +23,11 @@ pub async fn health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<ser
             "model": state.model_id,
             "available_permits": state.engine.available_permits(),
             "matvec_face": state.engine.weights.matvec_face(),
+            // qk-flash-attention 3.2: the active attention face, reported
+            // alongside matvec_face. Frozen at load, so the label cannot go
+            // stale mid-stream (spec delta `qk-server` "Attention face
+            // dispatch (frozen decision, soft fallback)").
+            "attention_face": state.engine.weights.attention_face(),
         })),
     )
 }

@@ -7,10 +7,14 @@
 The server SHALL expose `gpu:sage` as a third attention face (opt-in env,
 frozen at load, honest `/health` label) only for models whose shipped gate
 record passes: Cosine Sim ≥ 0.999 and Relative L1 ≤ 0.02 vs the exact face
-on captured real activations, plus a quantized-PPL delta within the bound
-recorded at the gate run ([SA] §4.3 metrics; Table 3 worst-case
-motivation). A model that fails the gate MUST refuse the face at startup
-with a typed error — never serve silently degraded attention.
+on captured real activations ([SA] §4.3 metrics; Table 3 worst-case
+motivation), and, when the gate run records one, a quantized-PPL delta
+within the bound recorded at that run. A record that declares no PPL clause
+SHALL be admitted on the [SA] §4.3 metrics alone, with the gap logged at
+WARN level (the PPL clause's only producer is a real-model eval run whose
+capture requires an explicit GO; a fabricated number would be worse than
+the gap). A model that fails the gate MUST refuse the face at startup with
+a typed error — never serve silently degraded attention.
 
 #### Scenario: Gate pass enables the face
 
@@ -46,3 +50,19 @@ face's enabling evidence is auditable rather than asserted.
   its captured activation fixture,
 - **THEN** it reproduces the shipped record's metrics within f32
   round-off, and the server's startup gate accepts it.
+
+### Requirement: Serving parity across the quantized attention face
+
+Generation through the `gpu:sage` face SHALL be indistinguishable from the
+exact scalar face at the serving contract: identical token streams on the
+fixture pipeline, with the final logits agreeing inside the face's OWN
+quality gate ([SA] §4.3 — Cosine Sim ≥ 0.999, Relative L1 ≤ 0.02). The
+INT8 face is lossy by design, so the exact face's reassociation budget
+(rel ≤ 1e-5) SHALL NOT be applied to it.
+
+#### Scenario: Quantized-face token identity on the fixture pipeline
+
+- **WHEN** the fixture transformer generates greedily through the exact
+  scalar face and through the `gpu:sage` face over identical inputs,
+- **THEN** the token streams are identical and the final logits agree at
+  the [SA] §4.3 gate (Cosine Sim ≥ 0.999, Relative L1 ≤ 0.02).

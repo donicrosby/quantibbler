@@ -10,6 +10,8 @@ use tokio::sync::Semaphore;
 
 #[cfg(feature = "gpu")]
 use quantibbler_kernels::gpu::GpuContext;
+#[cfg(feature = "gpu")]
+use quantibbler_kernels::gpu_attention::AttentionShape;
 use quantibbler_qpk1::{Layer, NormSlot, inventory_block_floats};
 
 /// Which face computes the packed matvecs (qk-attention 3.4). Selected ONCE
@@ -82,6 +84,143 @@ impl FaceDecision {
     pub fn describe(&self) -> &'static str {
         self.chosen
     }
+}
+
+/// Which face computes attention (qk-flash-attention 3.2). Selected ONCE per
+/// process at engine construction — never mid-stream, so a served model's
+/// outputs stay deterministic for its whole lifetime — using the same
+/// frozen-decision pattern as [`FaceDecision`] for matvecs. Both faces compute
+/// the same attention inside the parity budget (spec delta `qk-server`,
+/// "Serving parity across attention faces"), so face selection is a
+/// performance/availability policy, not a semantics choice.
+pub enum AttentionFace {
+    /// The engine's in-line scalar CPU routine (default; the only face in
+    /// default builds).
+    CpuScalar,
+    /// CubeCL tiled device face, behind the `gpu` feature + the env opt-in.
+    #[cfg(feature = "gpu")]
+    GpuTiled(GpuContext),
+    /// CubeCL INT8 tiled device face (qk-sage-attention 3.2): behind the `gpu`
+    /// feature + the `QUANTIBBLER_ATTN=sage` opt-in AND the startup quality gate
+    /// (`model::sage_face_from_env`), which reads the model directory's shipped
+    /// gate record. It is the one face whose selection depends on a MEASURED
+    /// record rather than on the build alone — and unlike the other two, it is
+    /// lossy: it approximates the exact attention inside [SA] §4.3's gate.
+    #[cfg(feature = "gpu")]
+    GpuSage(GpuContext),
+}
+
+/// The INT8 face's tile width ([SA] §4's block loop; the reference's
+/// `block_size`). The kernel is one thread per query row, so this is the
+/// γ/online-softmax granularity — the number of key positions whose shared
+/// mean is removed by one γ — not a thread-block shape. Only the `gpu` face
+/// consumes it: without that feature there is no INT8 path to size.
+#[cfg(feature = "gpu")]
+pub const SAGE_BLOCK_SIZE: usize = 64;
+
+/// The engine's attention-face decision, carried on `ModelWeights` so every
+/// consumer (forward, health reporting) reads ONE source of truth.
+pub struct AttentionFaceDecision {
+    pub face: AttentionFace,
+    /// Human-readable selection record (`/health`) — the same field the matvec
+    /// decision carries.
+    pub chosen: &'static str,
+}
+
+impl AttentionFaceDecision {
+    /// The default-build selection: the in-line scalar CPU routine.
+    pub fn cpu_scalar_selected() -> Self {
+        Self {
+            face: AttentionFace::CpuScalar,
+            chosen: "cpu:scalar",
+        }
+    }
+
+    /// GPU dispatch policy (task 3.2, soft-fail): env `QUANTIBBLER_ATTN=1`
+    /// requests the tiled device face; a failed device init is NOT fatal — the
+    /// scalar face computes the same attention inside the parity budget, so we
+    /// log and fall back rather than abort startup (spec delta `qk-server`,
+    /// "Soft fallback on init failure"). After startup the decision is
+    /// frozen: per-call device errors are hard errors.
+    #[cfg(feature = "gpu")]
+    pub fn select_from_env() -> Self {
+        if std::env::var("QUANTIBBLER_ATTN").is_ok_and(|v| v == "1") {
+            match GpuContext::init_at(attention_device_index()) {
+                Ok(ctx) => {
+                    return Self {
+                        face: AttentionFace::GpuTiled(ctx),
+                        chosen: "gpu:tiled",
+                    };
+                }
+                Err(e) => {
+                    eprintln!(
+                        "QUANTIBBLER_ATTN=1 but the tiled attention face is unavailable; \
+                         staying on the scalar CPU face. ({e})"
+                    );
+                }
+            }
+        }
+        Self::cpu_scalar_selected()
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    pub fn select_from_env() -> Self {
+        Self::cpu_scalar_selected()
+    }
+
+    /// The `gpu:sage` decision (qk-sage-attention 3.2). The CALLER has already
+    /// admitted the model's gate record (`model::sage_face_from_env`), so this
+    /// only constructs the device milieu: a failed device init is NOT fatal —
+    /// the exact scalar face computes the same attention inside the parity
+    /// budget, so we log and fall back — while QUALITY is never the fallback
+    /// trigger: an out-of-bounds record aborts startup long before this runs
+    /// (spec delta `qk-server`, "Soft fallback on device failure only").
+    #[cfg(feature = "gpu")]
+    pub fn sage_selected() -> Self {
+        match GpuContext::init_at(attention_device_index()) {
+            Ok(ctx) => Self {
+                face: AttentionFace::GpuSage(ctx),
+                chosen: "gpu:sage",
+            },
+            Err(e) => {
+                eprintln!(
+                    "the gate admitted the gpu:sage face but the INT8 device face is unavailable; \
+                     staying on the scalar CPU face. ({e})"
+                );
+                Self::cpu_scalar_selected()
+            }
+        }
+    }
+
+    /// Without the `gpu` feature there is no device face to reach: the opt-in is
+    /// inert exactly as `QUANTIBBLER_ATTN=1` is (the gate has already run and
+    /// admitted the model's record — see `model::sage_face_from_env`).
+    #[cfg(not(feature = "gpu"))]
+    pub fn sage_selected() -> Self {
+        Self::cpu_scalar_selected()
+    }
+
+    /// Face label for /health.
+    pub fn describe(&self) -> &'static str {
+        self.chosen
+    }
+}
+
+/// The device index the tiled face probes. Production is index 0; test builds
+/// may override it so the soft-fallback branch is constructible on a machine
+/// WITH a usable device: an out-of-range index is the same deterministic init
+/// failure the kernels crate's `fail_closed_construction_without_a_usable_device`
+/// test uses. `#[cfg(test)]`-gated on purpose — no shipped binary carries it.
+#[cfg(feature = "gpu")]
+fn attention_device_index() -> usize {
+    #[cfg(test)]
+    if let Some(index) = std::env::var("QUANTIBBLER_ATTN_TEST_DEVICE")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+    {
+        return index;
+    }
+    0
 }
 
 /// Error surface of the engine (maps to the 500 envelope at the API edge).
@@ -401,6 +540,11 @@ pub struct ModelWeights {
     /// default; HIP device face under `gpu` + QUANTIBBLER_GPU=1 with
     /// successful init. Selected once, never swapped mid-stream.
     matvec: FaceDecision,
+    /// Frozen attention-face decision (qk-flash-attention 3.2): the in-line
+    /// scalar routine by default; the tiled device face under `gpu` +
+    /// QUANTIBBLER_ATTN=1 with successful init (a failed init soft-falls-back
+    /// to scalar). Selected once, never swapped mid-stream.
+    attention: AttentionFaceDecision,
 }
 
 fn f32ify(v: Vec<f64>) -> Vec<f32> {
@@ -497,12 +641,30 @@ impl ModelWeights {
             // are unconditionally CPU; `gpu` builds consult
             // QUANTIBBLER_GPU=1 and soft-fall-back on init failure.
             matvec: FaceDecision::select_from_env(),
+            // Attention face selection happens once too, at the same
+            // construction point (task 3.2): default builds are the in-line
+            // scalar routine; `gpu` builds consult QUANTIBBLER_ATTN=1 and
+            // soft-fall-back to scalar on init failure.
+            attention: AttentionFaceDecision::select_from_env(),
         })
     }
 
     /// The frozen matvec-face label (startup log + /health reporting).
     pub fn matvec_face(&self) -> &'static str {
         self.matvec.describe()
+    }
+
+    /// The frozen attention-face label (startup log + /health reporting).
+    pub fn attention_face(&self) -> &'static str {
+        self.attention.describe()
+    }
+
+    /// Install a face decision the constructor cannot compute — today only the
+    /// `gpu:sage` decision, whose startup gate needs the MODEL DIRECTORY (the
+    /// record lives there) rather than just the config (qk-sage-attention 3.2).
+    /// Called once, by `model::load`, before the weights are shared.
+    pub fn set_attention_face(&mut self, decision: AttentionFaceDecision) {
+        self.attention = decision;
     }
 
     /// Hidden vector for one token: `embedding[token]`.
@@ -650,12 +812,134 @@ impl ModelWeights {
         Ok(scratch)
     }
 
+    /// GQA causal attention for one query position, on the SELECTED face
+    /// (task 3.2): the in-line scalar routine by default, the tiled device
+    /// face under `gpu` + `QUANTIBBLER_ATTN=1`. Both solve the same problem —
+    /// the device call reproduces the conventions `gqa_attention_scalar`
+    /// documents.
+    #[allow(clippy::too_many_arguments)]
+    fn gqa_attention(
+        &self,
+        qh: &[f32],
+        block: usize,
+        cache: &KvCache,
+        n_groups: usize,
+        pos: usize,
+    ) -> Result<Vec<f32>, EngineError> {
+        match &self.attention.face {
+            AttentionFace::CpuScalar => self.gqa_attention_scalar(qh, block, cache, n_groups, pos),
+            #[cfg(feature = "gpu")]
+            AttentionFace::GpuTiled(ctx) => self.gqa_attention_tiled(ctx, qh, block, cache, pos),
+            #[cfg(feature = "gpu")]
+            AttentionFace::GpuSage(ctx) => self.gqa_attention_sage(ctx, qh, block, cache, pos),
+        }
+    }
+
+    /// One decode step on the INT8 face (qk-sage-attention 3.2). `n_groups` is
+    /// not a parameter: the device wrapper materializes GQA groups itself (the
+    /// same `repeat_interleave` the tiled call relies on).
+    ///
+    /// The shipped INT8 kernel is self-attention over ONE cache — it requires
+    /// `seq_q == seq_kv`, because γ's shift is taken over the key block in
+    /// flight (the reference's own crystallization entry, task 1.1–1.2). The
+    /// decode cache already holds exactly this query's causal window (`0..=pos`,
+    /// pushed before this call), so the query goes into **row 0** of a
+    /// `pos + 1`-row buffer padded with zeros and `causal = false`: row 0 attends
+    /// to every key present, which IS the causal window for the last cached
+    /// position. Only row 0 of each head is read; the padding rows are waste
+    /// (`block_size`-independent, O(seq_kv²) per step) accepted as the price of
+    /// the shipped kernel contract rather than a silent reinterpretation of it.
+    #[cfg(feature = "gpu")]
+    fn gqa_attention_sage(
+        &self,
+        ctx: &GpuContext,
+        qh: &[f32],
+        block: usize,
+        cache: &KvCache,
+        pos: usize,
+    ) -> Result<Vec<f32>, EngineError> {
+        debug_assert_eq!(cache.len(block), pos + 1, "current step must be cached");
+        let head_dim = self.head_dim;
+        let seq = pos + 1;
+        let mut padded_q = vec![0.0f32; self.n_heads * seq * head_dim];
+        for head in 0..self.n_heads {
+            let dst = head * seq * head_dim;
+            padded_q[dst..dst + head_dim]
+                .copy_from_slice(&qh[head * head_dim..(head + 1) * head_dim]);
+        }
+        let shape = AttentionShape {
+            batch: 1,
+            n_heads: self.n_heads,
+            n_kv_heads: self.n_kv_heads,
+            seq_q: seq,
+            seq_kv: seq,
+            head_dim,
+            val_dim: head_dim,
+        };
+        // K/V go over in the device contract's (1, n_kv_heads, seq_kv,
+        // head_dim) plane — head-major, hence the gather out of the row-major
+        // cache (`KvCache::keys_head_major`). `attention_sage` mirrors
+        // `GpuContext::attention`'s layout, whose `repeat_heads` indexes the
+        // source as `((b * n_kv_heads + kv) * seq) * dim`, and the INT8 kernel
+        // reads the same plane (`kv_tok = (b * n_kv + kvh) * seq`). Handing it
+        // the raw row-major stack is the O(1) transposition task 3.3 measured
+        // on the sibling face.
+        let keys = cache.keys_head_major(block, self.n_kv_heads, self.head_dim);
+        let vals = cache.vals_head_major(block, self.n_kv_heads, self.head_dim);
+        let out = ctx
+            .attention_sage(shape, &padded_q, &keys, &vals, false, SAGE_BLOCK_SIZE)
+            .map_err(|e| EngineError(format!("block {block}: sage attention: {e}")))?;
+        let mut attn = vec![0.0f32; self.n_heads * head_dim];
+        for head in 0..self.n_heads {
+            let src = head * seq * head_dim; // row 0 of this head's plane
+            attn[head * head_dim..(head + 1) * head_dim].copy_from_slice(&out[src..src + head_dim]);
+        }
+        Ok(attn)
+    }
+
+    /// One decode step on the tiled device face: ONE query position against the
+    /// KV cache, in the device contract's `(B, H, S, d)` layout. `seq_q = 1`
+    /// with `causal = true` attends over `0..=pos` (the substrate's causality is
+    /// `j + seq_q > i + seq_kv`, which is exactly the scalar routine's window),
+    /// and `n_kv_heads` carries the GQA grouping — the substrate's missing
+    /// first-class GQA is the kernels wrapper's host-side materialization, not a
+    /// convention change here. `val_dim == head_dim`: `v_proj` emits
+    /// `n_kv_heads * head_dim`.
+    #[cfg(feature = "gpu")]
+    fn gqa_attention_tiled(
+        &self,
+        ctx: &GpuContext,
+        qh: &[f32],
+        block: usize,
+        cache: &KvCache,
+        pos: usize,
+    ) -> Result<Vec<f32>, EngineError> {
+        let shape = AttentionShape {
+            batch: 1,
+            n_heads: self.n_heads,
+            n_kv_heads: self.n_kv_heads,
+            seq_q: 1,
+            seq_kv: pos + 1,
+            head_dim: self.head_dim,
+            val_dim: self.head_dim,
+        };
+        // K/V go over in the device contract's (1, n_kv_heads, seq_kv,
+        // head_dim) plane — head-major, hence the gather out of the
+        // row-major cache (`KvCache::keys_head_major`). The query needs no
+        // re-order: at `seq_q = 1`, `(1, n_heads, 1, head_dim)` and
+        // `(n_heads, head_dim)` are the same bytes.
+        let keys = cache.keys_head_major(block, self.n_kv_heads, self.head_dim);
+        let vals = cache.vals_head_major(block, self.n_kv_heads, self.head_dim);
+        ctx.attention(shape, qh, &keys, &vals, true)
+            .map_err(|e| EngineError(format!("block {block}: tiled attention: {e}")))
+    }
+
     /// GQA causal attention for one query position: per KV group, the
     /// query head attends over positions `0..=pos`; scores are
     /// dot(query, key)/sqrt(head_dim) in f32, softmax over the causal
     /// window, output the value mixture.
     #[allow(clippy::too_many_arguments)]
-    fn gqa_attention(
+    fn gqa_attention_scalar(
         &self,
         qh: &[f32],
         block: usize,
@@ -814,6 +1098,52 @@ impl KvCache {
 
     fn val(&self, block: usize, pos: usize) -> &[f32] {
         &self.v[block][pos * self.kv_dim..(pos + 1) * self.kv_dim]
+    }
+
+    /// The block's cached key stack in the DEVICE contract's layout
+    /// `(1, n_kv_heads, seq_kv, head_dim)` (see `AttentionShape`): head-major,
+    /// so it is built by a host-side gather out of the row-major cache. The
+    /// gather is not optional — the layouts differ whenever `n_kv_heads > 1`,
+    /// which the fixture model (2 kv heads) exhibits.
+    ///
+    /// The raw row-major stack (`(seq_kv, n_kv_heads, head_dim)`, each
+    /// position's `kv_dim` row contiguous) is what `key` / `val` and the scalar
+    /// routine read, and handing THAT to the device is an O(1) wrong-compute:
+    /// measured on `gqa_attention_tiled` (1.634708e-1, task 3.3) and on
+    /// `gqa_attention_sage` (task 3.4). The two orders coincide only at
+    /// `n_kv_heads == 1`. Every device consumer takes this accessor instead.
+    #[cfg(feature = "gpu")]
+    fn keys_head_major(&self, block: usize, n_kv_heads: usize, head_dim: usize) -> Vec<f32> {
+        self.head_major(&self.k[block], block, n_kv_heads, head_dim)
+    }
+
+    /// Values, same layout contract as `KvCache::keys_head_major`.
+    #[cfg(feature = "gpu")]
+    fn vals_head_major(&self, block: usize, n_kv_heads: usize, head_dim: usize) -> Vec<f32> {
+        self.head_major(&self.v[block], block, n_kv_heads, head_dim)
+    }
+
+    /// The shared gather behind the two accessors above: `(seq_kv, kv_dim)`
+    /// row-major in, `(n_kv_heads, seq_kv, head_dim)` head-major out.
+    #[cfg(feature = "gpu")]
+    fn head_major(
+        &self,
+        flat: &[f32],
+        block: usize,
+        n_kv_heads: usize,
+        head_dim: usize,
+    ) -> Vec<f32> {
+        let seq = self.len(block);
+        debug_assert_eq!(flat.len(), seq * n_kv_heads * head_dim);
+        let mut out = vec![0.0f32; seq * n_kv_heads * head_dim];
+        for head in 0..n_kv_heads {
+            for pos in 0..seq {
+                let src = pos * self.kv_dim + head * head_dim;
+                let dst = (head * seq + pos) * head_dim;
+                out[dst..dst + head_dim].copy_from_slice(&flat[src..src + head_dim]);
+            }
+        }
+        out
     }
 }
 

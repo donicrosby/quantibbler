@@ -1,0 +1,90 @@
+{
+  "schema": "quantibbler.attention_gate/1",
+  "model_id": "server-model-fixture",
+  "activations_source": "crates/quantibbler-kernels/tests/fixtures/attention_sage.json",
+  "activations_kind": "fixture-battery",
+  "generated_at": "2026-10-25T10:29:12Z",
+  "code_commit": "8c226fa-dirty",
+  "clauses": {
+    "cosine_min": 0.999,
+    "relative_l1_max": 0.02
+  },
+  "calls": [
+    {
+      "case": 0,
+      "block_size": 8,
+      "cosine": 0.9999847591446098,
+      "relative_l1": 0.0056797346442098336,
+      "rmse": 0.0032827471072786026
+    },
+    {
+      "case": 1,
+      "block_size": 4,
+      "cosine": 0.9999918293138063,
+      "relative_l1": 0.003906363544709406,
+      "rmse": 0.0034078478542770908
+    },
+    {
+      "case": 2,
+      "block_size": 3,
+      "cosine": 0.9999854257394872,
+      "relative_l1": 0.005311855635796526,
+      "rmse": 0.002544501630955814
+    },
+    {
+      "case": 3,
+      "block_size": 4,
+      "cosine": 0.9999828048757672,
+      "relative_l1": 0.0057275543273841885,
+      "rmse": 0.0047505744816399185
+    },
+    {
+      "case": 4,
+      "block_size": 8,
+      "cosine": 0.9999773335929835,
+      "relative_l1": 0.006647397817836542,
+      "rmse": 0.0027554467143969135
+    },
+    {
+      "case": 5,
+      "block_size": 3,
+      "cosine": 0.9999924011641986,
+      "relative_l1": 0.0036428737376650137,
+      "rmse": 0.0026542697266846763
+    },
+    {
+      "case": 6,
+      "block_size": 3,
+      "cosine": 0.9999901777756521,
+      "relative_l1": 0.0042813993635138345,
+      "rmse": 0.0030679898557754684
+    },
+    {
+      "case": 7,
+      "block_size": 4,
+      "cosine": 0.9999687782129827,
+      "relative_l1": 0.007218304324220504,
+      "rmse": 0.0027982964045767914
+    },
+    {
+      "case": 8,
+      "block_size": 2,
+      "cosine": 0.9999877636330703,
+      "relative_l1": 0.004648362004281181,
+      "rmse": 0.003779600948970406
+    },
+    {
+      "case": 9,
+      "block_size": 1,
+      "cosine": 0.9999982284143841,
+      "relative_l1": 0.0015471646125020725,
+      "rmse": 0.0018269441014811412
+    }
+  ],
+  "worst": {
+    "cosine": 0.9999687782129827,
+    "relative_l1": 0.007218304324220504,
+    "rmse": 0.0047505744816399185
+  },
+  "ppl": null
+}
