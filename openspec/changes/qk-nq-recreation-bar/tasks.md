@@ -21,7 +21,7 @@
       passed / 16 skipped**, `skip discipline holds`; pre-commit **RC=0**;
       `validate --strict` valid. Design-silent choices, the RED transcript and a
       guard finding are recorded in this change's design.md
-      ("Implementation crystallization 2026-10-27").
+      ("Implementation crystallization 2026-10-20").
 - [x] (bug-hunter) Review: the seq-2048 eval clause cannot be satisfied by eval-at-512; default (flag unset) geometry is behavior-identical to pre-flag; any memory claim comes only from the 32g-container microbench with crumb-format peaks.
       — **Reviewed on landed bytes @ HEAD 075e7ec.** All three clauses PASS.
       (1) Eval geometry is `--seq-len` only: the report records `seq_len` and
@@ -101,7 +101,7 @@
       first acceptance run is scheduled). Design-silent choices recorded in
       this change's design.md ("Implementation crystallization 2026-10-25 —
       ledger format, task 28").
-- [ ] (bug-hunter) Review: the constants match the pinned paper copy by grep (docs/papers/nanoquant-2602.06694v3.md rows 27.56/33.79/52.94/12.66); tolerance is 1.15x verbatim, not rounded in code; the seq-2048 clause cannot be satisfied by seq-512 data; the bar never feeds a per-run verdict.
+- [x] (bug-hunter) Review: the constants match the pinned paper copy by grep (docs/papers/nanoquant-2602.06694v3.md rows 27.56/33.79/52.94/12.66); tolerance is 1.15x verbatim, not rounded in code; the seq-2048 clause cannot be satisfied by seq-512 data; the bar never feeds a per-run verdict.
       — Paper-match half DELIVERED early (bug-hunter, 2026-10-25, @ HEAD
       075e7ec): a programmatic parse of the pinned copy's Table 2 puts
       Q3-0.6 at cell index 15 of 21, and the four values sit exactly there —
@@ -114,6 +114,42 @@
       BOX STAYS OPEN: the code-side half — constants asserted not recomputed,
       1.15 never rounded IN CODE — is reviewable only when the constants test
       lands (tasks 26-27); re-review then.
+      — **Code-side half REVIEWED 2026-10-25 on landed bytes @ 60c075f; all
+      four clauses PASS.** Byte chain: worktree sha256 of `qk_bar.py`
+      (32500b47…), `test_qk_bar.py` (0ec3b1db…), `ledger-format.md`
+      (ca413560…) equals the commit's blobs, so the suite ran the LANDED
+      bytes: `uv run pytest tests/test_qk_bar.py -v` → **9 passed, RC=0**
+      (Python 3.12.14). (1) Constants are COPIES, and the audit BITES:
+      `git show 60c075f:docs/papers/nanoquant-2602.06694v3.md` lines
+      881/1035/1079/1123 read `| 12.66 / | 27.56 / | 33.79 / | 52.94` — the
+      exact `FP16_BASELINE_PPL` / `BAR_ROWS` literals; `_derivation_findings`
+      demands module-level `ast.Constant` literals for the scalars and the
+      ppl/bits columns (labels + paper-line columns are pinned by full-tuple
+      equality with the test oracle, whose line column the suite re-reads
+      from the paper with a uniqueness count — no hole), and the 4
+      poisoned-source cases (`6.33 * 2.0`, `115 / 100`, `float("27.56")`,
+      bare `_ROW_PPL`) each yield their NAMED finding against the real
+      module text (mutation-applied asserted in-test). (2) `1.15` verbatim:
+      `bar_tolerance` returns `TOLERANCE * row_ppl` — no rounding anywhere;
+      the suite asserts `bar_tolerance(27.56) != 31.69` (+ the other two 2dp
+      renderings) and the torch-free subprocess asserts
+      `== 1.15 * 27.56` exactly; `row_meets_bar` compares the UNROUNDED
+      product. (3) seq-512 cannot buy the bar: ledger-format.md defines
+      `bar_met` = `row_meets_bar` semantics AND paper protocol
+      (`seq_len == 2048`, WT2 test) — surrogate-only stays `false`; format
+      rule 1 makes `decision: "met"` require `bar_met: true`, and
+      `equivalence` requires `bar_met: false` + a non-empty
+      `equivalence_argument` (a recorded human acceptance of a deviation,
+      never a flip) — exactly scenario `bar_requires_paper_protocol`.
+      (4) The bar never feeds a verdict: `git grep -c qk_bar 60c075f --
+      src/quantibbler/qk_report.py` → 0 matches (re-checked at main tip
+      8c226fa: still 0); `row_meets_bar` has no caller outside `qk_bar.py` +
+      its test at either commit; `docs/acceptance-ledger` has ZERO
+      references in src/tools/tests @ 60c075f — the ledger is doc-only by
+      construction; design.md crystallization records the unwired state as
+      declared debt ("wired to the ledger, never to `verdict()`"). NIT for
+      the future ledger tooling (non-blocking): `_measured` coerces bools
+      (`float(True) == 1.0`), so the tooling should reject bools explicitly.
 - [x] (orchestrator) `npx --yes @fission-ai/openspec validate qk-nq-recreation-bar --strict`; scoped stage (spec + code ONE commit); gate-chained commit; fenced push; CI watch.
       — **DONE 2026-10-25.** Validate (`npx --yes @fission-ai/openspec@1.14.3`,
       exactly ONE id): `Change 'qk-nq-recreation-bar' is valid`, RC=0, re-run

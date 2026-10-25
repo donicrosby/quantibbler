@@ -245,3 +245,47 @@ per-layer post-ADMM pre-polish cos (`cos_raw` against the original W),
 the `trace.min_eigs` floor, and the regime identity (ρ endpoints, `reg`,
 normalization, sources) per row; the threshold is then pinned FROM the
 Lane-0 baseline distribution in this file — never authored a priori.
+
+## Implementation crystallization — 2026-10-25 (reconcile audit, coder lane)
+
+Records what the landed tree actually does, so the open rows below cannot be
+re-read as shipped.
+
+**OQ-4 resolved (shipped, not yet recorded until now): no `QK_RHO_START` env
+knob.** `rho_start` is config-only; the solver probe row writes
+`rho_start_source: "config"` as a literal (`block_recon.py:227`) and no env read
+for it exists anywhere (`grep -rn "QK_RHO_START" src tests tools` → 0 hits).
+Reading of record: `rho_start` is not an operational lever — its default is 0.0
+and well-posedness at ρ≈0 is carried by the `reg` floor, so a second override
+knob would add a mislabelling surface with no measured use. Reopens only if a
+measurement deliberately varies `rho_start`.
+
+**Reconcile findings (each a live gap, none a shipped item):**
+
+1. **Lane order is honored by commit order, but its record is absent.** Lane 0
+   rows (`1a79d56`, `0e3987e`, `6f55d8c`, `06ce3ad`) and Lane 1 (`e5c6939`,
+   `1484e55`) all landed before Lane-3 `97a4725`, so no Lane-3 number precedes
+   them. The row-1 deliverable itself — artifact paths + dates for the Lane-0
+   baseline, the post-ADMM pre-polish cos distribution, and the baseline
+   `trace.min_eigs` floor recorded HERE — is still missing, so row 1 stays open.
+   Candidate artifacts on disk: `artifacts/lane0-fire-r3-20261024/rows.jsonl`
+   (`stage: "post_admm_pre_polish"`, `recon_cos`) + `report.json`.
+2. **OQ-2 (Frobenius entry normalization) is still unresolved** — the section
+   above says so — so the `frobenius_normalization_keep_or_remove_recorded`
+   scenario is unmet. No new-regime probe JSONL exists on disk: no artifact
+   carries `admm_reg`/`rho_start`, and `grep -rl "rho_start" artifacts/` → 0.
+   Rows 4, 5 and 7 are therefore unrun measurement/fire work, not shipped code.
+3. **Row 5's verify command is a stale identifier.** `uv run pytest
+   tests/ptq/test_lb_admm.py -k "lane3"` selects nothing (measured: `11
+   deselected`) — no test name carries `lane3`; the five lane-3 tests are named
+   `test_scn_<scenario_id>`. The acceptance pin's test does not exist yet.
+
+**Gate measurement (interpreter-labelled, per the repo's pair rule).**
+`quantibbler-ptq:rocm-official` (digest `6bad266ffdff`, torch 2.14.0+rocm10.1.0,
+hip 7.16.26385, `/dev/kfd`): full `python -m pytest -q` → `652 passed, 4 skipped,
+3 deselected`; the five lane-3 scenario tests → `5 passed`. Dev CPU wheel
+(`uv run --extra torch`, torch 2.14.1+cpu, no accelerator): `tests/ptq` →
+`57 failed, 171 passed, 3 deselected`, of which 50 are the documented fail-closed
+`resolve_device` refusal and 7 are driver-subprocess/progress tests that pass in
+the run image. The tier number is a property of the (interpreter × device) pair;
+the run tier is the image.

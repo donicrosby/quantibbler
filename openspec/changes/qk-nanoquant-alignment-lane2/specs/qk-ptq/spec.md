@@ -27,8 +27,9 @@ Block reconstruction SHALL advance TWO streams: an fp stream through pristine bl
 #### Scenario: target1_tunefp_vacuity_gone_by_construction
 
 - **WHEN** TuneFP fires for a block's first target linear and at least one prefix block is quantized
-- **THEN** the target-1 TuneFP objective is nonzero by construction — the streams have diverged — so the single-stream target-1 vacuity disappears
-- **AND** at block 1 the prefix is the identity and the streams coincide: the block-1-target-1 skip remains, now documented as the single precise identity-prefix case (design.md)
+- **THEN** the target-1 TuneFP objective would be nonzero by construction — the streams have diverged — so under dual-stream the single-stream target-1 vacuity disappears
+- **AND** the universal idx==0 skip (landed `if idx >= 1:` at block_recon.py:1595, per qk-pertarget-cycle ruling (a)) still applies: at `idx==0` no in-block layer is factorized, so TuneFP has nothing to compensate — the skip is universal across ALL blocks, not limited to the block-1 identity prefix
+- **AND** the skip's justification is "nothing factorized in-block yet," not "teacher equals frozen deepcopy" (the stale single-stream rationale that must be rewritten — planner reconcile routes to coder)
 
 #### Scenario: suite_green
 

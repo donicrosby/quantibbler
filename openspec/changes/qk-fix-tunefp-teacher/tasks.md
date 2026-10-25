@@ -375,20 +375,45 @@ seq 32 by the driver fixture tests.
 
 ### Post-fire follow-ups (2026-10-21)
 
-- [ ] (post-fire card) Resume can only deny, never bless: `stage_events`
-  is an in-process list and nothing persists it, so a faithful fire that
+- [x] (post-fire card) Resume can only deny, never bless: `stage_events`
+  is an in-process list and nothing persisted it, so a faithful fire that
   crashes in the tail (post `sign_extract_pack`, pre completion) and
-  resumes completes with a session record holding only `phase1` +
+  resumes completed with a session record holding only `phase1` +
   `tune_scales_kd` — five required-stage conditions false, label false on
   a legitimate run (honest false-deny; cannot manufacture a vacuous green
   because resume only ever shrinks the record and the config fingerprint
   already kills cross-protocol resume). Fix: append-per-event JSONL
   beside the checkpoints, fingerprint-bound by the existing
   checkpoint-dir discipline; seed the sink on resume; missing log =
-  today's behavior — never synthesize events. Reading guidance until
-  then: a tail-resumed artifact's `paper_faithful: false` with missing
-  stages named is the resume artifact's shape, not a protocol deviation;
-  the per-block evidence lives in the fingerprinted checkpoints.
+  today's behavior — never synthesize events. Reading guidance before the
+  journal existed: a tail-resumed artifact's `paper_faithful: false` with
+  missing stages named is the resume artifact's shape, not a protocol
+  deviation; the per-block evidence lives in the fingerprinted checkpoints.
+
+  **Landed (2026-10-25): the journal is `stage-events.jsonl` beside the
+  checkpoints.** `checkpoints.py` owns the writer (`append_stage_event`,
+  one line per event, opened and closed per event so a crash keeps every
+  event up to the crash), the reader (`read_stage_log`: `check_fingerprint`
+  first, then a per-line payload-shape check against
+  `qk_report._STAGE_PAYLOAD_KEYS`), and the fresh-start reset that rides the
+  fingerprint write; `api.py` seeds the sink through
+  `resume_stage_events` BEFORE the first event is emitted (a directory with
+  no completed block inherits nothing); `tools/quantize_hf_model.py`'s
+  recorder writes it while checkpointing is enabled, and `tune_scales_kd`
+  now goes through that recorder so the record and the journal carry one
+  event set. Two properties this row did not name, recorded so they are not
+  discovered later: (a) the fresh-start reset also drops the launching run's
+  pre-guard Phase-1 line — safe by construction, since Phase-1 statistics is
+  not checkpointed and re-fires on every launch, so a resume never needs it
+  from disk; (b) a re-read line whose payload is missing raises rather than
+  counting as an execution — the required-stage conditions are payload-blind
+  (sec-eng t_5855d059), so the journal is the one place a name-only record
+  could have reached them. Evidence: `tests/test_qk_stage_journal.py` (lean:
+  the shape table vs the inventory, the name-only-record motivation pin, the
+  corruption battery), `tests/ptq/test_stage_journal.py` (a tail crash +
+  resume whose condition record EQUALS the uninterrupted run's, and the same
+  resume with the journal removed denying the five), and
+  `tests/ptq/test_driver_stage_journal.py` (three real driver runs).
 
 ## Bug-hunter verification (2026-10-25, this change's two review rows)
 

@@ -2,14 +2,14 @@
 
 ## ADDED Requirements
 
-### Requirement: TuneFP SHALL tune the still-FP remainder against the cached teacher at the Figure 3 placement
+### Requirement: TuneFP SHALL tune the still-FP remainder against the cached teacher at the pertarget-cycle placement
 
 Per [NQ] Sec 3.2 Step 1, Algorithm 1, Figure 3: the stage SHALL target
-`Y_b = B^FP_b(X_b)` — the pristine FP block's output on the
-compressed-prefix stream, captured once pre-tuning — and SHALL fire once
-per block after the attention projections (Q/K/V) are factorized, tuning
-the still-FP remainder (O/G/U/D). The TuneFP internal loss formula is the
-informed assumption recorded in design.md.
+`Y_b = B^FP_b(X_b)` — the pristine FP block's output, captured once
+pre-tuning — and SHALL fire per-target within the factorization loop
+(N-1 times per block for N quantizable linears), tuning the still-FP
+remainder after earlier in-block layers are factorized. The TuneFP
+internal loss formula is the informed assumption recorded in design.md.
 
 #### Scenario: teacher_is_captured_before_tuning
 
@@ -27,18 +27,19 @@ informed assumption recorded in design.md.
 - **AND** the same capture feeds TuneLatentSTE per [NQ] Algorithm 1 line 19,
   so Steps 1 and 3 share one teacher
 
-#### Scenario: tunefp_fires_once_per_block_after_attention_factorization
+#### Scenario: tunefp_fires_per_target_within_factorization_loop
 
-- **WHEN** block reconstruction reaches a block's TuneFP pass
-- **THEN** the block's attention projections (Q, K, V) are already
-  factorized — Figure 3's left panel shows them green while the tuning
-  flames sit on the still-FP remainder — and the tunable set is exactly
-  the block's still-FP linears (O, G, U, D), tuned against the cached
-  teacher with previously-factorized in-block layers held quantized
-- **AND** the pass fires once per block per [NQ] Algorithm 1 line 12, at
-  the Figure 3 placement — never at the pre-factorization line-12
-  position where the objective is identically zero (the shipped defect
-  signature)
+- **WHEN** block reconstruction reaches a block's factorization loop
+- **THEN** TuneFP fires N-1 times (for N quantizable linears), each fire
+  tuning the still-FP remainder before the target is factorized — matching
+  the pertarget-cycle ruling (a) where `idx >= 1` gates the TuneFP call
+- **AND** the first target (`idx == 0`) is factorized with NO preceding
+  TuneFP — a pass before it has nothing factorized in-block, so the
+  student block IS the pristine teacher block on the same input and the
+  objective is identically zero
+- **AND** the teacher target `Y_b` is captured from the fp-stream reading
+  (per lane 2), and the same capture feeds TuneLatentSTE per [NQ]
+  Algorithm 1 line 19, so Steps 1 and 3 share one teacher
 
 #### Scenario: vacuous_teacher_fails_closed
 
@@ -67,15 +68,18 @@ informed assumption recorded in design.md.
   operative call always runs with factorized attention projections, so a
   real effect is required whenever in-block factorization error is nonzero
 
-#### Scenario: teacher_cache_is_memory_only_and_recovered_on_resume
+#### Scenario: teacher_target_is_persisted_and_recovered_on_resume
 
-- **WHEN** a TuneFP teacher cache exists for the run
-- **THEN** the cache is memory-only in v1 and is never persisted to a
-  checkpoint or artifact store
-- **AND** on resume the teacher is re-captured from the pinned pristine
-  source rather than restored from any cache
-- **AND** any future persisted cache form SHALL be fingerprint-bound to the
-  pristine source hash and the capture index before it may be trusted
+- **WHEN** a TuneFP run checkpoint includes the fp-stream teacher target
+- **THEN** the target is persisted as the reserved checkpoint npz key `y_b`
+  (per `checkpoints.py:_YB_KEY`) and recovered on resume via
+  `load_block_yb` to reconstruct the fp-stream prefix exactly
+- **AND** the persistence is fingerprint-bound to the checkpoint's
+  config+code identity (the existing `config_fingerprint` mechanism that
+  gates resume) so a config/code change refuses a stale checkpoint
+- **AND** a legacy checkpoint predating lane 2 carries no `y_b` key, and
+  the resume path falls back to recomputing the fp stream through the
+  pristine copy — never silently starting from a wrong activation
 
 ### Requirement: The paper_faithful label SHALL be a computed verdict, never a forwarded flag
 
@@ -89,7 +93,9 @@ SHALL be false.
 #### Scenario: label_flips_on_runtime_deviations
 
 - **WHEN** the run identity records any runtime deviation (split tune
-  geometry, non-protocol calibration row count, non-finite eval geometry)
+  geometry, non-protocol calibration row count, non-finite eval geometry,
+  or a non-protocol eval sequence length — `non_protocol_eval_geometry`,
+  eval length != the protocol's 2048)
 - **THEN** the reported label is false regardless of the flag
 - **AND** the report records the deviation list alongside the label
 
@@ -188,3 +194,60 @@ verdict.
   method and calibration protocol conditions
 - **AND** evaluation comparability remains separately false, so neither field
   can be read as the other
+
+### Requirement: A resumed run's stage record SHALL be recovered from the checkpoint directory that records it
+
+Post-fire row: the stage journal SHALL be written as ``stage-events.jsonl``
+beside the solve checkpoints, one JSONL line per stage event appended as it
+fires, and SHALL be read back on resume only behind the fingerprint guard and
+only for a directory with a completed block; every re-read line SHALL be
+validated against the known payload shapes and finiteness — a name-only or
+saturated record SHALL never reach the payload-blind required-stage verdict
+(sec-eng t_5855d059).
+
+#### Scenario: resume_journal_is_fingerprint_bound_and_never_synthesizes
+
+- **WHEN** a launch resumes from a checkpoint directory
+- **THEN** the journal is read only after ``check_fingerprint`` passes
+  (config, code version, and model identity — the live guard), so a
+  stale-config resume raises before any line is parsed
+- **AND** a directory with no completed block inherits nothing (the
+  launch re-runs every stage — fresh-start semantics)
+- **AND** a missing journal yields the pre-journal record (empty list,
+  never a synthesized event that would falsely attest an unexecuted stage)
+- **AND** a fresh-start reset — ``reset_stage_log`` called where the
+  fingerprint is written — drops the journal of the fingerprint it
+  replaces, so a later resume cannot inherit another config's events
+
+#### Scenario: resume_journal_line_is_shape_checked_and_finiteness_gated
+
+- **WHEN** a journal line is re-read
+- **THEN** the line must be a JSON object whose ``event`` names a stage the
+  recorder can emit (registered in ``_STAGE_PAYLOAD_KEYS``) and whose
+  ``info`` carries the exact keys that event always sends — a name-only
+  line, a truncated payload, or an unregistered event name raises rather
+  than counting as an execution
+- **AND** the writer sanitizes every value through ``json_safe`` before
+  writing and refuses non-finite tokens (``allow_nan=False``), so a
+  saturated measurement is recorded as strict-JSON ``null`` and a re-read
+  saturated line raises — the monotone-leverage corruption class must
+  deny, never bless the payload-blind verdict
+- **AND** a reader that detects a non-finite value after JSON parse also
+  raises, so both the write-side and read-side gates cover the saturation
+  path
+- **AND** the shape check is not a signature — a line whose keys match the
+  expected set but whose values are forged does not raise on shape; what
+  keeps a journal honest is the fingerprint of the directory it sits in
+
+#### Scenario: resume_record_matches_the_uninterrupted_record
+
+- **WHEN** a run crashes in the pipeline tail (post block loop, pre
+  completion) and resumes from its checkpoints
+- **THEN** the resumed run's fidelity condition record equals the
+  uninterrupted run's — every required stage's condition reads the same
+  value — so the label (their conjunction) means the same thing on a
+  resumed artifact as on a clean run's
+- **AND** Phase-1 statistics re-fires on every launch and is not
+  checkpointed, so the journal carries only the block-loop stages; the
+  resumed launch's own Phase-1 line and the journaled block-loop lines
+  together produce the equivalence

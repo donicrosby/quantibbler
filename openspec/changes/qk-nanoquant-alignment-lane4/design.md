@@ -54,3 +54,87 @@ The down_proj-less toy block of the acceptance fixture is exactly trigger 3: its
 ## Open Questions
 
 - **OQ-1 — does terminal_grad weighting move fidelity verdicts on real runs?** Status: open until the next production fire; owner: planner. Lane discipline (lanes 2 and 4 land before any new production run) means the fire measures this directly; no verdict change is claimed here.
+
+## Implementation crystallization — 2026-10-25 (reconcile pass)
+
+Verified against the lane tip. The working tree is SHARED and was being rewritten
+by sibling lane reconcilers during this pass: `src/quantibbler/ptq/block_recon.py`
+(mtime 05:10Z) and `calibration.py` (05:11Z) moved after the commits at 04:25/05:05Z.
+One combined-tier run therefore read a mid-write state and reported 7 failures; two
+later serial runs of the SAME command at the SAME commit were 386 passed / 0 failed.
+Treat any single tier number taken from this tree as provisional unless the tree was
+pinned.
+
+### Gate run (the Phase-5 row's "run notes")
+
+Every number carries its interpreter × device pair; the dev venv cannot exercise the
+accelerated path (`pyproject.toml` scopes the `torch` extra to the `pytorch-cpu` index).
+
+- `quantibbler-ptq:rocm-official`, `--device /dev/kfd --device /dev/dri`, mounted at
+  `/repo` with `PYTHONPATH=/repo/src`, torch 2.14.0+rocm10.1.0 (hip 7.16.26385),
+  1 device:
+  - `python -m pytest tests/ptq -q -p no:cacheprovider` → **226 passed, 2 skipped,
+    3 deselected** (0 failed) — the exact figure the lane's landing commit quoted.
+  - `python -m pytest tests/ptq tests/test_ci_referee.py tests/test_qk_report.py -q
+    -p no:cacheprovider` → **386 passed, 2 skipped, 3 deselected** (0 failed), twice.
+  - lane-local: `test_tune_loss_weighting.py test_tunefp_teacher.py test_config.py`
+    → 22 passed; regression sweep (`test_block_recon.py test_ste_sign_adaptation.py
+    test_relative_lr.py`) → 22 passed; `-k ste` → 1 passed; `-k "fallback or record"`
+    → 2 passed; `test_driver_stage_map.py` → 3 passed, 3 deselected.
+- dev venv (`uv sync --all-groups --extra kernels --extra torch --extra hf`),
+  torch 2.14.1+cpu, 0 devices: `uv run pytest tests/ptq tests/test_ci_referee.py
+  tests/test_qk_report.py -q` → **331 passed, 57 failed, 3 deselected**. All 57 are
+  the fail-closed `resolve_device` refusal ("solver backend 'torch' requires an
+  accelerator"), i.e. the documented CPU-wheel baseline rather than lane-4 behaviour.
+  16 of them are this lane's own fixtures routing through `reconstruct_block` →
+  `magnitude_balance(p_u, p_v, d_out_t, d_in_t, target=w)` (`block_recon.py:1582`),
+  which never receives `cfg.solver_backend` and so resolves the DEFAULT torch backend
+  even when the fixture pins `solver_backend="numpy"`. That call-site gap predates
+  every lane here (blame `3793fc0`, 2026-10-19) and is untouched by this lane; it is
+  the reason a `solver_backend="numpy"` fixture is only green where an accelerator is
+  present.
+- kernels (`crates/quantibbler-kernels/`): `cargo test` → **24 passed, 0 failed**
+  (`tests/parity.rs`; all other targets 0 tests); `cargo clippy --all-targets --
+  -D warnings` RC=0; `cargo fmt --all -- --check` RC=0.
+- `maturin build` at the repo root FAILS ("Failed to parse Cargo.toml … missing field
+  `package`"): the root manifest is a pure workspace, so the gate's spelling must be
+  the crate-scoped `maturin build --manifest-path
+  crates/quantibbler-kernels/Cargo.toml` (RC=0, abi3 wheel built).
+- `npx --yes @fission-ai/openspec validate qk-nanoquant-alignment-lane4 --strict`
+  → "Change 'qk-nanoquant-alignment-lane4' is valid" (one change id per invocation).
+
+### Row anchors that were rot, and the one uncovered row
+
+- The two loss-site rows cited pre-change line numbers (`block_recon.py:667` and
+  `:871`); the sites are the loss expressions in `_tune_fp` (`:809`) and
+  `_tune_latent_ste` (`:1029`). The rows now cite the symbols.
+- The TuneFP/STE test rows cited `-k tune_fp`, which collects 0: tests are named
+  `test_scn_<scenario_id>` per the spec-naming rule, so the rows now carry the real
+  selector. The TuneFP row also said "first-step losses differ" — no first-step loss
+  value is recorded, so the fixture asserts on `stats["gradient_norm"]`.
+- The gate row named `tests/ci/` and `tests/qk_report/`, which do not exist; they are
+  `tests/test_ci_referee.py` and `tests/test_qk_report.py`.
+- **Still uncovered (left unchecked):** the Phase-4 row pinning a fallback event's
+  surfacing in the run record. The mechanism is present —
+  `tools/quantize_hf_model.py:1313` writes
+  `report["stages"] = [{"event": event, **info} …]`, so a recorded
+  `tune_loss_uniform_fallback` does reach the artifact — but `stage_map()`
+  (`qk_report.py:609`) keys only `_STAGE_LINES` entries (`tune_loss_uniform_fallback`
+  is not one) and no test asserts the fallback's presence in any report. The task's
+  named deliverable (the pin) does not exist.
+
+### Open finding for the planner (spec prose vs the tree)
+
+The delta's scenario `fixtures_discover_names_not_hardcode_qwen3` closes with "AND no
+test file contains a hardcoded Qwen3 layer name literal (`q_proj`, `k_proj`,
+`v_proj`, `o_proj`) outside of arch-map declaration rows". The tree violates that
+clause as literally written: `test_tunefp_teacher.py:83`, `test_root_cause_ablation.py:72`,
+`test_ste_sign_adaptation.py:68-71` and `test_fp_resume_guard.py:48` all build toy
+blocks out of `{"q_proj": …}` — fixtures that pre-date this lane and serve other
+tests. The requirement's normative text is scoped to "weighting and resolution
+fixtures", of which this lane's file is the newest and DOES comply (names discovered
+from `named_modules()`, arch names confined to the `_ARCHS` map). No test enforces
+the clause either way, so it is prose that can only be checked by hand. Not amended
+here: rewriting a spec-delta scenario is a ruling, not a reconcile edit — and
+`openspec/specs/**` is the requirement of record, so the fix belongs to whoever owns
+the spec.

@@ -173,7 +173,7 @@ and `src/quantibbler/ptq/api.py` (Phase-1 hoist, from the sibling change).
   computed verdict denying a claim on each axis).
 
 > **Annotation (coder, 2026-10-22 — author date per the repo clock; see
-> `qk-pertarget-cycle/design.md` §9 on the phantom `2026-10-27`).** The
+> `qk-pertarget-cycle/design.md` §9 on the phantom date).** The
 > rehearsal above was emitted under the **pre-re-rule Figure-3 reading** (one
 > TuneFP pass per block, post-Q/K/V). Its `paper_faithful: true` and its "all
 > eight verdict conditions true" describe the verdict machinery *as it then

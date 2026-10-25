@@ -49,3 +49,70 @@ None — endpoints are an implementation choice the paper leaves unspecified, an
 ## Interaction with pack-stage bottleneck
 
 The decomposition showed post-pack cos clamped to 0.34–0.45 regardless of raw fit quality (0.32–0.84). Fixing rho and SVID improves the raw continuous fit; the pack stage remains the binding constraint, and its fix is a separate change. This change improves the solver's input to the pack stage; it does not claim to move the shipped number alone.
+
+## Implementation crystallization — 2026-10-25 (Phase 2 convergence-test revision)
+
+`tests/ptq/test_admm_convergence.py` was revised to the Phase-2 ruling. One clause of that
+ruling is refuted by measurement and is deliberately NOT asserted.
+
+Environment for every number below: dev venv, python 3.12.14, torch 2.14.1+cpu
+(`torch.version.hip=None`, `torch.cuda.is_available()=False`), numpy 2.5.4,
+`OPENBLAS_NUM_THREADS=1`, numpy solver backend, K=400. Note the tree has moved past this
+change's `rho_end = 1e-1`: lane-3's normalized regime landed at `97a4725` and the schedule is
+now `rho in [0.0, 1.0]` with `admm_reg = 3e-2`.
+
+Gated, as measured:
+
+- Fixture is a planted rank-32 target, rank-64 factorization, gamma = 0.2, and the ruling's
+  premise is now **measured in the fixture** instead of assumed: the rank-64 truncated-SVD
+  warm start represents that target at cos **0.999715** (>= 0.99).
+- `cos(U V^T, W) = 0.933478 > 0.5`. The consensus-proxy product that `block_recon` actually
+  hands to `magnitude_balance`, `P_u P_v^T`, measures 0.941705; `U V^T` is the operand the
+  ruling names, so that is what is gated and the proxy value is recorded beside it.
+- `cos(U V^T, W) = 0.933478 > cos(sign(P_u) sign(P_v)^T, W) = 0.883145`. `sign(P_u)` is the
+  ruling's `sign(zu)`: `svid_proxy` preserves its input's sign structurally.
+- `converged` is recorded, not gated: 400/400 iterations, `converged=False`.
+
+**Refuted: "decreases monotonically across the first 200 iterations"** (tasks row 29 item 1,
+and the delta scenario `rho_end_bounded_for_convergence`). The residual is not monotone on any
+measured target: 67 of the 199 first-half steps rise on the shipped fixture (peak 0.877 at
+iteration 5; first half 0.4243 -> 0.3443), and all 20 recorded real `layers.0` rows in
+`artifacts/lane0-fire-r3-20261024/rows.jsonl` are non-monotone (2-66 rises per row; one row —
+arm B, `self_attn.o_proj` — does not even net-decrease over the first 200). The shape is
+structural, not noise: the consensus term pulls the warm start onto the +-1 proxy before the
+data term reasserts itself, so the residual rises first and then descends to its floor
+(terminal 0.01738 == trace min). The requirement of record folded in
+`openspec/specs/qk-ptq/spec.md` carries no adverb — "the consensus residual ... decreases
+across iterations" — and that is the form the test gates, in kill-only shape (net decrease
+over the first half plus a terminal value at the schedule's own floor). Asserting the adverb
+would assert a convex descent this non-convex iteration does not have.
+
+**Finding for the planner (not actioned here).** The delta scenario
+`rho_end_bounded_for_convergence` over-claims relative to the folded requirement of record,
+and its `WHEN` is "a rank-512 target from a real transformer linear layer" while the unit
+fixture is a synthetic rank-64 target (a real layer would put a model in the test lane; the
+probe rows above are the supporting evidence). Amending a SHALL is the planner's call, so the
+delta spec is left untouched and reported instead — otherwise archiving folds an adverb into
+the requirements of record that 20/20 measured runs contradict.
+
+## Implementation crystallization — 2026-10-25 (planner: delta-spec amendment)
+
+The delta scenario `rho_end_bounded_for_convergence` was amended by the planner (t_a60cc8b7):
+
+- **Adverb dropped.** "decreases monotonically" → "makes net progress across the first 200
+  iterations (net decrease from start of the second half)". The requirement of record in
+  `openspec/specs/qk-ptq/spec.md:76` carries no adverb — "decreases across iterations" — and
+  the measured evidence (67/199 first-half rises on the shipped fixture; 20/20 real
+  `layers.0` probe rows non-monotone, one row not net-decreasing) refutes monotonicity. The
+  shape is structural: the consensus term pulls the warm start onto the ±1 proxy before the
+  data term reasserts itself. Asserting the adverb would fold a knowingly-false gate into the
+  requirements on archive.
+
+- **WHEN updated to name the fixture it is gated by.** The old text said "a rank-512 target
+  from a real transformer linear layer" — the unit convergence gate (the fixture the test
+  actually exercises) is a planted rank-32 target at rank-64 factorization (`gamma=0.2`,
+  warm-start cos ≥0.99). A real layer would put a model in the test lane. The real-layer
+  probe rows (`artifacts/lane0-fire-r3-20261024/rows.jsonl`) are cited in the WHEN as
+  supporting evidence that the non-monotone shape is structural, not a fixture artifact.
+
+- `openspec validate qk-fix-admm-solver --strict` re-run after the edit (green below).

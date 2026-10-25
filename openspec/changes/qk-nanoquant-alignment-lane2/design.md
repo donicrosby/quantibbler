@@ -41,11 +41,14 @@ running activation tensor (`x_fp`), bounded by what the loop already holds
   dual-stream capture is the reading under which Algorithm 1's Step 1 does
   what the paper says it does — that is the "alignment" the lane is named for.
 - **Consequence:** at every block b ≥ 2 the streams diverge, so TuneFP fired
-  at a block's first target has a nonzero objective by construction — the
-  target-1 vacuity that forced ruling (a) of qk-fix-tunefp-teacher disappears.
-  Block 1 is the identity prefix (`X_fp ≡ X_b ≡` stem output); its target-1
-  skip remains, now documented as the single precise identity-prefix case
-  rather than a general vacuity of the placement.
+  at a block's first target would have a nonzero objective by construction —
+  the single-stream target-1 vacuity disappears. However, the universal
+  `idx == 0` skip from pertarget-cycle (ruling (a)) still applies: at the
+  first target of ANY block, nothing in-block is factorized yet, so there
+  is nothing for TuneFP to compensate. The skip is universal (every block's
+  first target), not limited to block 1's identity prefix. The justification
+  is "nothing factorized in-block yet," not "teacher equals frozen deepcopy"
+  (the stale single-stream rationale that a coder follow-up rewrites).
 - **Edge case:** a prefix whose quantization error is exactly zero would still
   produce a zero objective at target 1 and trip the detector — accepted as
   fail-closed behavior (a zero-error prefix has nothing for TuneFP to do;
@@ -148,10 +151,12 @@ existing readers ignore unknown keys.
 
 ## Open Questions
 
-- **Block-1-target-1: skip or fire-and-trip?** — Status: decided. Keep the
-  skip, documented as the single identity-prefix case (see above). Firing a
-  call known to be identically zero would manufacture a `tune_fp_vacuous_teacher`
-  event and weaken the detector's signal.
+- **Block-1-target-1: skip or fire-and-trip?** — Status: decided. The
+  universal `idx == 0` skip applies at every block's first target, per
+  pertarget-cycle ruling (a). Under dual-stream, the streams diverge at
+  block 2+, but at idx==0 no in-block layer is factorized, so TuneFP has
+  nothing to compensate — the skip is universal. The earlier "block 1
+  only" reading is withdrawn (planner reconcile 2026-10-25).
 - **Does dual-stream move the e2e tiny-model gate numbers (max logit delta,
   BPW)?** — Status: open until the Phase 3 re-measure. Owner: planner. The
   gate bounds do NOT move without a measured delta and planner sign-off; the
@@ -168,3 +173,79 @@ Lane order is load-bearing: 0 gates 1-3; lane 2 is independent of lanes 1 and
 `block_recon.py`'s capture loop and the `paper_faithful` config comment —
 lines lane 1 and lane 3 changes may also edit; conflicts are textual, not
 semantic. No lane-2 requirement depends on lane 1 or lane 3 artifacts.
+
+## Implementation crystallization
+
+### 2026-10-25 — reconcile of the landed lane (`a90f7e8` Ph1, `ec906a7` Ph2)
+
+Re-verified every task row by re-running its named command against the landed
+tree (card `t_75564534`). Four records, none of which changes a requirement:
+
+1. **The lane's fixtures are accelerator-tier artifacts.** `PTQConfig.solver_backend`
+   defaults to `"torch"`, so these fixtures reach the implicit `resolve_device`
+   refusal on a CPU-only interpreter and cannot be verified from the dev venv
+   (`torch 2.14.1+cpu`); every number recorded on the card comes from
+   `quantibbler-ptq:rocm-official` with `/dev/kfd` + `/dev/dri` and
+   `PYTHONPATH=/repo/src`. The rejection is not overridable by
+   `QUANTIBBLER_DEVICE=cpu` here: `lb_admm.magnitude_balance` calls
+   `get_backend(backend)` with no device argument, so a CPU-forced diagnostic
+   run still stops inside the block solve.
+
+2. **The red-first witness is recorded, with its confound.** The Phase-1 boxes
+   say "expected RED"; that was honoured at `a90f7e8` (its commit tally: 5
+   held-red, 110 passed). Re-running the five fixture files against a read-only
+   export of that commit in today's accelerator configuration gives
+   `16 failed, 99 passed`, in which 13 of the 16 are
+   `TypeError: can't convert cuda:0 device type tensor to numpy` — the
+   pre-`a7999ce` accelerator-path defect, later fixed by the single
+   `to_host_np` idiom. The two lane-2 mechanism reds reproduce exactly
+   (`guard_rationale_rewritten`, `label_requires_fp_stream_teacher_provenance`);
+   the four counting reds are masked by that confound. A red-first witness is
+   therefore only re-observable in the configuration it was measured in.
+
+3. **Two rows are partial shipments, and are left UNCHECKED.** The `capture`
+   event carries `x_b_stream`/`y_b_stream`, but `tune_fp`, `ste`, and
+   `tune_fp_vacuous_teacher` events do not carry any stream field, and the spec
+   scenario `recorder_events_gain_stream_provenance` has no test. `qk_report`,
+   separately, ships the verdict condition (`capture_is_fp_stream`) but has not
+   reworded `_STAGE_LINES`' `capture` description (still "compressed-prefix
+   inputs X_b and teacher outputs Y_b") and names no offending capture in a
+   deviation list. Both deltas are handed to the planner rather than resolved
+   by the reconciler: the decided Open Question ("Repeat the provenance fields
+   on each event") is the letter of the unshipped half.
+
+4. **Doc drift found, not repaired here.** The delta's `suite_green` scenario
+   and the Phase-4 row both name `pytest tests/ptq/ tests/ci/ tests/qk_report/`;
+   `tests/ci/` and `tests/qk_report/` do not exist and never did (the CI-referee
+   test is the file `tests/test_ci_referee.py`). The reconcile ran the real
+   suite (`pytest tests/` → 652 passed, 4 skipped, 3 deselected) and amends only
+   the task row; the scenario text is the requirement of record and is left for
+   its owner. Same for the `-k teacher_stream` selector, corrected in the task
+   row to the scenario id `teacher_target_reads_fp_stream`. The
+   `dual_stream_deviation_marker` scenario's "recorded … in the run record" half
+     is likewise unimplemented: nothing in `src/` writes the marker into a record,
+     and the shipped test supplies it by hand.
+
+   ### 2026-10-25 — Planner reconcile ruling (t_966fb4bc): universal idx==0 skip
+
+   The lane's design recorded the target-1 skip as the "single precise
+   identity-prefix case" (block 1 only). That is wrong against standing code:
+   `block_recon.py:1595` applies `if idx >= 1:` universally — at every block's
+   first target, regardless of block index.
+
+   **Corrected posture:** Under dual-stream the streams diverge at block 2+,
+   so a TuneFP call at the first target of block 2+ WOULD have a nonzero
+   objective. But the pertarget-cycle ruling (a) still skips it: at `idx==0`,
+   no in-block layer is factorized, so TuneFP has nothing to compensate. The
+   skip is "nothing factorized in-block yet" — NOT "teacher equals frozen
+   deepcopy" (the stale single-stream rationale that lives in
+   `block_recon.py:1490-1496` and the `_tune_fp` docstring, routed to coder
+   by the reconcile card). The universal skip is compatible with dual-stream
+   because TuneFP compensates in-block factorization error, not prefix error
+   — and prefix error is nonzero for blocks ≥ 2, but in-block error at
+   `idx==0` is still zero.
+
+   Spec delta amended: scenario `target1_tunefp_vacuity_gone_by_construction`
+   now names the universal skip and its rationale. The Open Question
+   "Block-1-target-1" is resolved to universal skip. Design.md §Consequence
+   rewritten.

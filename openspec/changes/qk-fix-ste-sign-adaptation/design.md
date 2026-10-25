@@ -196,7 +196,7 @@ Figure 3 right panel) stands.
   Informed-assumption markers are documentation, not deviations.
 
 > **Annotation (coder, 2026-10-22 — repo-clock author date; see
-> `qk-pertarget-cycle` §9 on the phantom `2026-10-27`).** The mechanism list in
+> `qk-pertarget-cycle` §9 on the phantom date).** The mechanism list in
 > this label rule was written against the **pre-re-rule Figure-3 reading** (one
 > TuneFP pass per block, post-Q/K/V). The rule's *shape* — the label is a
 > computed verdict from the run's own record, never a forwarded flag — is

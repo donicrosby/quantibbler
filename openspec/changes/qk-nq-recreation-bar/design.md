@@ -50,9 +50,9 @@ sequencing equivalence argument is ever claimed (512-slice scores
 equivalent to 2048), it is recorded IN the acceptance ledger with both
 number sets, and the 2048 run still executes.
 
-## Run-geometry constraint (measured 2026-10-27)
+## Run-geometry constraint (measured 2026-10-20)
 
-**Lane ordering (planner, 2026-10-27):** this change's first
+**Lane ordering (planner, 2026-10-20):** this change's first
 implementation tasks are the tune/eval window split — the seq-2048 run
 is the thing that converts any of this into evidence; the constants
 test and ledger follow.
@@ -65,7 +65,7 @@ Measured at seq-512: a single fp32 N^2 tensor of 2.00 GiB produced a
 factor. Scaled to seq-2048 (N^2 tensor 32 GiB), the tune requirement
 brackets 100-200 GiB; the first seq-2048 attempt died ~2 min in at the
 first tuning block under the 32g cap. Death record (reconciled
-2026-10-27, wording per bug-hunter): the kernel-provable kill is
+2026-10-20, wording per bug-hunter): the kernel-provable kill is
 container `2d2d4b6df1e0`, 15:56:27Z, 33,480,724 kB against the 32g
 memcg, launcher unknown and unestablishable post-mortem (--rm'd, no
 journal, events not persisted); the room-launched nq2048 run died 43 s
@@ -85,7 +85,7 @@ needs its own change; (b) cap-raise is
 FALSIFIED by measurement — 64g sits below the low end of the bracket,
 a coin flip you pay for with another 2-minute death; (c) the GPU
 attention face — the real fix for the SERVER's decode memory, not the
-tune loop — user-prioritized 2026-10-27 with the pip-benchmark bar
+tune loop — user-prioritized 2026-10-20 with the pip-benchmark bar
 (qk-flash-attention task 4.2). Until one of (a)/(a2)/(c) lands,
 seq-2048 full runs are
 pedestal-producers, recorded alongside — exactly per doctrine.
@@ -153,7 +153,7 @@ orchestrator. Resolution after the fail-fast loop lands and one artifact
 reaches the band's neighborhood; the run costs hours and needs the
 weights offline-cached, so it is scheduled, not automatic.
 
-## Implementation crystallization (2026-10-27 — tune/eval split, tasks 1-2)
+## Implementation crystallization (2026-10-20 — tune/eval split, tasks 1-2)
 
 **RED first, and recorded.** `tests/ptq/test_driver_tune_seq_len.py` was
 authored before the flag existed and failed for three separate reasons:
@@ -300,9 +300,10 @@ private `UV_PROJECT_ENVIRONMENT` synced lean (`torch` absent) — the shared
 `resolve_device` refusals, none of them these files), so the hermetic env is
 what makes this change's lean number attributable.
 
-**Finding for the planner (not this row's bytes):** this change dir dates its
-tune/eval entries "2026-10-27", while `date` and `git log` in this repo read
-2026-10-25. The discrepancy predates this landing and is left untouched here.
+**Finding for the planner (not this row's bytes):** this change dir dated its
+tune/eval entries with the phantom date, while `date` and `git log` in this repo
+read 2026-10-25. The discrepancy predates this landing; the strings were
+corrected repo-wide on 2026-10-25 (t_6f5dcf96, `qk-pertarget-cycle` §18).
 
 ## Implementation crystallization 2026-10-25 — ledger format, task 28
 

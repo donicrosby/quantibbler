@@ -17,6 +17,20 @@ in STE refinement (Step 3). The gated claims are that the iteration does
 meaningful work (residual falls; the continuous product beats a sign-only
 assignment) and that it yields a usable initializer (cos > 0.5).
 
+Assertion provenance (`qk-fix-admm-solver`, planner ruling, tasks.md Phase 2).
+`converged is True` and `cos >= warm_start cos` are both dropped; the gates are
+`cos(U V^T, W) > 0.5` and `cos(U V^T, W) > cos(sign(Z_u) sign(Z_v)^T, W)`. One
+adverb in that ruling is deliberately NOT asserted, because it is measurably
+false: the residual does not fall MONOTONICALLY across the first 200 iterations
+-- 67 of the 199 steps rise on this fixture, and every one of the 20 recorded
+real layers.0 probe rows (artifacts/lane0-fire-r3-20261024/rows.jsonl) is
+non-monotone too, 2-66 rises each. The requirement of record folded in
+`openspec/specs/qk-ptq/spec.md` says only that the residual "decreases across
+iterations"; the kill-only form of that is what is gated below (net decrease
+over the first half, terminal value at the schedule's own floor). Asserting the
+adverb would be asserting a convex descent this non-convex iteration does not
+have.
+
 Target is preconditioned per [NQ] Step 2-1 (`robust_diag`, gamma = 0.2) as the
 production path does, so the test measures the regime the defect was found in.
 """
@@ -46,7 +60,14 @@ def _cos(a, b):
 
 @pytest.fixture(scope="module")
 def preconditioned_target():
-    """Rank-64 factorization of a 256x128 target, preconditioned gamma=0.2."""
+    """Planted rank-32 target, rank-64 factorization, preconditioned gamma=0.2.
+
+    The ruling's fixture premise is measured here rather than assumed: the
+    unconstrained truncated-SVD warm start must already represent this target at
+    cos >= 0.99, so post-ADMM cos > 0.5 is a floor on how far the proxy may drag
+    the fit, not a low bar. Measured: warm-start cos 0.999715, post-ADMM
+    cos(U V^T, W) 0.933478.
+    """
     dout, din, rank = 256, 128, 64
     rng = np.random.default_rng(0)
     b = rng.normal(size=(dout, 32))
@@ -55,6 +76,11 @@ def preconditioned_target():
     gamma = 0.2
     d_in_t, d_out_t = robust_diag(np.linalg.norm(w, axis=0), np.linalg.norm(w, axis=1), gamma=gamma)
     w_tilde = (d_out_t[:, None] * w) * d_in_t[None, :]
+    ub, sb, vb = np.linalg.svd(w_tilde, full_matrices=False)
+    warm_cos = _cos(w_tilde, (ub[:, :rank] * sb[:rank]) @ vb[:rank, :])
+    assert warm_cos >= 0.99, (
+        f"fixture premise violated: warm start represents the target at cos={warm_cos:.6f} < 0.99"
+    )
     return rank, w_tilde, gamma
 
 
@@ -77,6 +103,10 @@ def test_consensus_residual_decreases_over_the_first_half(solved):
     `converged` is diagnostics only; the gates are that the schedule reaches
     its own residual floor, that it makes net progress over the first half of
     the budget, and that the run terminates at epsilon or at the cap.
+
+    Measured at HEAD (numpy backend, OPENBLAS_NUM_THREADS=1, K=400, rho in
+    [0.0, 1.0], admm_reg 3e-2): first-half residual 0.4243 -> 0.3443, all-400
+    terminal 0.01738 == trace min, `converged=False` at 400/400.
     """
     residuals, cfg, res = _res_of(solved)
 
@@ -85,11 +115,13 @@ def test_consensus_residual_decreases_over_the_first_half(solved):
     window = residuals[:half]
     assert window.size >= 2
     # The schedule drives the residual to its own floor. Monotonicity is NOT
-    # asserted: measured shape rises to 0.749 by iteration 4 before descending
-    # to 0.046 (28 rises within the first 200), because the warm start is
-    # pulled onto the SVID proxy before the data term reasserts itself. That is
-    # a feature of a non-convex iteration, not noise, and requiring zero rises
-    # would be asserting a purely convex descent this solver does not have.
+    # asserted: measured shape rises to 0.877 by iteration 5 before descending,
+    # with 67 of the first-half steps rising, because the warm start is pulled
+    # onto the SVID proxy before the data term reasserts itself. That is a
+    # feature of a non-convex iteration, not noise, and requiring zero rises
+    # would assert a purely convex descent this solver does not have -- the
+    # planner ruling's "monotonically" is refuted by measurement on this fixture
+    # and on all 20 real layers.0 rows in artifacts/lane0-fire-r3-20261024.
     assert residuals[-1] <= 1.1 * residuals.min(), (
         f"schedule did not reach its own floor: terminal {residuals[-1]:.6g} vs "
         f"min {residuals.min():.6g} ({residuals[-1] / residuals.min():.4f}x)"
@@ -106,9 +138,14 @@ def test_consensus_residual_decreases_over_the_first_half(solved):
 
 
 def test_raw_product_is_a_usable_initializer(solved):
-    """The solve SHALL yield a usable starting point for STE refinement."""
+    """The solve SHALL yield a usable starting point for STE refinement.
+
+    The ruling names `cos(U V^T, W)`: U/V are the continuous factors and the
+    product is what reconstructs the target. Measured 0.933478 (the consensus
+    proxies that feed `magnitude_balance`, `P_u P_v^T`, measure 0.941705).
+    """
     w_tilde, cfg, res = solved
-    raw = np.asarray(res.P_u) @ np.asarray(res.P_v).T
+    raw = np.asarray(res.U) @ np.asarray(res.V).T
     cos_raw = _cos(w_tilde, raw)
     assert cos_raw > 0.5, f"raw product cos={cos_raw:.6f} is not a usable initializer"
 
@@ -118,7 +155,10 @@ def test_continuous_product_beats_a_sign_only_assignment(solved):
 
     Binarize-and-go on the final consensus proxies is the baseline; the
     continuous product must beat it, which is what shows the iteration did
-    meaningful work rather than collapsing onto the proxy.
+    meaningful work rather than collapsing onto the proxy. The ruling writes the
+    baseline as `sign(zu) sign(zv)^T`; `zu = svid_proxy(P_u)` preserves its
+    input's sign by construction, so `sign(P_u)` is that operand. Measured:
+    continuous 0.933478 vs sign-only 0.883145.
     """
     w_tilde, cfg, res = solved
 
@@ -126,7 +166,7 @@ def test_continuous_product_beats_a_sign_only_assignment(solved):
     su[su == 0.0] = 1.0
     sv = np.sign(np.asarray(res.P_v, dtype=np.float64))
     sv[sv == 0.0] = 1.0
-    cos_raw = _cos(w_tilde, np.asarray(res.P_u) @ np.asarray(res.P_v).T)
+    cos_raw = _cos(w_tilde, np.asarray(res.U) @ np.asarray(res.V).T)
     cos_sign_only = _cos(w_tilde, su @ sv.T)
     assert cos_raw > cos_sign_only, (
         f"continuous cos={cos_raw:.6f} does not beat the sign-only baseline cos={cos_sign_only:.6f}"

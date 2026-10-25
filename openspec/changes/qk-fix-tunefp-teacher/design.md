@@ -159,7 +159,7 @@ fork fires only after a paper-faithful run exists.
   ride the faithful label.
 
 > **Annotation (coder, 2026-10-22 — repo-clock author date; see
-> `qk-pertarget-cycle` §9 on the phantom `2026-10-27`).** This amendment's
+> `qk-pertarget-cycle` §9 on the phantom date).** This amendment's
 > mechanism list — in particular the **vacuous-teacher event** it names — was
 > defined against the **pre-re-rule Figure-3 reading**. Under ruling (a)
 > (`qk-pertarget-cycle`) the first TuneFP of a block no longer fires at all, so
@@ -249,3 +249,195 @@ exists for any of them on this change's surface):
   validate-strict, double-reviewed PASS, landed and pushed; the archive
   itself belongs to sweep t_944374c0 after the run record and the planner
   reconcile exist.
+
+## Planner reconcile rulings (2026-10-25, t_966fb4bc)
+
+Three review findings routed here by the landing orchestrator (t_416ad06f,
+crystallization entry). Code evidence re-verified against current HEAD
+(84ba3b4, post-f9c1544) before ruling. Rulings settle the spec-text
+contradictions so `openspec/specs/` never folds contradictory SHALLs.
+
+### F1 — A2 "memory-only" superseded: VERIFIED, spec text corrected
+
+Re-verified each claim against post-f9c1544 HEAD:
+
+- **y_b IS persisted.** `checkpoints.py:265` writes `arrays[_YB_KEY] = _yb`
+  under the reserved npz key `y_b` (`checkpoints.py:305`). f9c1544 added the
+  `"|" in key` filter to prevent `y_b` from being misread as a layer name;
+  it did NOT stop persisting `y_b` — it only fixed the resume-side name
+  derivation.
+- **Resume restores from it.** `block_recon.py:2082-2084` calls
+  `ckpt.load_block_yb(ckpt_dir, i)` and sets `x_fp` from the restored
+  tensor. Legacy checkpoints predating lane 2 fall back to recomputing the
+  stream.
+- **Self-test is blind to the real key.** `test_tunefp_teacher.py:377`
+  greps npz keys for substring `"teacher"` — cannot see `"y_b"`. The test
+  passes green but certifies nothing about the actual persistence.
+
+**Ruling:** A2's "memory-only in v1" and "never persisted to a checkpoint"
+text is factually wrong on HEAD. The corrected posture: the fp-stream
+teacher target IS checkpoint-persisted as `y_b` and recovered on resume
+(per lane-2's stream contract). The persistence is fingerprint-bound to
+the checkpoint's own config+code identity (the existing `config_fingerprint`
+mechanism that gates resume); a separate pristine-source-hash +
+capture-index binding is not required because `y_b` is the stream
+activation (derived from the fp-stream prefix, itself reproducible from
+the checkpointed layer states), not a detached teacher cache. The
+`memory-only` scenario text in this change's delta is amended to match.
+
+**Spec delta edit:** `teacher_cache_is_memory_only_and_recovered_on_resume`
+scenario reworded to `teacher_target_is_persisted_and_recovered_on_resume`.
+
+### F2 — TuneFP-cycle spec graph: universal idx==0 skip is standing code
+
+Three deltas contradict over the same requirement surface:
+
+1. `qk-pertarget-cycle` SHALLs universal `idx == 0` skip — "the first
+   target SHALL be factorized with NO preceding TuneFP" — matches the
+   landed `if idx >= 1:` at `block_recon.py:1595`.
+2. `qk-nanoquant-alignment-lane2` records "the single precise
+   identity-prefix case" (block 1 only) — WRONG against standing code.
+   The skip applies at EVERY block's first target because at `idx==0` no
+   in-block layer is factorized, so TuneFP has nothing to compensate. Under
+   dual-stream the teacher reads fp-stream input while the block reads
+   compressed-stream input — streams have diverged for blocks ≥ 2 — but
+   that divergence is prefix error, not in-block factorization error, and
+   TuneFP compensates the latter per the paper's prose ([NQ] :525).
+3. `qk-fix-tunefp-teacher` delta text says "once per block" (line 9 of its
+   spec requirement) — also stale against the re-ruled per-target cycle.
+
+**Ruling:** The universal `idx == 0` skip from pertarget-cycle is the
+standing truth. Lane-2's design.md and spec delta must be corrected: the
+skip is universal (every block's first target), not block-1-only. The
+once-per-block language in this change's own delta is corrected to match
+(the requirement header is kept, but the scenario text referencing
+"once per block" and the "compressed-prefix" teacher is reworded).
+
+**Stale code rationale (routed to coder):** `block_recon.py:1490-1496`
+("the teacher is its frozen deepcopy") and the `_tune_fp` docstring at
+lines 36-42 ("the teacher is its deepcopy") still justify the skip with
+the single-stream argument that is false under dual-stream. These are
+code-side text defects — routed to coder as a RED-first task (see below).
+
+### F3 — Eval-geometry label gap: deviation class added
+
+`geometry_deviations()` checks `tune_len != eval_len` and
+`calibration_rows != 128` but never checks `eval_len != 2048`. A 512-window
+run where `tune_len == eval_len == 512` passes clean and can carry
+`paper_faithful: true`.
+
+**Ruling:** The computed verdict must be exhaustive — the human-gated
+acceptance ledger is for waivers, not for gaps in the label's condition
+set. Add a `non_protocol_eval_geometry` deviation class to
+`geometry_deviations()` that flags `eval_len != 2048`. The code half is
+routed to coder as a RED-first task (separate card).
+
+### Coder follow-up (code-side text fixes + eval-geometry gap)
+
+A single coder task is created for the code-side repairs, RED-first:
+1. Rewrite `block_recon.py:1490-1496` rationale to justify the idx==0 skip
+   under dual-stream semantics (nothing factorized in-block yet, not
+   "teacher is deepcopy").
+2. Rewrite `_tune_fp` docstring lines 36-42 to match.
+3. Add `non_protocol_eval_geometry` deviation class to
+   `geometry_deviations()`: flag `eval_len != 2048` with the paper's
+   documented protocol geometry.
+
+See card t_ (created by this reconcile on completion).
+
+### F3 follow-up — integration driver test re-encoding (2026-10-25, t_49f35e27)
+
+The F3 code half (coder t_8c9b9179) added `non_protocol_eval_geometry` to
+`geometry_deviations()`, but the F3 card did not name its consequence on the
+seq-32 integration driver tests, which assert the old leniency. The coder
+correctly refused to re-encode them (a verdict-field assertion is a review
+decision) and routed the ruling here. Ruling and re-encoding recorded below.
+
+**Ruling: option (a) — keep the two tests at seq 32 and assert the deviation.**
+Option (b) (move the faithful test to seq 2048) is infeasible at fixture
+scale, not merely slower:
+
+1. The fixture model is pinned `max_position_embeddings=256`
+   (`test_driver_tune_seq_len.py:106`); a seq-2048 run is impossible without
+   re-engineering the fixture model.
+2. The synthetic corpus (`20 lines × 30 × sentence`, ~12 K tokens) cannot
+   supply the protocol's 128 calibration sequences × 2048 tokens
+   (262,144) plus a maximal eval window — `tokenize_chunks` refuses
+   (`n_blocks < n_chunks * BATCH`), so `--calibration-seqs 128` at seq 2048
+   fails the sizer before any solve.
+3. seq-2048 ADMM at the App. C 400-iteration schedule is ~64× the seq-32
+   compute; the seq-32 faithful test already exceeded 900 s on a loaded box,
+   so seq-2048 would be hours.
+
+The premise of `test_paper_faithful_run_records_the_algorithm1_stage_map` —
+"a paper-faithful run at fixture scale" — is now impossible BY DESIGN: the
+protocol geometry (2048) is unreachable at fixture scale, which is exactly
+what the deviation class correctly encodes. This is the design working, not
+a regression.
+
+**Re-encoding (the exact new assertions, routed to coder as a spec):**
+
+`test_paper_faithful_run_records_the_algorithm1_stage_map` — the faithful
+SURFACE (stage map, per-target cycle, teacher provenance, STE `paper_ste`,
+polish off, L137–277) stays unchanged; only the verdict-label assertions
+flip to prove the geometry alone denies:
+
+- `paper_faithful` → `is False` (was `is True`).
+- the `fidelity_conditions == {...}` literal → `no_runtime_deviations is
+  False` and `all(v for k, v in conditions.items() if k !=
+  "no_runtime_deviations")` (mirrors the split-geometry test).
+- `runtime_deviations == []` → `[d["kind"] for d in
+  report["runtime_deviations"]] == ["non_protocol_eval_geometry"]` (exactly
+  one, the named kind).
+- the SEPARATION block's substring guard `not any("eval" in kind)` is now too
+  blunt (`non_protocol_eval_geometry` legitimately contains "eval"): replace
+  it with the explicit kind-set assertion above; keep
+  `"evaluation" not in fidelity_conditions` as the separation proof.
+
+`test_a_faithful_claim_on_the_svd_ablation_is_denied_by_the_computed_verdict`
+— essence (mechanism denial: `solver_is_admm is False`) survives; the
+geometry is now an independent, correctly-named denier:
+
+- `runtime_deviations == []` → the deviation list names
+  `non_protocol_eval_geometry`; the comment "It is the solver, not the
+  geometry" is rewritten to "the solver denial fires end-to-end; the geometry
+  deviation is also present and named (seq 32 != 2048)".
+
+`test_a_split_tune_geometry_is_named_as_a_runtime_deviation` — NO change: its
+membership assertion (`"tune_geometry_split" in kinds`) and all-else-True
+negation already hold with the deviation list grown to three entries.
+
+The verdict True-path end-to-end coverage moves to the proof-scale fire
+(seq 2048, real model) — the unit-level True path remains pinned in
+`test_qk_report.py` (`test_fidelity_label_is_true_only_when_every_condition_holds`,
+`geometry_deviations(2048, 2048, 128) == []`).
+
+**Spec delta:** `label_flips_on_runtime_deviations` scenario's parenthetical
+amended to name the fourth class, so the exhaustive deviation set is
+greppable from the spec.
+
+## Stage journal (post-fire row, 2026-10-25)
+
+The post-fire row's journal is ``stage-events.jsonl`` beside the solve
+checkpoints, written by ``append_stage_event`` (one open/write/close per
+event so every event up to a crash is on disk) and read by
+``read_stage_log`` / ``resume_stage_events`` behind the live fingerprint
+guard. The per-line shape check (``stage_journal_record``) validates
+payload keys against ``_STAGE_PAYLOAD_KEYS`` and finiteness
+(``_non_finite_path``), so a name-only or saturated line raises rather
+than counting as an execution — the payload-blind required-stage verdict
+must not be handed a record re-read from disk unvalidated (sec-eng
+t_5855d059 named this property).
+
+Two consequences t_a48c5c76 recorded in tasks.md:
+
+- **The fresh-start reset drops the launching run's pre-guard Phase-1
+  line.** ``reset_stage_log`` is called where the fingerprint is written,
+  which is before the block loop. Phase-1 statistics re-fires on every
+  launch (it is not checkpointed), so a resume never needs it from disk.
+- **``tune_scales_kd`` now travels through the driver's recorder.**
+  Before the journal the scale stage was emitted directly by the wrapper,
+  bypassing the recorder that writes the journal — so the record carried a
+  ``tune_scales_kd`` event but the journal did not. Now the wrapper emits
+  through the same recorder that writes the journal, so the record and the
+  journal carry one event set.

@@ -151,22 +151,30 @@ chased to a cause and closed:
   regression that widens or narrows the band now changes a result. Verified
   seed-sensitive: seed 47 does not raise.
 
-## 9. Phantom date: `2026-10-27` — census, and what is *not* established
+## 9. Phantom date — census, and what is *not* established
+
+**RESOLVED (2026-10-25, §18): @user ruled FIX THE STRINGS.** All 47
+occurrences (the census below is the authoring-day count: 33 across 20+
+files; it grew to 47 across 17 by 2026-10-25) were replaced with the author
+date of the commit that records each one (t_6f5dcf96). Kept for the record;
+the phantom string is written `<phantom-date>` from here on so the
+correction stays grep-clean.
 
 @sec-eng found the string in three records. **The census is 33 occurrences
 across 20+ files**, and the shortest proof is this one:
 
 ```
-$ git log --format='%h %ai %s' -S "decision 2026-10-27" \
+$ git log --format='%h %ai %s' -S "decision <phantom-date>" \
       -- crates/quantibbler-kernels/tests/cubek_cpu_reference_parity.rs
 f438177 2026-10-20 20:33:49 +0000  Land 2.3: cubek cpu-reference third parity face, budget adjudicated
 ```
 
-A commit **authored 2026-10-20 20:33** records a decision dated **2026-10-27**
+A commit **authored 2026-10-20 20:33** records a decision dated **five days
+after the commit that records it**
 — and attributes it to @sec-eng. Every *other* date in the corpus
 (`2026-10-17/18/19/20/21`, 33/24/20/17/33 occurrences) is consistent with the
 commit timeline, and the archive directories use real dates
-(`2026-10-18-*`, `2026-10-19-*`, `2026-10-21-*`). `2026-10-27` is the only
+(`2026-10-18-*`, `2026-10-19-*`, `2026-10-21-*`). That date is the only
 impossible one, and it is systematic across lanes, not a lone typo in a coder
 record.
 
@@ -502,3 +510,82 @@ claim until a config line is recovered.**
 as byte-identical to `r512-svd` is a tautology, not a discovery — `d1` never
 mapped to any config field, so both directories are the same SVD run. The arm is
 retired; @slop-remover annotated the two docs that cited it as a controlled datum.
+
+## 18. Implementation crystallization — 2026-10-25
+
+### Shape (c) — same-solver counterfactual: DEFERRED
+
+**Ruling (@planner, from tasks.md row 63):** Shape (c) — re-running the
+factorization path without TuneFP to measure its true marginal effect on the
+ADMM geometry — is **deferred until after the re-fire**, not required before it.
+
+**Rationale:**
+
+1. **The gate is wired.** Shape (a) — the no-op detector with per-cycle presence
+   gates and fidelity-scoped net-reduction — is landed and proven on real
+   artifacts (§16). It cannot measure TuneFP's marginal contribution (it is a
+   detector, not a counterfactual), but it will catch a dead stage.
+
+2. **The counterfactual's value depends on the re-fire's outcome.** If the
+   re-fire produces a healthy artifact (no collapse), TuneFP is doing work and
+   the marginal-quantification question becomes a lower-priority measurement.
+   If the re-fire collapses again, the counterfactual becomes a diagnostic tool
+   — re-running without TuneFP isolates whether the stage is helping, hurting,
+   or inert — and its value rises.
+
+3. **Cost is non-trivial: +7.1 h** (918 s × 28 blocks, from §11). Against a
+   21.8 h faithful run, this is a 33% premium. It should be triggered by a
+   specific hypothesis, not as blanket pre-launch overhead.
+
+4. **The priced record is durable.** The cost and shape are recorded here.
+   The counterfactual can be launched as a follow-up card the moment the
+   re-fire's report is in hand, without re-specifying.
+
+**Trigger condition:** The counterfactual SHALL be launched if the re-fire's
+`paper_faithful` verdict is false AND the gate does NOT attribute the failure
+to a specific stage (i.e., the collapse is unattributed despite the new
+instruments). Otherwise it is a priced optional measurement, not a blocker.
+
+### Phantom date — RULED (2026-10-25, @user): FIX THE STRINGS
+
+@user ruled 2026-10-25 (triage session, relayed by default): **FIX THE
+STRINGS.** The 47 occurrences of the phantom date across 17 files are template
+copy-paste defects, not a behind clock — the signature (one date systematically
+wrong while Oct 17/18/19/20/21 all match the commit timeline) is diagnostic for
+a string defect, and a clock running 5-6 days behind would shift ALL dates.
+
+**Mechanical fix:** replace the phantom date → `2026-10-20` or `2026-10-21` per
+context, read from the surrounding commit's author date. 17 files, 47
+occurrences (live census 2026-10-25 16:51Z); the correction is verifiable with
+a repo-wide grep for the phantom date → empty. **Landed 2026-10-25
+(t_6f5dcf96); `grep -r` for the phantom date over the worktree is empty.**
+
+**Routeed to coder** as a follow-up card — the fix is mechanical but touches
+17 files, several outside this change's blast radius (e.g. AGENTS.md,
+cubek_cpu_reference_parity.rs, six sibling change dirs). Scoped staging,
+one commit, hash-pinned review.
+
+## 19. Planner reconcile ruling (2026-10-25, t_966fb4bc): universal idx==0 skip confirmed
+
+The universal `idx == 0` skip this change SHALLs (requirement line 7: "The
+first target (`idx == 0`) SHALL be factorized with NO preceding TuneFP") is
+the standing code at `block_recon.py:1595` (`if idx >= 1:`). The reconcile
+confirms this against the two sibling changes that contradicted it:
+
+- `qk-fix-tunefp-teacher`'s delta: once-per-block teacher language corrected
+  to per-target cycle. The stale once-per-block text was an artifact of the
+  overruled Figure-3 reading; the ruling (a) rework landed in this change and
+  the sibling's spec delta was edited to match.
+- `qk-nanoquant-alignment-lane2`'s design: the "single precise
+  identity-prefix case" (block 1 only) was wrong. The skip is universal — the
+  rationale under dual-stream is "nothing factorized in-block yet" (not "teacher
+  equals frozen deepcopy"). Lane-2's design.md, spec delta, and Open Question
+  are corrected.
+
+The stale single-stream rationale text at `block_recon.py:1490-1496` and the
+`_tune_fp` docstring (lines 36-42) are code-side text defects independent of
+this delta's SHALLs. They are routed to coder as a RED-first task from the
+reconcile card.
+
+No spec-delta changes to this change — its SHALLs are the standing truth and
+validated as-is.

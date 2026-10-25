@@ -60,7 +60,7 @@
       objective.** Done as the rebuild above rather than as a perturbation; the
       perturbation reading would have needed a product hook, which the no-knob
       spec point forbids.
-- [ ] (planner) **Decide shape (c)** — the same-solver counterfactual, priced at
+- [x] (planner) **Decide shape (c)** — the same-solver counterfactual, priced at
       +7.1 h on the faithful run (918 s x 28: 21.8 -> 28.9 h). The only shape that
       measures TuneFP's marginal effect on the admm geometry; a plan-level
       decision, not a gate.
@@ -69,7 +69,7 @@
       generator-explicit; the band is **2/24, seeds 16 and 18**, byte-identical
       across two separate invocations; a band-owning test asserts the guard fires
       on seed 16. (design.md §8)
-- [ ] (planner / user) **Rule on the phantom date.** 33 records date their own
+- [x] (planner / user) **Rule on the phantom date.** 33 records date their own
       events after the commits that record them, relative to the repo's own
       clock. Clock wrong, or string wrong? Mechanical once decided; two of the
       four locations @sec-eng named are outside this change's blast radius.

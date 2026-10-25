@@ -86,3 +86,94 @@ No other deliberate deviations are touched by this lane; solver-side assumptions
 - `qk-geometry-conformance`: statistics are collected over the SAME calibration data this change's statistics run over; knob-unit fixes land first (sequence counts, not packed batches). No code overlap beyond the data boundary.
 - `qk-fix-admm-solver`: consumes W̃ — the solver's scale-normalization and exit rescale are W̃-norm-invariant, so the sqrt fold changes the target's entries but not the solver contract. No edits.
 - `qk-nq-recreation-bar` / `qk-e2e-quality-gate`: verdict machinery reads run artifacts; `phase1_statistics` record fields (chunk_rows) are unchanged; new statistics shift numbers, which is the point of the lane and is recorded as a deviation-class change in the run record, not in the verdict machinery.
+
+## Implementation crystallization
+
+### 2026-10-25 — reconcile of the landed lane (`e5c6939`, `1484e55`), card `t_41af07ba`
+
+Every task row was re-verified by re-running its named command against the landed
+tree before any archive. Findings are recorded here so the rows this reconcile
+leaves open cannot be re-read as shipped.
+
+**Design-silent decision now recorded — the bare-block gradient source is
+`cotangent=`, not the `head=` the task row names.** Task row 4 was amended at
+landing time to name a `head=` callable (module output → scalar loss); the
+implementation shipped the other shape: `collect_stats(module, calibration_batches,
+*, chunk_rows=None, cotangent=None)` (`calibration.py:196`), where the caller runs
+`head → loss → backward` itself and passes the gradient at the module output. The
+rationale is the comment carried at the solve site: one entry shape for both
+routes rather than a second way in beside the cotangent, with the whole-model path
+deriving its cotangent from the CE backward (`calibration.py:311-320`). The spec
+scenario `caller_supplied_head_for_bare_block` is satisfied by either shape ("a
+documented head/cotangent"); the row's `head=` name describes an API that does not
+exist, which is one of the reasons that row is left unticked.
+
+**OQ-1 resolved — the rule as implemented: shift-by-one teacher forcing,
+`ignore_index=-100`.** One `torch.nn.functional.cross_entropy(logits[:, :-1],
+ids[:, 1:], ignore_index=-100)` and one backward (`calibration.py:358-362`): the
+calibration sequences are their own labels, shifted by one, and a position whose
+next token is padding must carry `-100` in the batch to be ignored — the
+implementation honours the ignore token but does not synthesise it from an
+attention mask. The "record the rule in the run artifact" half of OQ-1 stays OPEN:
+this lane fired no run, and no artifact under `artifacts/` names the rule (grep for
+`ignore_index` / `teacher_forc` / `shift.by.one` over 2,231 artifact files → 0
+hits). It belongs to the first run this statistics path feeds.
+
+**Retired-assumptions audit (row 10): the log is complete; the code matches for
+two of its three entries.** Entry 1 (OQ-2 input-side gradient term) and entry 2
+(uniform `ones_like` cotangent) match the tree — `_layer_statistic` is deleted and
+`d_in_raw` is `E[x²]` only; no `ones_like` cotangent survives in `src/`. Entry 3
+(tail-gated q95 auto-cap) does NOT: `_TAU_TAIL_GATE = 10.0` and the `tau=None` →
+q95 branch are still live (`calibration.py:34`, `:429-431`), measured engaged at
+HEAD (`robust_diag(v, tau=None, gamma=0.0).max() == percentile(v, 95)` on a
+heavy-tailed vector, identical to the pre-fix module), and both
+`tests/ptq/test_preconditioner_tau.py` and `config.py:111-115` still pin and
+document the old policy. The retirement DECISION stands in this file; the code
+change is unlanded.
+
+**No new config fields; fingerprint untouched (row 10).** The lane's two landing
+commits touched neither `config.py` nor `checkpoints.py`; the clip quantile is the
+module constant `_TOKEN_CLIP_QUANTILE = 0.999`, and `_FINGERPRINT_PROVENANCE`
+(`checkpoints.py:123-135`) still carries solver state only.
+
+**Gate record (row 11), both tiers, interpreter-labelled.** Run tier
+`quantibbler-ptq:rocm-official` (digest `6bad266ffdff`; torch 2.14.0+rocm10.1.0,
+hip 7.16.26385, `cuda.is_available()=True`; `/dev/kfd` + `/dev/dri`;
+`PYTHONPATH=/repo/src` over a read-only mount, `quantibbler.__file__` confirmed at
+`/repo/src/quantibbler/__init__.py`): `python -m pytest tests/ptq -q
+-p no:cacheprovider` → **226 passed, 2 skipped, 3 deselected, 0 failed**, RC=0
+(97.07 s). Dev CPU wheel (`uv run --extra torch --extra hf`; Python 3.12.14,
+torch 2.14.1+cpu, no accelerator): `python -m pytest tests/ -q` → **599 passed,
+57 failed, 3 deselected**, RC=1 — every one of the 57 is the fail-closed
+`resolve_device` refusal, the documented dev-wheel class, and the two whose
+assertion message wraps it were reproduced standalone
+(`test_scn_checkpoint_fingerprint_refuses_stale_config` dies inside
+`magnitude_balance` at `get_backend(None)` → `resolve_device`, despite its cfg
+pinning `solver_backend="numpy"`). Rust, from the repo root: `cargo test` RC=0
+(`quantibbler_kernels` 12 passed / 0 failed), `cargo clippy --all-targets --
+-D warnings` RC=0, `cargo fmt --check` RC=0. `maturin build`: the bare
+workspace-root invocation fails on the virtual manifest (`missing field
+'package'`, RC=1); `uv run maturin build --manifest-path
+crates/quantibbler-kernels/Cargo.toml` → RC=0. `openspec validate
+qk-nanoquant-alignment-lane1 --strict` → VALID, RC=0.
+
+**The reconcile's open backlog, in one list** (each row carries its own evidence
+in `tasks.md`):
+
+1. `test_scn_sqrt_fold_at_formation` — absent, so the sqrt fold has no independent
+   witness; the W̃-formation helper row 7 names does not exist either (the fold is
+   inline at `block_recon.py:1564-1566`).
+2. `test_scn_heavy_tail_still_finite_positive` — absent, so nothing evidences that
+   the per-token clip carries the r137 protection the retired per-feature cap did.
+3. The q95 auto-cap retirement (row 6) — code, its tests and `config.py`'s
+   docstring all still carry the retired policy.
+4. `LayerStatsEntry`'s docstring still describes the retired construction
+   (`calibration.py:43-45`).
+5. OQ-1's run-artifact half (above).
+
+**Not this lane's, but seen from here:** the other reconsolidations' boxes
+aside, this pass changed exactly two paths — this `tasks.md` and this file. The
+working tree also carried unrelated modifications to sibling change dirs
+(`qk-nanoquant-alignment-lane0/2/3`, `qk-progress-instrumentation`,
+`qk-fail-fast-loop`, `qk-e2e-quality-gate`) written by other sessions during this
+one; nothing outside this change dir was touched here.

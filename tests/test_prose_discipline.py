@@ -23,9 +23,7 @@ def test_no_incident_narratives_in_product_source():
         for path in sorted(root.rglob("*.py")):
             if "__pycache__" in path.parts:
                 continue
-            for lineno, line in enumerate(
-                path.read_text(errors="replace").splitlines(), 1
-            ):
+            for lineno, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
                 if PATTERN.search(line):
                     hits.append(f"{path}:{lineno}: {line.strip()[:90]}")
     assert hits == [], (

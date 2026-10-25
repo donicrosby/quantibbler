@@ -13,6 +13,8 @@ proposing or implementing anything.
 - Run `openspec list` before starting work. If an active change already
   covers the surface you're about to touch, work within that change;
   never start a parallel change over the same capability.
+- The openspec CLI is invoked via `npx --yes @fission-ai/openspec` (or
+  `openspec` if globally installed); verify with `npx --yes @fission-ai/openspec --version`.
 - Behavior changes land WITH their spec delta in the SAME commit — never
   ship code that contradicts or silently outpaces the spec. If
   implementation reveals an ambiguity or forces a design-silent choice,
@@ -49,7 +51,7 @@ All Python tooling goes through uv — never pip, never bare `python`:
   IGNORED cleanly and `uv run pytest` silently runs a lean suite);
   also builds the Rust extension via maturin (workspace member).
 - `uv run pytest` — test suite.
-- `uv run maturin develop` — rebuild the extension after editing Rust code.
+- `uv run maturin develop --manifest-path crates/quantibbler-kernels/Cargo.toml` — rebuild the extension after editing Rust code.
 
 ## Gates
 
@@ -58,7 +60,7 @@ Every implementation change runs, before landing:
 1. `pre-commit run --all-files` (ruff check + format, whitespace hygiene,
    `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`)
 2. `uv run pytest`
-3. `uv run maturin build`
+3. `uv run maturin build --manifest-path crates/quantibbler-kernels/Cargo.toml`
 4. `cargo test` (in `crates/quantibbler-kernels/`)
 
 Install the hook once per clone: `uv run pre-commit install`.
@@ -68,7 +70,7 @@ Install the hook once per clone: `uv run pre-commit install`.
 Every container run launch (PTQ runs, GPU probes, benchmarks) is
 announced in the team room BEFORE firing — the exact launch line or the
 wrapper's `DRY_RUN` output — never after. Unannounced launches leave
-unattributable corpses in the forensic trail: on 2026-10-27 a second
+unattributable corpses in the forensic trail: on 2026-10-20 a second
 seq-2048-class tune attempt from an unknown session on this host died
 at the 32g cap (kernel-provable: container `2d2d4b6df1e0`, 33,480,724 kB,
 15:56:27Z) and its launcher is unestablishable post-mortem (`--rm`,

@@ -21,7 +21,7 @@ the solver, the scale calibration, or the block write-back.
 
 The user has directed the team to move on from CI and fix the actual root cause.
 This change builds the measurement ladder that splits bug from method, cheapest
-rung first (ladder authored by @sec-eng, 2026-10-27):
+rung first (ladder authored by @sec-eng, 2026-10-21):
 
 1. **fp factors** — rank-r512 reconstruction with the binary constraint off:
    pure fp factors through the existing pipeline. If prefix PPL still explodes,
