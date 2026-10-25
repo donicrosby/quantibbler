@@ -1,8 +1,8 @@
 """qk-fail-fast-loop: the driver-side probe, executed rather than asserted.
 
 The lean tier pins the driver's *shape* (`_driver_wiring_findings` + the
-poison battery in `tests/test_qk_report.py`) and the probe's decision maths
-(`tests/test_qk_report.py::test_probe_*`). This tier pins the *runtime*: the
+poison battery in `tests/test_qk_report_driver_pin.py`) and the probe's decision
+maths (`tests/test_qk_report_probe.py::test_probe_*`). This tier pins the *runtime*: the
 parser's knobs, the help surface, and one real driver run — the actual
 `tools/quantize_hf_model.py` as the user invokes it, on a locally-built tiny
 Qwen3 with a locally-built tokenizer and a synthetic parquet corpus, fully
@@ -301,12 +301,12 @@ def test_driver_run_records_the_probe_trajectory_and_agrees_with_its_exit_code(
 def test_device_auto_refuses_without_an_accelerator(monkeypatch):
     """`auto` is the accelerator or refuse -- never a silent CPU fallback.
 
-    This replaces a source-text pin in `tests/test_qk_report.py` that asserted
-    the driver's *source* contained no `SystemExit` outside the verdict path. It
-    rotted the moment the device gate landed, because it was a statement about
-    text rather than about behaviour -- and the behaviour it should have been
-    checking is the one that cost 21 hours on one socket while the run's own
-    launch record printed `device=cpu`.
+    This replaces a source-text pin (`tests/test_qk_report_driver_pin.py`) that
+    asserted the driver's *source* contained no `SystemExit` outside the verdict
+    path. It rotted the moment the device gate landed, because it was a
+    statement about text rather than about behaviour -- and the behaviour it
+    should have been checking is the one that cost 21 hours on one socket while
+    the run's own launch record printed `device=cpu`.
 
     The gate is a pre-flight refusal, deliberately outside `main()`: `main()` has
     exactly one exit, the verdict path, and that invariant stays pinned.
