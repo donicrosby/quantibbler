@@ -590,27 +590,89 @@ def _quantized_forward_block(
                 linear.forward = originals[name]  # type: ignore[method-assign]
 
 
-def _terminal_loss_weight(cfg: PTQConfig, pairs) -> np.ndarray | None:
-    """Weighted-MSE weight for the block's terminal linear, or ``None`` (uniform).
+# The block's canonical terminal linear ([NQ] App. C :3012 -- the output projection
+# whose Phase-1 output statistic weights the tuning loss; Algorithm 1 lines 2-5).
+# ``down_proj`` is the Llama-family name. Other architectures name the same function
+# differently, and those aliases are deliberately NOT enumerated here: the tree holds
+# no such list, and inventing one would be inventing the paper's vocabulary. Until the
+# alias set is pinned, an unrecognised terminal name takes the uniform fallback and
+# the caller must record it as such.
+CANONICAL_TERMINAL_NAMES: tuple[str, ...] = ("down_proj",)
 
-    The weight is the robust diagonal of the terminal linear's Phase-1 output
-    statistic ``d_out_raw`` ([NQ] App. C :3012 weighted MSE; the statistic's
-    construction is Algorithm 1 lines 2-5, Step 2-1 Eq. 2). It is detached and
-    non-trainable by construction: a host array, never a graph node.
+# The recorded fallback: a block with no canonical terminal linear (or one carrying no
+# usable statistic) is tuned with uniform weights, and that must leave a trace naming
+# the block and the missing layer. A uniform-weighted stage WITHOUT this event is
+# impossible by construction -- silent fail-open is the pattern this lane closed.
+TUNE_LOSS_FALLBACK_EVENT = "tune_loss_uniform_fallback"
 
-    ``cfg.block_loss_weight == "uniform"`` is the explicit ablation and returns
-    ``None``. Selecting the terminal by POSITION (the last pair) is this phase's
-    stand-in for the canonical ``down_proj``/arch-equivalent NAME lookup that
-    lands with the uniform-fallback work -- position is not the paper's rule and
-    a block whose terminal name is absent must record a fallback, not guess.
+
+def _canonical_terminal_pair(pairs):
+    """The ``(entry, (name, linear))`` pair for the block's canonical terminal linear.
+
+    Name-based, never positional: book order follows the block's own module order,
+    which is not the paper's rule. Matching is on the final dotted segment, so both
+    ``down_proj`` and ``mlp.down_proj`` resolve. ``None`` means the block carries no
+    canonical terminal name at all -- the caller must then fall back to uniform
+    weights AND record ``tune_loss_uniform_fallback`` naming the block and the
+    missing canonical layer.
+    """
+    for entry, named in pairs:
+        if named[0].rsplit(".", 1)[-1] in CANONICAL_TERMINAL_NAMES:
+            return entry, named[0]
+    return None
+
+
+def _usable_statistic(entry) -> bool:
+    """Is this entry's output statistic usable as a weight (~[NQ] Phase-1 output)?
+
+    ``None``, empty, or non-finite raw statistics are not weights. They take the same
+    recorded fallback as a missing terminal rather than poisoning the loss with NaN --
+    the spec's "or carries no Phase-1 statistic" arm.
+    """
+    raw = getattr(entry, "d_out_raw", None)
+    if raw is None:
+        return False
+    arr = np.asarray(raw, dtype=np.float64)
+    return arr.size > 0 and bool(np.all(np.isfinite(arr)))
+
+
+def _resolve_loss_weight(cfg: PTQConfig, pairs) -> tuple[np.ndarray | None, str, str | None]:
+    """Resolve the weighting and say WHY, so the caller cannot record a silence.
+
+    Returns ``(weight, source, missing_canonical_layer)``:
+
+    * ``(array, "terminal_grad:<linear>", None)`` -- canonical terminal found and usable.
+    * ``(None, "uniform", None)`` -- the explicit ablation (``block_loss_weight ==
+      "uniform"``). Needs no terminal and is NOT a fallback: no event.
+    * ``(None, "uniform_fallback", "<canonical name>")`` -- the block has no canonical
+      terminal, or its statistic is unusable. The CALLER must record
+      ``TUNE_LOSS_FALLBACK_EVENT`` naming the block and this layer.
     """
     if cfg.block_loss_weight == "uniform":
-        return None
-    if not pairs:
-        return None
-    entry, _terminal = pairs[-1]
+        return None, "uniform", None
+    found = _canonical_terminal_pair(pairs)
+    if found is None or not _usable_statistic(found[0]):
+        return None, "uniform_fallback", CANONICAL_TERMINAL_NAMES[0]
+    entry, name = found
     _d_in, d_out = robust_diag(entry.d_in_raw, entry.d_out_raw, tau=cfg.tau, gamma=cfg.gamma)
-    return np.asarray(d_out, dtype=np.float64)
+    return np.asarray(d_out, dtype=np.float64), f"terminal_grad:{name}", None
+
+
+def _terminal_loss_weight(cfg: PTQConfig, pairs) -> np.ndarray | None:
+    """Weighted-MSE weight for the block's canonical terminal linear, else ``None``.
+
+    The weight is the robust diagonal of that linear's Phase-1 output statistic
+    ``d_out_raw`` ([NQ] App. C :3012 weighted MSE; the statistic's construction is
+    Algorithm 1 lines 2-5, Step 2-1 Eq. 2). It is detached and non-trainable by
+    construction: a host array, never a graph node.
+
+    ``None`` means uniform weights, and it has THREE causes the caller must not
+    conflate: ``cfg.block_loss_weight == "uniform"`` (the explicit ablation, which
+    needs no terminal at all and is NOT a fallback), an empty or canonical-free
+    statistics book, and a canonical terminal carrying no usable statistic. Only the
+    latter two are the fallback the spec requires to be recorded.
+    """
+    return _resolve_loss_weight(cfg, pairs)[0]
 
 
 def _tune_fp(
@@ -628,6 +690,7 @@ def _tune_fp(
     teacher_fingerprint: str | None = None,
     teacher_source: str = "frozen_reference_copy",
     loss_weight: np.ndarray | None = None,
+    loss_weight_source: str = "uniform",
 ) -> dict:
     """TuneFP ([NQ] Step 1): T_pre steps of full-precision block tuning
     against the cached teacher with Adam + cosine lr ([NQ] App. C).
@@ -685,6 +748,10 @@ def _tune_fp(
         "residual_after": None,
         "weight_delta_rel": None,
         "vacuous": False,
+        # Weighting actually used, on the record from construction so the
+        # vacuous-teacher early return carries it too.
+        "loss_weight": "uniform" if loss_weight is None else "terminal_grad",
+        "loss_weight_source": loss_weight_source,
     }
     all_linears = _linear_children(block)
     if tune_names is None:
@@ -825,6 +892,7 @@ def _tune_latent_ste(
     steps: int | None = None,
     label: str = "",
     loss_weight: np.ndarray | None = None,
+    loss_weight_source: str = "uniform",
 ) -> dict:
     """TuneLatentSTE ([NQ] Step 3): joint refinement of (U, V, s1, s2) with
     the straight-through estimator against the block-level objective of
@@ -861,6 +929,8 @@ def _tune_latent_ste(
         "steps": 0,
         "per_linear": {},
     }
+    stats["loss_weight"] = "uniform" if loss_weight is None else "terminal_grad"
+    stats["loss_weight_source"] = loss_weight_source
     if not params:
         return stats
     # Per-tensor RELATIVE lr: one
@@ -1435,7 +1505,17 @@ def reconstruct_block(
     ste_records: dict[str, dict] = {}
     tune_fp_record: dict | None = None
     _tune_pairs = list(zip(stats_book, quantizable_linears, strict=False))
-    terminal_loss_weight = _terminal_loss_weight(cfg, _tune_pairs)
+    terminal_loss_weight, loss_weight_source, missing_terminal = _resolve_loss_weight(
+        cfg, _tune_pairs
+    )
+    if missing_terminal is not None and recorder is not None:
+        recorder(
+            TUNE_LOSS_FALLBACK_EVENT,
+            block=name_prefix or f"offset{layer_offset}",
+            missing_canonical_layer=missing_terminal,
+            requested_mode=cfg.block_loss_weight,
+            reason="absent_canonical_layer",
+        )
     for idx, (entry, (name, linear)) in enumerate(
         zip(stats_book, quantizable_linears, strict=False)
     ):
@@ -1461,6 +1541,7 @@ def reconstruct_block(
                 teacher_fingerprint=teacher_fingerprint,
                 teacher_source=teacher_source,
                 loss_weight=terminal_loss_weight,
+                loss_weight_source=loss_weight_source,
             )
             _note_block_progress(0, f"{name_prefix or 'block'}/tune_fp")
             if recorder is not None:
@@ -1589,6 +1670,7 @@ def reconstruct_block(
                 steps=total_ste,
                 label=name,
                 loss_weight=terminal_loss_weight,
+                loss_weight_source=loss_weight_source,
             )
             per = rec["per_linear"][name]
             if cfg.paper_faithful:
@@ -1671,6 +1753,9 @@ def reconstruct_block(
         if recorder is not None:
             recorder(
                 "ste",
+                # Weighting actually used by the stage, on the record.
+                loss_weight=("uniform" if terminal_loss_weight is None else "terminal_grad"),
+                loss_weight_source=loss_weight_source,
                 per_linear=ste_records,
                 total_steps=total_ste,
                 teacher_source=teacher_source,
