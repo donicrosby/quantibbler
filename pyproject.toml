@@ -31,6 +31,9 @@ dependencies = [
     "tokenizers>=0.22,<1",
     "safetensors>=0.7,<2",
     "pyarrow>=25,<27",
+    # Host-side artifact serialization (src/quantibbler/serialization.py) ships
+    # in the package: a `pip install quantibbler` must read its own reports.
+    "pydantic>=2.14,<3",
 ]
 
 [project.optional-dependencies]
