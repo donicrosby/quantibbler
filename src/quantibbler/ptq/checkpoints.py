@@ -11,17 +11,34 @@ rebuild boundary activations bit-identically.
 
 Resume safety is enforced by a FINGERPRINT: sha256 over the full
 PTQConfig (including stage hypers), the quantibbler version, and
-git describe. Resume refuses on a config mismatch - resuming a rank-137
-solve into a rank-64 config would produce plausible-looking garbage
-rather than a crash. Env-resolved values are RECORDED beside the digest in
-fingerprint.json, for a human to diff when a resume looks wrong. They are
-not locks: a checkpoint that bricks because a file moved or a tree was
-rebased is a tripwire, not provenance.
+git describe, PLUS a model-identity component derived from the LIVE model
+(the quantized-parameter scope's module inventory, each module's (dout, din)
+and its weight dtype). Resume refuses on a config mismatch - resuming a
+rank-137 solve into a rank-64 config would produce plausible-looking garbage
+rather than a crash - and on a model-identity mismatch, which is what keeps
+one model's block archives from being restored into another model's solve
+under an identical config (qk-fp-model-identity). The identity is a
+shape/inventory digest, never a repo id or a path: local paths get moved and
+renamed, and a real checkpoint must survive that. Env-resolved values are
+RECORDED beside the digest in fingerprint.json, for a human to diff when a
+resume looks wrong. They are not locks: a checkpoint that bricks because a
+file moved or a tree was rebased is a tripwire, not provenance.
 
 Bit-identity contract (asserted by test_scn_checkpoint_resume):
 a resumed run's serialized artifact is BYTE-IDENTICAL to a
 never-interrupted run's. Same bits or it's broken - there is no
 "approximately recovered".
+
+Beside the archives sits the STAGE JOURNAL (``stage-events.jsonl``): the run's
+stage events, appended as they fire, so a run resumed after a crash in the
+pipeline tail can seed its record with the stages the resume does not re-run
+(without it a tail-resumed run's record attests only what the resume itself
+emitted — an honest false-deny on a run that executed every stage). It is read
+only behind the fingerprint guard, only for a directory with a completed block,
+and validated line by line (payload shape AND finiteness — a saturated
+measurement is the monotone-leverage corruption class and must deny, never
+bless); a missing journal seeds nothing, never a synthesized event. See
+:func:`read_stage_log`.
 """
 
 from __future__ import annotations
@@ -39,7 +56,17 @@ from torch import nn
 
 import quantibbler
 
+from ..qk_report import json_safe, stage_journal_record
+
 _FINGERPRINT_NAME = "fingerprint.json"
+
+#: The stage journal beside the checkpoints (qk-fix-tunefp-teacher post-fire
+#: row): one JSON line per stage event, appended as the event fires, so a run
+#: that dies in the pipeline tail can still be resumed with a record that
+#: attests the stages it actually executed. See :func:`read_stage_log` for the
+#: fingerprint guard and the per-line shape check that keep a re-read record
+#: from blessing a name-only one.
+_STAGE_LOG_NAME = "stage-events.jsonl"
 
 # Observer-only config fields, excluded from the fingerprint: a probe observes
 # the solver, it does not steer it, so a resume created without a probe may be
@@ -115,6 +142,80 @@ def config_fingerprint(cfg) -> str:
     return hashlib.sha256(blob).hexdigest()
 
 
+#: The model-identity component's key in fingerprint.json (qk-fp-model-identity).
+#: Unlike the fields in ``_FINGERPRINT_PROVENANCE`` below, this one is FOLDED, not
+#: merely recorded: a divergence refuses the resume. It carries the digest (what
+#: refuses) and the inventory it was built from (what NAMES the divergence) --
+#: a bare digest can only say "different", and the operator needs "which module".
+_MODEL_IDENTITY_KEY = "model_identity"
+
+
+def model_identity(model) -> dict[str, list]:
+    """Canonical inventory of ``model``'s quantized-parameter scope.
+
+    The scope predicate is the SAME one the solver scopes with
+    (``block_recon._quantizable_names``, A-9), so the identity describes exactly
+    the parameters a checkpoint restores: one entry per quantizable ``nn.Linear``
+    naming, in sorted order, ``[dout, din, weight-dtype]``. ``cfg.layer_scope`` is
+    deliberately NOT applied -- scope is a config field and already lives in the
+    config digest; an identity that moved with it would report one divergence
+    under two names.
+
+    It is an identity of SHAPES, not of weights: two models of the same
+    architecture (a base checkpoint and a fine-tune of it) share it. See the
+    change's design.md, residual risk.
+    """
+    from .block_recon import _quantizable_names  # lazy: block_recon imports this module
+
+    modules = dict(model.named_modules())
+    return {
+        name: [
+            int(modules[name].out_features),
+            int(modules[name].in_features),
+            str(modules[name].weight.dtype).removeprefix("torch."),
+        ]
+        for name in sorted(_quantizable_names(model))
+    }
+
+
+def model_identity_digest(model) -> str:
+    """sha256 over the canonical inventory, for the refuse/accept decision."""
+    blob = json.dumps(model_identity(model), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _identity_repr(entry) -> str:
+    """``(dout, din, dtype)`` as the refusal prints it."""
+    return f"({entry[0]}, {entry[1]}, {entry[2]})"
+
+
+def _identity_divergence(recorded: dict, live: dict) -> str:
+    """What diverged, module by module, for the refusal message.
+
+    Naming the modules is the whole point of recording the inventory beside the
+    digest: "the model changed" is not diagnosable, "lin2 recorded but absent
+    from the live model" is.
+    """
+    changed, missing, added = [], [], []
+    for name in sorted(set(recorded) | set(live)):
+        if name not in live:
+            missing.append(name)
+        elif name not in recorded:
+            added.append(name)
+        elif list(recorded[name]) != list(live[name]):
+            changed.append(
+                f"{name} {_identity_repr(recorded[name])} -> {_identity_repr(live[name])}"
+            )
+    parts = []
+    if changed:
+        parts.append("changed: " + "; ".join(changed))
+    if missing:
+        parts.append("recorded but absent from the live model: " + ", ".join(missing))
+    if added:
+        parts.append("present in the live model but not recorded: " + ", ".join(added))
+    return "; ".join(parts) or "no per-module difference (the recorded encoding changed)"
+
+
 # Provenance fields recorded ALONGSIDE the hash. The hash already covers them
 # (``config_fingerprint`` hashes ``dataclasses.asdict(cfg)``), but a bare digest
 # cannot answer "which backend and dtype produced these checkpoints?" without
@@ -135,8 +236,20 @@ _FINGERPRINT_PROVENANCE = (
 )
 
 
-def write_fingerprint(ckpt_dir: Path, cfg) -> None:
+def write_fingerprint(ckpt_dir: Path, cfg, model) -> None:
+    """Write the directory's fingerprint record, for ``cfg`` AND ``model``.
+
+    ``model`` is REQUIRED, not defaulted: the record's whole job is to say which
+    model these checkpoints belong to, and a caller that cannot name the model it
+    is about to quantize has no business writing that record (the same
+    disarmed-guard rule ``apply_layer_states.expected_names`` follows).
+    """
     record = {"fingerprint": config_fingerprint(cfg)}
+    identity = model_identity(model)
+    record[_MODEL_IDENTITY_KEY] = {
+        "digest": model_identity_digest(model),
+        "modules": identity,
+    }
     effective = effective_solver_state(cfg)
     for name in _FINGERPRINT_PROVENANCE:
         # Env-overridable fields record the EFFECTIVE value the solve will use,
@@ -160,20 +273,43 @@ def write_fingerprint(ckpt_dir: Path, cfg) -> None:
     )
 
 
-def check_fingerprint(ckpt_dir: Path, cfg) -> None:
+def check_fingerprint(ckpt_dir: Path, cfg, model) -> None:
+    """Refuse to resume checkpoints that are not this run's, and say why.
+
+    Two folded components: the config/code digest and the model identity. Both
+    are checked before any archive is read or applied, so a refusal cannot leave
+    a partially-restored prefix in the host. The model identity is REQUIRED (see
+    ``write_fingerprint``), and a record that predates it is refused rather than
+    trusted -- it cannot be verified after the fact, and "cannot verify" is not
+    "verified".
+    """
     fp_path = ckpt_dir / _FINGERPRINT_NAME
     if not fp_path.exists():
         raise RuntimeError(
             f"resume requested but {fp_path} is missing; cannot verify the "
             "checkpoint was produced by an identical configuration"
         )
-    recorded = json.loads(fp_path.read_text(encoding="utf-8"))["fingerprint"]
-    if recorded != config_fingerprint(cfg):
+    record = json.loads(fp_path.read_text(encoding="utf-8"))
+    recorded_identity = record.get(_MODEL_IDENTITY_KEY)
+    if not isinstance(recorded_identity, dict) or "digest" not in recorded_identity:
         raise RuntimeError(
-            "checkpoint fingerprint mismatch: the on-disk checkpoints were "
-            "produced by a different PTQConfig / code state than this run. "
-            "Refusing to resume (stale-state protection). Delete the "
-            "checkpoint directory to start fresh."
+            f"checkpoint fingerprint mismatch: {fp_path} carries no model-identity "
+            "component (it was written before the resume fingerprint bound one), so "
+            "this run cannot verify the checkpoints were produced by the model it is "
+            "about to quantize. Refusing to resume (stale-state protection). Delete "
+            "the checkpoint directory to start fresh."
+        )
+    diverged = []
+    if record.get("fingerprint") != config_fingerprint(cfg):
+        diverged.append("a different PTQConfig / code state")
+    if recorded_identity["digest"] != model_identity_digest(model):
+        detail = _identity_divergence(recorded_identity.get("modules", {}), model_identity(model))
+        diverged.append(f"a different model (model identity diverged: {detail})")
+    if diverged:
+        raise RuntimeError(
+            "checkpoint fingerprint mismatch: the on-disk checkpoints were produced "
+            f"by {' and '.join(diverged)}, not by this run. Refusing to resume "
+            "(stale-state protection). Delete the checkpoint directory to start fresh."
         )
 
 
@@ -217,6 +353,118 @@ def completed_blocks(ckpt_dir: Path) -> list[int]:
             continue
         done.append(int(path.stem.split("-")[1]))
     return sorted(done)
+
+
+def stage_log_path(ckpt_dir: Path) -> Path:
+    """The stage journal beside the block checkpoints."""
+    return Path(ckpt_dir) / _STAGE_LOG_NAME
+
+
+def append_stage_event(ckpt_dir: Path, event: str, info: dict) -> None:
+    """Append ONE stage event to the journal, as its own JSON line.
+
+    Append-per-event, one open/write/close per event: the failure this exists
+    for is a run that dies in the pipeline TAIL, so every event must be on disk
+    by the time the stage it describes has returned — there is no buffered
+    writer whose tail a crash could lose. Only the report-shaped payload the
+    recorder already sanitized is journaled (no tensors: ``json`` could not
+    encode one).
+
+    Creates the checkpoint directory if the launch has not yet: Phase-1
+    statistics fires BEFORE the block loop, which is where a run first needs the
+    directory, so a writer that assumed the directory existed would die on the
+    first event of every fresh run.
+    """
+    Path(ckpt_dir).mkdir(parents=True, exist_ok=True)
+    # ``json_safe`` first, ``allow_nan=False`` as the backstop: a non-finite
+    # measurement (the monotone-leverage class) is recorded as ``null`` instead
+    # of the non-standard ``NaN``/``Infinity`` tokens Python's default
+    # ``allow_nan=True`` emits — those make the line unreadable for strict
+    # JSON parsers, and a resume that must read its own journal would fail on
+    # its own legitimate degenerate metric. Anything the sanitizer misses
+    # raises here rather than writing a line no strict reader can parse.
+    line = json.dumps(json_safe({"event": event, "info": info}), sort_keys=True, allow_nan=False)
+    with open(stage_log_path(ckpt_dir), "a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+
+
+def reset_stage_log(ckpt_dir: Path) -> None:
+    """Drop the journal of a launch that STARTS FRESH rather than resumes.
+
+    Called where the fingerprint is written (a directory with no completed
+    block): at that moment the journal on disk belongs to the fingerprint being
+    replaced, and a later resume of this directory must not inherit another
+    config's events. A missing journal is not an error — that is the
+    pre-journal case, and the empty result is the same either way.
+
+    Consequence, named because it is subtle: this also drops the CURRENT
+    launch's events emitted before the fingerprint was established — Phase-1
+    statistics, which fires before the block loop. That is safe for the resume
+    seed by construction (Phase-1 statistics is not checkpointed and re-fires on
+    every launch, so a resume never needs it from disk) and it keeps the journal
+    to the events a resume cannot re-emit.
+    """
+    stage_log_path(ckpt_dir).unlink(missing_ok=True)
+
+
+def resume_stage_events(ckpt_dir: Path, cfg, model) -> list[tuple[str, dict]]:
+    """The stage events a RESUMING launch inherits; ``[]`` for a fresh start.
+
+    A directory with no completed block checkpoint is a fresh start, and any
+    journal on disk belongs to a launch whose blocks were never written: this
+    launch re-runs every stage, so nothing is inherited. Otherwise the journal
+    is read through the fingerprint guard and the per-line shape check — against
+    the LIVE model, because the fingerprint binds model identity as well as
+    config (qk-fp-model-identity).
+
+    Call this BEFORE the launch emits its own first event. The journal is the
+    launch's own append log, so a read that happened after a few appends would
+    seed the launch with its own prefix events.
+    """
+    if not completed_blocks(ckpt_dir):
+        return []
+    return read_stage_log(ckpt_dir, cfg, model)
+
+
+def read_stage_log(ckpt_dir: Path, cfg, model) -> list[tuple[str, dict]]:
+    """The journal's stage events, for seeding a RESUMING run's record.
+
+    Fingerprint-guarded LIVE — ``check_fingerprint`` runs here, first, so this
+    reader cannot be called against a directory whose fingerprint does not match
+    the run reading it (``model`` is the live model, threaded through from the
+    caller and REQUIRED: the journal is this run's only if the checkpoints are) —
+    and shape-validated per line: every line must be a JSON
+    object naming an event the recorder can emit, whose payload carries the keys
+    that event always sends (``qk_report._STAGE_PAYLOAD_KEYS``). A poisoned or
+    garbage line — a name-only record, an unregistered event name, a truncated
+    write — RAISES. It never yields a record that satisfies the required-stage
+    conditions by itself, which is the property those conditions cannot check
+    for themselves: they are payload-blind, so a re-read record must not be
+    accepted on its names alone.
+
+    A missing journal returns ``[]``: that is the behavior before this journal
+    existed (the run's record is then only what this launch emitted), and nothing
+    is synthesized to stand in for events that were never recorded.
+    """
+    check_fingerprint(ckpt_dir, cfg, model)
+    path = stage_log_path(ckpt_dir)
+    if not path.exists():
+        return []
+    records: list[tuple[str, dict]] = []
+    for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not raw.strip():
+            # A trailing newline is not a record, and a blank line carries
+            # nothing that could be read as an event.
+            continue
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"{path}:{lineno}: stage journal line is not JSON ({exc})") from exc
+        try:
+            records.append(stage_journal_record(record))
+        except ValueError as exc:
+            raise RuntimeError(f"{path}:{lineno}: {exc}") from exc
+    return records
 
 
 def save_block_checkpoint(ckpt_dir: Path, index: int, layers: list, *, y_b=None) -> None:

@@ -199,7 +199,8 @@ def test_scn_prefix_probe_and_checkpoint_fingerprints_unchanged_in_shape(tmp_pat
         "rho_end",
     ), f"provenance field set moved: {_FINGERPRINT_PROVENANCE}"
     cfg = _cfg()
-    write_fingerprint(tmp_path, cfg)
+    model = _TinyApiModel(seed=0)
+    write_fingerprint(tmp_path, cfg, model)
 
     record = json.loads((tmp_path / "fingerprint.json").read_text(encoding="utf-8"))
     # Env-overridable fields also record their source, and the code leg records
@@ -207,6 +208,13 @@ def test_scn_prefix_probe_and_checkpoint_fingerprints_unchanged_in_shape(tmp_pat
     expected = {
         "fingerprint",
         *_FINGERPRINT_PROVENANCE,
+        # The model-identity component (qk-fp-model-identity): the one payload key
+        # whose value is a nested record, and the one that is FOLDED rather than
+        # record-only — a digest mismatch refuses the resume, so a resume can no
+        # longer accept another model's archives under the same PTQConfig. Its
+        # presence here is a shape contract: the reader in check_fingerprint
+        # refuses a record that lacks it.
+        "model_identity",
         "rho_end_source",
         "admm_reg_source",
         "solver_backend_source",
@@ -217,4 +225,11 @@ def test_scn_prefix_probe_and_checkpoint_fingerprints_unchanged_in_shape(tmp_pat
         f"fingerprint payload keys are {sorted(record)}, expected {sorted(expected)}"
     )
     assert record["fingerprint"] == config_fingerprint(cfg)
+    # The identity carries both halves: the digest that refuses, and the inventory
+    # that names the divergence when it does.
+    assert set(record["model_identity"]) == {"digest", "modules"}
+    assert record["model_identity"]["modules"] == {
+        "lin1": [8, 8, "float64"],
+        "lin2": [8, 8, "float64"],
+    }
     assert inspect.isfunction(config_fingerprint)

@@ -80,7 +80,12 @@ class _TinyLM(nn.Module):
 
 
 def _cfg() -> PTQConfig:
-    return PTQConfig(rank=2, admm_max_iter=20, paper_faithful=False)
+    # The unit tier's solver arm is the NumPy parity oracle, pinned by name:
+    # the production default is torch and ``resolve_device`` refuses an
+    # IMPLICIT device on a box with no accelerator (CI's ubuntu-latest), so a
+    # bare default config cannot solve there. Sibling call sites in the tier
+    # pin the same arm for the same reason; the refusal itself is untouched.
+    return PTQConfig(rank=2, admm_max_iter=20, paper_faithful=False, solver_backend="numpy")
 
 
 def _wide_block(dim: int, seed: int) -> nn.Sequential:
@@ -545,7 +550,9 @@ def test_scn_resumed_run_fp_stream_bitwise_identical(tmp_path) -> None:
             kept = {k: npz[k] for k in npz.files if k != "y_b"}
         path.unlink()
         np.savez(path, **kept)
-    write_fingerprint(legacy_dir, cfg)
+    # `clean` is the model the legacy-resume below runs (deep-copied), and the
+    # fingerprint binds model identity as well as config (qk-fp-model-identity).
+    write_fingerprint(legacy_dir, cfg, clean)
     lkeep = done[0]
     lexp = [b for b in done if b != lkeep]
     for b in lexp:

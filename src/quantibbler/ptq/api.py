@@ -13,6 +13,7 @@ accounting is computed from serialized bytes only (D5).
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -57,6 +58,7 @@ def quantize_model(
     *,
     checkpoint_dir=None,
     recorder=None,
+    stage_sink=None,
 ) -> QuantizedModel:
     """Run the NanoQuant PTQ pipeline (Phases 1-3) and return the artifact.
 
@@ -78,12 +80,30 @@ def quantize_model(
     block loop so the run artifact can carry the stage records (teacher
     provenance, TuneFP effect, per-linear STE flip counts, scale movement,
     the TuneFP vacuity guard event).
+
+    ``stage_sink`` (optional): the list ``recorder`` appends its ``(event,
+    info)`` pairs to. Before the first event fires it is SEEDED in place, at its
+    head, with the stage events the checkpoint directory's journal holds from an
+    earlier launch of this same directory — a resumed run skips the stages on
+    disk, so without the seed its record would attest only the stages the resume
+    re-emits (see :func:`quantibbler.ptq.checkpoints.resume_stage_events`).
     """
+    from . import checkpoints as ckpt
     from .scale_calib import calibrate_scales
 
     batches = list(calibration_data)
     if not batches:
         raise ValueError("quantize_model needs calibration data")
+
+    # Seed the stage record BEFORE the first event is emitted: the journal is
+    # this launch's own append log, so a seed read after a few appends would
+    # hand the launch its own prefix back. A directory with no completed block
+    # checkpoint is a fresh start and inherits nothing.
+    if stage_sink is not None and checkpoint_dir is not None:
+        # ``model`` is required by the fingerprint guard this read sits behind:
+        # the resume fingerprint binds the model identity, not only the config
+        # (qk-fp-model-identity), so the reader names the model it reads for.
+        stage_sink[:0] = ckpt.resume_stage_events(Path(checkpoint_dir), config, model)
 
     quant_names = _quantizable_names(model)
     if not quant_names:

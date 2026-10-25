@@ -64,9 +64,9 @@ from torch import nn
 from .bit_polish import greedy_polish
 from .calibration import LayerStatsBook, collect_stats, robust_diag
 from .config import PTQConfig
-from .lb_admm import lb_admm, magnitude_balance
+from .lb_admm import SOLVER_PROBE_ENV, lb_admm, magnitude_balance
 from .progress import ProgressReporter
-from .solver_backend import to_host_np
+from .solver_backend import solver_backend_provenance, to_host_np
 
 # Artifact markers (greppable in code, spec, and the run record).
 #
@@ -122,7 +122,9 @@ class VacuousTeacherError(RuntimeError):
         )
 
 
-SOLVER_PROBE_ENV = "QK_SOLVER_PROBE"
+# `SOLVER_PROBE_ENV` is imported from ``lb_admm``: the same flag gates the
+# solver's per-iteration eigenvalue probe, and this writer must never be able to
+# name a different variable than the gate reads.
 SOLVER_PROBE_PATH_ENV = "QK_SOLVER_PROBE_PATH"
 SOLVER_PROBE_DEFAULT_PATH = "/out/solver_probe.jsonl"
 
@@ -175,7 +177,7 @@ def _record_solver_probe(name, w, bal, res, cfg) -> None:
         return
 
     from .lb_admm import admm_reg_provenance, rho_end_provenance
-    from .solver_backend import resolve_device, solver_backend_provenance
+    from .solver_backend import resolve_device
 
     u = to_host_np(bal.U)
     v = to_host_np(bal.V)
@@ -737,6 +739,16 @@ def _tune_fp(
     snapshot is restored and the stage ends early if finiteness is ever
     violated. A slightly underfit block beats a poisoned pipeline.
     """
+    t_stage = time.perf_counter()
+
+    def _stamp() -> None:
+        """Close the stage's row time on EVERY return path.
+
+        A stage that returns early (no tunables, vacuous teacher) still spent
+        wall time, and the row that reports it must not read as 0 s.
+        """
+        stats["elapsed_s"] = time.perf_counter() - t_stage
+
     stats: dict = {
         "stage": "tune_fp",
         "label": label,
@@ -756,6 +768,14 @@ def _tune_fp(
         # vacuous-teacher early return carries it too.
         "loss_weight": "uniform" if loss_weight is None else "terminal_grad",
         "loss_weight_source": loss_weight_source,
+        # The device the stage's tensors ran on, and the stage's own row time
+        # (qk-ptq-speedups: scenario `ste_tunefp_gpu_zero_algorithm_change`).
+        # Both are read off the ACTIVATION, the authority for where this stage
+        # executes: an unlabelled device cannot say which numerics produced the
+        # row, and a row without its own time cannot replace the proposal's
+        # per-stage cost estimate with a measured one.
+        "device": str(x_b.device),
+        "elapsed_s": None,
     }
     all_linears = _linear_children(block)
     if tune_names is None:
@@ -766,6 +786,7 @@ def _tune_fp(
     params = [p for _, m in linears for p in m.parameters()]
     if not params:
         stats["steps"] = 0
+        _stamp()
         return stats
 
     def _residual() -> float:
@@ -856,6 +877,7 @@ def _tune_fp(
                         gradient_norm=grad_norm,
                         initial_residual_norm=residual_norm,
                     )
+                _stamp()
                 return stats
         opt.step()
         stats["steps"] = step + 1
@@ -882,6 +904,7 @@ def _tune_fp(
     if skipped:
         print(f"[tune_fp:{label}] skipped {skipped}/{total} non-finite-loss steps", flush=True)
     reporter.complete(steps_done)  # tunefp: the count actually run, never the budget
+    _stamp()
     return stats
 
 
@@ -925,6 +948,7 @@ def _tune_latent_ste(
     forward equality of the round-trip requirement). The factorized layer
     keeps the layer's pre-pipeline bias.
     """
+    t_stage = time.perf_counter()
     params = [p for fac in facs.values() for p in (fac.u_latent, fac.v_latent, fac.s1, fac.s2)]
     stats: dict = {
         "stage": "ste",
@@ -932,10 +956,31 @@ def _tune_latent_ste(
         "linears": sorted(facs),
         "steps": 0,
         "per_linear": {},
+        # The device the stage's tensors ran on, and its own row time
+        # (qk-ptq-speedups: scenario `ste_tunefp_gpu_zero_algorithm_change`).
+        # Read off the activation — the authority for where this stage executes.
+        "device": str(x_b.device),
+        "elapsed_s": None,
     }
+
+    def _stamp() -> None:
+        """Close the stage's row time on EVERY return path.
+
+        A row time is attributable to a linear only when the call refined
+        exactly that linear (the shipped per-target call pattern). A joint call
+        over several facs cannot split its wall time by linear, so its rows
+        report null rather than a fabricated share.
+        """
+        elapsed = time.perf_counter() - t_stage
+        stats["elapsed_s"] = elapsed
+        if len(stats["per_linear"]) == 1:
+            for rec in stats["per_linear"].values():
+                rec["elapsed_s"] = elapsed
+
     stats["loss_weight"] = "uniform" if loss_weight is None else "terminal_grad"
     stats["loss_weight_source"] = loss_weight_source
     if not params:
+        _stamp()
         return stats
     # Per-tensor RELATIVE lr: one
     # absolute lr for all four tensors let Adam step s1 — measured
@@ -967,6 +1012,11 @@ def _tune_latent_ste(
             "s1_rel_move": 0.0,
             "s2_rel_move": 0.0,
             "zero_crossings": True,
+            # Every STE row names the device its refinement ran on: the report's
+            # per-linear rows are what a reader compares across arms, and a row
+            # that cannot say where it ran cannot be compared with one that can.
+            "device": str(x_b.device),
+            "elapsed_s": None,
         }
         for name in facs
     }
@@ -993,6 +1043,7 @@ def _tune_latent_ste(
             rec["residual_before"] = residual_before
             rec["residual_after"] = residual_before
             rec["gradient_norm"] = 0.0
+        _stamp()
         return stats
     # Same finiteness armor as TuneFP: a NaN loss or a
     # poisoned step must not kill the run or corrupt latents that the
@@ -1096,6 +1147,7 @@ def _tune_latent_ste(
             f"[tune_latent_ste:{label}] skipped {skipped}/{total} non-finite-loss steps", flush=True
         )
     reporter.complete(steps_done)  # ste: the count actually run, never the budget
+    _stamp()
     return stats
 
 
@@ -1520,6 +1572,18 @@ def reconstruct_block(
             requested_mode=cfg.block_loss_weight,
             reason="absent_canonical_layer",
         )
+    # --- Solver arm for THIS block's balance stage. ``magnitude_balance`` is
+    # part of the algorithm on EITHER backend (qk-solver-backend, scenario
+    # ``admm_algorithm_unchanged``), and it refits the solve that just ran, so
+    # it must resolve the arm exactly as ``lb_admm`` resolves its own solve:
+    # SOLVER_BACKEND over cfg.solver_backend, an explicit QUANTIBBLER_DEVICE
+    # honoured, implicit torch on a box with no accelerator refused. Resolving
+    # it HERE is the point -- ``magnitude_balance``'s own default is
+    # DEFAULT_SOLVER_BACKEND, so a call site that omits it executes the balance
+    # on torch regardless of the knobs: unrunnable on an accelerator-less host,
+    # and a numpy-arm run silently mislabelled about the arm its balance used.
+    # Env is process-global, so one resolution per block covers every layer.
+    balance_backend, _balance_source = solver_backend_provenance(cfg.solver_backend)
     for idx, (entry, (name, linear)) in enumerate(
         zip(stats_book, quantizable_linears, strict=False)
     ):
@@ -1579,7 +1643,7 @@ def reconstruct_block(
         else:
             res = lb_admm(w_tilde, cfg)
             p_u, p_v = res.P_u, res.P_v
-        bal = magnitude_balance(p_u, p_v, d_out_t, d_in_t, target=w)
+        bal = magnitude_balance(p_u, p_v, d_out_t, d_in_t, target=w, backend=balance_backend)
         # Post-balance divergence gate (qk-divergence-guards): a diverged
         # layer must abort here, before it poisons this block's refinement
         # and every later block's calibration inputs.
@@ -1943,9 +2007,17 @@ def reconstruct_model(
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         done = ckpt.completed_blocks(ckpt_dir)
         if done:
-            ckpt.check_fingerprint(ckpt_dir, cfg)
+            # The LIVE model is the identity these checkpoints must belong to
+            # (qk-fp-model-identity): a config-only fingerprint accepts another
+            # model's block archives under the same PTQConfig. (The stage-journal
+            # seeding that used to live here is api.quantize_model's now —
+            # resume_stage_events — so the model is threaded there too.)
+            ckpt.check_fingerprint(ckpt_dir, cfg, model)
         else:
-            ckpt.write_fingerprint(ckpt_dir, cfg)
+            ckpt.write_fingerprint(ckpt_dir, cfg, model)
+            # Fresh start: the journal on disk belongs to the fingerprint just
+            # replaced (see checkpoints.reset_stage_log).
+            ckpt.reset_stage_log(ckpt_dir)
         done_set = set(done)
     else:
         done_set = set()
