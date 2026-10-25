@@ -65,12 +65,22 @@ tracked file, zero live holders.
 
 All Python tooling goes through uv — never pip, never bare `python`:
 
-- `uv sync --all-groups --extra torch --extra kernels --extra hf` — create/refresh
-  the environment (torch/hf are extras: without them the ptq test tier is
-  IGNORED cleanly and `uv run pytest` silently runs a lean suite);
-  also builds the Rust extension via maturin (workspace member).
+- `uv sync` — create/refresh the environment: the product's own dependencies
+  (numpy plus the PTQ pipeline's torch/transformers/tokenizers/safetensors/
+  pyarrow) and the default `dev` group (pytest, pytest-xdist, pre-commit,
+  maturin, pyyaml, and the `quantibbler-kernels` extension — which is also the
+  one product extra, since the NumPy references run where it is absent); also
+  builds the Rust extension via maturin (workspace member). A bare `uv sync` +
+  bare `uv run pytest` runs the FULL suite: there is no extra to remember and no
+  tier that soft-skips when a needed dependency is missing — a missing one is a
+  sync error that fails loudly at collection.
 - `uv run pytest` — test suite.
 - `uv run maturin develop --manifest-path crates/quantibbler-kernels/Cargo.toml` — rebuild the extension after editing Rust code.
+- `UV_PROJECT_ENVIRONMENT=/opt/venv` is exported on this box, so `uv sync` /
+  `uv run` target that SHARED venv from every worktree — a worktree does NOT get
+  its own `.venv`. Prefix `UV_PROJECT_ENVIRONMENT=<worktree>/.venv` for an
+  isolated one, or use `uv run --no-sync` with `PYTHONPATH=<worktree>/src` and
+  assert `quantibbler.__file__`.
 
 ## Gates
 

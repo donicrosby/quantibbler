@@ -40,6 +40,17 @@ context: |
     Rust. This rule extends to optional extras and test tooling.
   - Supported Python: 3.11-3.13 (numpy 2.4+ dropped 3.10; 3.10 EOL Oct 2026).
     Rust MSRV: 1.85 (edition 2024).
+  - Dependency classification (ruling 2026-10-25): an extra is strictly for a
+    part of the program a product user does NOT need. The PTQ pipeline IS the
+    product, so torch, transformers, tokenizers, safetensors and pyarrow are
+    the product's own `[project].dependencies` — never an extra, never a
+    dev-group-only home (the run images install the product with
+    `uv sync --no-dev --all-extras` and assert its imports; `pip install
+    quantibbler` must yield a working compressor). `kernels` is the one extra
+    that qualifies: the NumPy references in `src/quantibbler/kernels/` are the
+    executable specification and run where the Rust extension is absent. A
+    dependency the suite needs is a HARD one — a missing needed dep is a sync
+    error that fails loudly at collection, never an ignored/skipped tier.
   - Dependency freshness: every declared dependency requirement must be
     within ONE major version of the latest stable release; for 0.x
     packages, within ONE minor version. Verify against the live registry
