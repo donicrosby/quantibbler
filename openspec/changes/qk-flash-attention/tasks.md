@@ -128,7 +128,7 @@ gate suite.
       property of this face; if the engine later depends on it, it needs its
       own scenario and a pinned strategy).
 - [x] 2.2a Binary-purity pair rides THIS commit (design invariant (3),
-      sec-eng sequencing catch 2026-10-27): a sibling test file next to
+      sec-eng sequencing catch 2026-10-20): a sibling test file next to
       `binary_purity.rs` runs `cargo tree -p <pkg> -e normal,build
       --locked`, package-scoped, never workspace-wide, never
       `--all-features`, and asserts a POSITIVE+NEGATIVE pair —
@@ -221,31 +221,199 @@ gate suite.
       length assert `160 != 80`), and the power row's first draft targeted a
       fixture with one kv head, where the injected mapping is a no-op — its own
       assert caught that before it could pass vacuously.
-- [ ] 2.4 Re-sync the PyO3 face (`uv sync --reinstall-package
-      quantibbler-kernels`) and confirm the CHANGED behavior (new symbol
-      computes, not just imports).
+- [x] 2.4 Re-sync the PyO3 face (`uv sync --reinstall-package
+      quantibbler-kernels`) and confirm the fresh build COMPUTES — artifact
+      identity plus behavior, never import (`a stale .so imports cleanly and
+      runs old code`).
+      — **Re-synced and confirmed.** `uv sync --all-groups --extra torch
+      --extra kernels --extra hf --locked --reinstall-package
+      quantibbler-kernels` → **RC=0** (`Building`/`Built quantibbler-kernels`,
+      2.54 s). *Artifact identity:* the wheel uv built in that sync and the
+      installed `/opt/venv/lib/python3.12/site-packages/quantibbler_kernels/
+      quantibbler_kernels.abi3.so` are byte-identical (sha256
+      `4e7ba876a413…` both), so the face under test IS the fresh build, not a
+      cached predecessor. *Behavior, measured on that face:* all six v0.1
+      kernels re-computed against the NumPy reference — `pack_bits`
+      bytes-identical (int8 AND float64 boundaries), `unpack_bits` exact in
+      both dtypes, `packed_matvec` / `packed_matmul` / `joint_itq` **max rel
+      0.000e+00** against the 1e-12 gate, rejection contract intact
+      (`ValueError … got 0.5`); `uv run pytest tests/test_kernels_parity.py
+      tests/test_kernels_dispatch.py -q` → **27 passed, 0 skipped** (Rust leg
+      active).
+      — **Row text corrected by measurement, and this is the correction.**
+      The row was authored 2026-10-19, before the CubeK directive, when §2
+      still meant a hand-written kernel exposed *through the extension* (row
+      2.1's own text reads "vs the NumPy reference **via the PyO3 face** or
+      fixture vectors"). The 2026-10-20 substrate decision moved the attention
+      face to the **rlib** side behind the non-default `gpu` feature
+      (`gpu_attention` is `#[cfg(feature = "gpu")]` in `lib.rs` and is never
+      exported through `#[pymodule]`) and moved its parity proof to
+      `cargo test --features gpu`. Measured on the built extension: the
+      exported surface is exactly the v0.1 six plus `backend_version`, and a
+      default-feature dependency graph contains no `cubek-attention` at all —
+      so §2 contributes **zero bytes** to the extension (which is why the
+      re-sync reproduced the predecessor byte-for-byte). No requirement of
+      record asks for a PyO3 attention binding: `openspec/specs/qk-kernels`
+      enumerates the dual-face surface and its PyO3-parity requirement over
+      those six kernels only. The row is therefore ticked for what it can
+      truthfully mean (re-sync + identity + behavior), NOT expanded into an
+      unspec'd binding; recorded in design.md, "Implementation crystallization
+      (2026-10-25, task 2.4)". If a Python-callable attention face is wanted
+      after all, the spec delta must change first (same rule as the 1.1–1.2
+      package-path resolution) — the row text alone cannot order it.
+      — **Attention face behavior re-confirmed in BOTH gate states on the
+      current tree** (announced before firing, this ticket's board comment;
+      `LD_LIBRARY_PATH=/opt/data/tmp/rocm-sdk/lib cargo test --locked -p
+      quantibbler-kernels --features gpu --test gpu_attention_parity`):
+      unset → **RC=0, 2 passed** with the clean skip notice; with
+      `QUANTIBBLER_GPU_TESTS=1 HSA_OVERRIDE_GFX_VERSION=11.5.1` → **RC=0,
+      2 passed**, printing `attention parity: 9/9 fixture cases ran on the
+      device` (378 s under co-tenant load). The Python form of the same face:
+      `uv run pytest tests/test_attention_tiled.py -q` → **209 passed**.
 
 ## 3. Server attention face (dispatch + parity)
 
-- [ ] 3.1 RED: author `crates/quantibbler-server/tests/attention_dispatch.rs`
+- [x] 3.1 RED: author `crates/quantibbler-server/tests/attention_dispatch.rs`
       (scenario `face-selection-health`, `soft-fallback-init-failure` —
       the fallback test must run WITHOUT hardware); observe RED.
-- [ ] 3.2 GREEN: engine wiring mirroring MatvecFace: AttentionFace enum,
+      — **RED observed:** `cargo test -p quantibbler-server --test
+      attention_dispatch --no-run` → **rc=101**, `error[E0599]: no method
+      named 'attention_face' found for struct
+      Arc<engine::ModelWeights>` at the test's own call site. **GREEN after
+      3.2:** default build → **14 passed, 0 failed** (the three scenario
+      tests + the eleven embedded module unit tests); `--features gpu` →
+      **14 passed, 0 failed**. Both scenario halves are real, not nominal:
+      unset gate prints the clean skip notice, and with
+      `QUANTIBBLER_GPU_TESTS=1` + staged SDK on gfx1151 the DEVICE arm selects
+      `gpu:tiled` on the real device (rc=0). The fallback arm needs no
+      hardware in either build — the probe index is `usize::MAX / 2`, the
+      same deterministic construction the kernels crate's own
+      `fail_closed_construction_without_a_usable_device` uses, and it fired
+      for real (`device probe failed at index 4611686018427387903:
+      NoSuchDevice { runtime: Hip, available: 0 }` bare, `available: 1` with
+      the staged SDK — so it is not a lucky-absence pass). **No scenario label
+      in the file is a phantom:** the delta's scenarios carry HEADINGS only
+      (`grep` over `specs/` finds neither kebab id), the ids are `tasks.md`'s
+      own, and the docstring says so. Gate proven non-vacuous: mutating the
+      shipped label string (`"cpu:scalar"` → `"cpu:scalar-MUTATED"`) reds all
+      three label assertions with their own messages (11 passed / 3 failed,
+      rc=101), source restored byte-identical (sha256 compared before and
+      after — the value is not quoted here, since the file has gained
+      comment-only edits since and a hash in prose is rot by construction).
+- [x] 3.2 GREEN: engine wiring mirroring MatvecFace: AttentionFace enum,
       select-once at load, env opt-in, soft fallback, /health
       `attention_face` label; default-feature suite green (scalar path
       untouched).
-- [ ] 3.3 Hardware parity: scenario `cross-face-token-identity` on gfx1151
+      — **Landed.** `AttentionFace { CpuScalar, GpuTiled(GpuContext) }` +
+      `AttentionFaceDecision { cpu_scalar_selected, select_from_env,
+      describe }` in `engine/mod.rs` — the `FaceDecision` shape verbatim —
+      selected ONCE in `ModelWeights::from_layers` beside the matvec decision,
+      read back by `ModelWeights::attention_face()` and served by `/health` as
+      `attention_face` next to `matvec_face`. The opt-in NAME is the one thing
+      the delta leaves open (it says only "an env opt-in"): `QUANTIBBLER_ATTN=1`,
+      its own variable so the two frozen decisions stay independently
+      selectable — recorded as a design-silent decision in design.md, since a
+      task row cannot mint spec vocabulary. Soft fallback is the matvec policy
+      exactly: a failed `GpuContext::init_at` logs the typed staging hint and
+      returns `cpu:scalar`; startup never aborts. The forward dispatch sits in
+      `gqa_attention` (a one-line face match); the shipped scalar body moved
+      VERBATIM to `gqa_attention_scalar` — no expression changed, so the
+      default face is the code that shipped (that is what "scalar path
+      untouched" means) — and `gqa_attention_tiled` expresses one decode step
+      as a single query position (`seq_q = 1`) against the block's whole cache
+      (`seq_kv = pos + 1`), `causal = true`, `val_dim = head_dim`; no gather
+      was needed because `KvCache` already stores a block as one contiguous
+      `[seq_kv, kv_dim]` stack.
+      *Commands and counts:* `cargo test -p quantibbler-server` → **140 passed,
+      0 failed, 10 ignored** over 12 targets (incl. `binary_purity` 12,
+      `cubek_purity` 2, `gpu_dispatch` 13, `load` 14, `attention_dispatch` 14),
+      rc=0; `cargo clippy -p quantibbler-server --all-targets -- -D warnings` →
+      rc=0; `cargo check -p quantibbler-server --features gpu --all-targets` →
+      rc=0 with no warnings (and `clippy` clean there too); `cargo fmt -p
+      quantibbler-server -- --check` → rc=0; `cargo fmt --all -- --check` →
+      rc=0; kernels gates unchanged (`cd crates/quantibbler-kernels && cargo
+      test` → 24 passed rc=0, clippy rc=0, fmt rc=0).
+      *Named residual:* the device arm of the dispatch is
+      `#[cfg(feature = "gpu")]`, so NOTHING in the default build executes it —
+      this row proves selection, labelling, soft fallback and that the gpu arm
+      COMPILES; the device face's number-identity (`cross-face-token-identity`)
+      is row 3.3, left unchecked below.
+- [x] 3.3 Hardware parity: scenario `cross-face-token-identity` on gfx1151
       (fixture pipeline greedy generation, both faces, tokens identical,
       logits rel ≤ 1e-5).
+      — **Landed, and it was RED first on the device.**
+      New `crates/quantibbler-server/tests/cross_face_token_identity.rs`
+      drives the FIXTURE pipeline (`server-model` + its tokenizer, greedy
+      argmax) through both faces — two constructions under the two env
+      states, the `gpu_dispatch.rs` shape — and asserts the face LABELS
+      (`cpu:scalar` / `gpu:tiled`) before comparing, so a device leg that
+      soft-fell-back to scalar cannot pass by comparing scalar with itself.
+      *RED, real hardware:* the first device run selected `gpu:tiled` on
+      gfx1151 and produced token streams identical but final logits at
+      **inf-norm rel 1.634708e-1** — O(1), four orders past the budget, i.e.
+      the dispatch was handing the device the wrong bytes.
+      *Cause:* `KvCache::keys/vals` expose the cache's ROW-MAJOR
+      `(seq_kv, n_kv_heads, head_dim)` stack, while `GpuContext::attention`
+      documents `(B, n_kv_heads, seq_kv, head_dim)` (head-major); the two
+      orders coincide only when `n_kv_heads == 1`, and the fixture has 2.
+      *Fix:* `KvCache::keys_head_major` / `vals_head_major` — a host-side
+      gather — used by `gqa_attention_tiled`; 3.2's "no gather was needed"
+      claim is retracted and corrected in design.md.
+      *GREEN, same device and command:* **inf-norm rel 0.000000e0, max|delta|
+      0.000000e0** over a 14-key context, 8 identical tokens, RC=0.
+      *Both gate states:* unset → clean skip notice, 12 passed, RC=0; set
+      (`QUANTIBBLER_GPU_TESTS=1 LD_LIBRARY_PATH=/opt/data/tmp/rocm-sdk/lib
+      HSA_OVERRIDE_GFX_VERSION=11.5.1 cargo test --locked -p
+      quantibbler-server --features gpu --test cross_face_token_identity
+      -- --nocapture --test-threads=1`) → the device run above, RC=0.
+      *Honest weakness of the token clause on THIS fixture:* the fixture's
+      greedy stream is constant (token `1` for all 8 steps), so "tokens
+      identical" carries little detection power here; the LOGITS clause is
+      what caught the O(1) dispatch defect and it is the clause with measured
+      power (1.63e-1 → 0.0). Recorded rather than dressed up.
+      *Named finding, sibling change, NOT this card's scope:*
+      `gqa_attention_sage` hands `attention_sage` the same row-major cache
+      stack although that kernel documents the same `(B, n_kv_heads, S, d)`
+      contract — the INT8 face therefore carries the identical latent O(1)
+      layout defect for `n_kv_heads > 1`; its tests call the kernel directly
+      and never reach the engine call site. Routed as its own card.
 
 ## 4. Perf probe (OQ-1 — resolved only by measurement)
 
-- [ ] 4.1 Timed decode-attention benchmark, CPU scalar face vs GPU tiled
+- [x] 4.1 Timed decode-attention benchmark, CPU scalar face vs GPU tiled
       face at (seq 512, seq 2048) × d=128 × GQA 8:1 on gfx1151; record
       the table in design.md crystallization; OQ-1 answered WITH numbers.
       Outcome gate: ≥ 1.5× at seq 2048 keeps the face opt-in-recommended;
       a miss keeps it opt-in-experimental and records why.
-- [ ] 4.2 Reference benchmark (user directive 2026-10-27): install pip
+      — **MISS, WITH NUMBERS; face stays opt-in-experimental (as
+      pre-registered).** Probe: throwaway `/opt/data/tmp/attn-decode-bench`
+      (gemm-bench pattern, NOT repo code), `cargo build --release`, built and
+      run INSIDE the sanctioned container (`quantibbler-ptq:rocm-official`;
+      the sandbox here carries a 5 GB cgroup cap that SIGKILLs rustc
+      mid-release-build). Command: `docker exec qk-attn-refbench bash -lc
+      'LD_LIBRARY_PATH=…/_rocm_sdk_devel/lib ./target/release/attn-decode-bench'`
+      → **RC=0**; device gfx1151 (Radeon 8060S). Pins (in the table header):
+      batch=1, n_heads=8, n_kv_heads=1 (GQA 8:1), d=val_dim=128, f32,
+      causal=true, warmup=3. cpu:scalar vs gpu:tiled, median (min) ms:
+      `decode kv=1` **0.001 (0.001) vs 1.065 (0.581)** [diagnostic fixed-cost
+      row, not a gate row]; `decode kv=512` **0.297 (0.278) vs 21.918 (9.284)**;
+      `decode kv=2048` **0.997 (0.788) vs 123.744 (103.378)**;
+      `causal seq=512` **67.008 (66.364) vs 32.815 (26.866)** = 2.04×;
+      `causal seq=2048` **1096.130 (1096.130) vs 152.108 (150.797)** = 7.21×.
+      Gate: seq-2048 decode is **124× SLOWER** (0.01×), seq-512 **74× slower**
+      → MISS. Every row asserts both faces compute the same thing BEFORE
+      printing (inf-norm rel 2.62e-06 at decode 2048, 2.09e-07 at causal 2048)
+      — the probe's own first draft was caught by that assert (rel 1.48) for
+      comparing two plane orders. `HSA_OVERRIDE_GFX_VERSION=11.5.1` re-run
+      reproduces the verdict (110.492 ms vs 0.997 ms; 7.83×). Why, as far as
+      the probe can say: ~1 ms fixed per-call floor plus a term linear in the
+      cached context (42.8–60.4 µs/key vs 0.5–0.6 µs/key for the scalar face);
+      the two named candidates (per-call GQA materialisation/upload/readback;
+      the design's own `BlueprintStrategy::Inferred`-per-call residual) are NOT
+      separated by this probe and the decomposition probe that would separate
+      them is named as the next experiment. Tables + provenance in design.md,
+      "Implementation crystallization (2026-10-25, tasks 4.1–4.2 — measured)".
+- [x] 4.2 Reference benchmark (user directive 2026-10-20): install pip
       `flash-attn` (ROCm build for gfx1151) in the sanctioned rocm
       container and run the SAME decode-shaped timed benchmark
       (seq 512/2048 × d=128 × GQA 8:1) through its interface; record
@@ -256,6 +424,38 @@ gate suite.
       The harness pins equal shapes, dtype, causal masking, warmup, and
       batch for both — no benchmark-adjacent advantage may differ
       without being recorded in the table's own header.
+      — **SHORTFALL ON BOTH AXES; gap recorded; the face is NOT "set" →
+      opt-in-experimental until it closes.** Installed via pip
+      (`python -m pip install --no-build-isolation`, `BUILD_TARGET=rocm`)
+      TWO ways, both in the sanctioned container, same shape/dtype/mask/
+      warmup/batch pins as 4.1: **(a)** the literal PyPI sdist
+      `flash-attn 2.8.3.post2` with `FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE`
+      (its in-tree Triton AMD path) — the primary reference; **(b)**
+      `ROCm/flash-attention @2.8.4` with the same flags, Triton backend via
+      `third_party/aiter` + `AITER_TRITON_ONLY=1` — a cross-check. Both
+      produced IDENTICAL output checksums. Recorded deviation from the row's
+      literal wording: the CK/`hipcc` backend was not used — it is
+      fp16/bf16-only (our face is f32) and its documented build is hours of
+      hipcc template instantiation; the Triton backend supports fp32 and RDNA,
+      which is why it is the one that can compare like-for-like. Command:
+      `docker exec qk-attn-refbench bash -lc 'FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
+      AITER_TRITON_ONLY=1 python ref_bench.py'` → **RC=0** (torch
+      2.14.0+rocm10.1.0, device AMD Radeon 8060S). Wall time, median (min) ms,
+      (a)/(b): `decode kv=1` 0.665 (0.428)/0.237 (0.156); `decode kv=512`
+      1.758 (0.887)/1.807 (0.872); `decode kv=2048` 4.950 (2.968)/4.943
+      (1.942); `causal seq=512` 3.266 (2.869)/2.273 (1.663); `causal seq=2048`
+      33.488 (32.730)/15.274 (13.717). Peak memory: reference device peak
+      0.0/0.8/3.0/6.5/26.1 MiB (`torch.cuda.max_memory_allocated`, reset per
+      row) with host-RSS deltas ≤12.2 MiB; ours 598 MiB whole-probe host peak
+      (137 MiB worst single-row delta). Against the BETTER reference build
+      ours is **12.5×/25.0× slower at the decode shapes and 14.4×/10.0×
+      slower at the causal shapes**, and worse on the only comparable memory
+      axis → shortfall on wall time AND memory → **not set**. The two memory
+      instruments differ (torch device allocator vs `/proc/self/status`), which
+      the table states instead of papering over. Ledger note that matters for
+      the next reader: the CPU scalar face — what the server runs today — BEATS
+      the reference at both decode shapes (5.9×/5.0× faster) and loses at both
+      causal shapes (29.5×/71.8×). Both tables in design.md.
 
 ## 5. Landing
 
@@ -264,3 +464,65 @@ gate suite.
       `cargo fmt --all -- --check`, `uv run maturin build`, and
       `openspec validate qk-flash-attention --strict`; scoped commit
       (spec + code + crystallization together).
+      — **Suite RED on the live shared checkout, for two sibling-owned reasons;
+      box deliberately left UNTICKED** (kanban `t_5d79c4f8`, measured
+      2026-10-25 11:03–11:22Z, HEAD `8c226fa`, tree dirty with 90 paths).
+      *Interpreter + device, declared once for every Python number below:*
+      `/opt/venv`, `torch 2.14.1+cpu`, `hip=None`, `cuda.is_available()=False`,
+      pytest 9.1.1. (A bare `uv run pytest` re-syncs this shared venv and drops
+      the extras — every invocation below is `--no-sync` with the full extra
+      set.)
+      *Python — the literal single invocation* `uv run --no-sync --extra torch
+      --extra kernels --extra hf pytest -q -p no:cacheprovider --tb=no -rf` →
+      **8 failed, 1007 passed, 3 skipped, 4 deselected in 143.05s, RC=1**
+      (`/opt/data/tmp/t5d7-gates/uvrun_single.log`). Independently reproduced
+      by the chunked form (5 disjoint processes, because this sandbox's cgroup
+      is `memory.max=5368709120` and a whole-tree run is SIGKILLable): 754/4 +
+      77/4 + 57/0 + 59/0 + 60/0 = **1007 passed, 8 failed, 3 skipped** over
+      **1018 collected** (`--collect-only` agrees: `1018/1022 tests collected
+      (4 deselected)`; the 4 are the `integration` marker).
+      *Rust — every leg RC=0:* `cd crates/quantibbler-kernels && cargo test
+      --locked` → **24 passed, 0 failed**; `--features gpu` → **30 passed, 0
+      failed** (the 2 `gpu_attention_parity` cases skip cleanly with the gate
+      unset); `cargo clippy --all-targets -- -D warnings` → RC=0 default and
+      RC=0 `--features gpu`; `cargo test --locked -p quantibbler-server` →
+      **179 passed, 0 failed, 10 ignored, 15 targets** (incl.
+      `attention_dispatch` 14, `cross_face_token_identity` 12,
+      `binary_purity` 12, `cubek_purity` 2); `--features gpu` → **180 passed,
+      0 failed, 10 ignored**; server `clippy --all-targets -- -D warnings` →
+      RC=0 in both feature states; `cargo fmt --all -- --check` → RC=0.
+      `uv run --no-sync maturin build --manifest-path
+      crates/quantibbler-kernels/Cargo.toml` → RC=0, wheel
+      `target/wheels/quantibbler_kernels-0.1.0-cp311-abi3-manylinux_2_35_x86_64.whl`.
+      `npx --yes @fission-ai/openspec validate qk-flash-attention --strict` →
+      `Change 'qk-flash-attention' is valid`, RC=0 (one change id per
+      invocation).
+      *The 8 reds are two classes, both outside this change's blast radius and
+      both already owned by blocked sibling cards:* (1) **4 reds in
+      `tests/ptq/test_progress.py`** from the uncommitted
+      `src/quantibbler/ptq/progress.py` ETA unit-model edit — card
+      **t_993f1df5** already records this same `4 failed, 21 passed` in its own
+      blocker comment (its four reds assert the superseded `(total-done)*rate`
+      formula). (2) **4 reds in `tests/test_qk_report.py`** from the
+      uncommitted `tools/quantize_hf_model.py` refactor of the KD scratch
+      default into a named `_scratch_root()` — card **t_14977580** owns that
+      helper and the per-run checkpoint dir under it. Neither failing
+      assertion names anything this change added, and neither file is in its
+      path set. *Causality, measured rather than inferred from co-location:*
+      the checker `_scratch_dir_findings` — committed at HEAD, unmodified by
+      anyone — returns `[]` for HEAD's driver source and exactly those 3
+      findings (`no platform-scratch fallback in the default: _scratch_root()`,
+      `the sandbox path is not existence-probed: _scratch_root()`, `the sandbox
+      scratch preference is gone: _scratch_root()`) for the working tree's.
+      *Baseline A/B:* a detached worktree at `8c226fa` reads **116 passed**
+      (91 + 25) on those two files, so neither red exists at HEAD.
+      *The change's own surface is green in both feature states*:
+      `tests/test_attention_tiled.py` → **209 passed**;
+      `tests/test_kernels_parity.py` + `tests/test_kernels_dispatch.py` → **27
+      passed**; server `attention_dispatch` 14 and `cross_face_token_identity`
+      12 green in the default build *and* under `--features gpu`.
+      *Named residual (why no tree here yields the row's "all gates green"):*
+      HEAD itself is red — `64 failed, 603 passed, 3 deselected` (670
+      collected) on the same interpreter — that is main's post-wave-push red,
+      owned by `t_07c6b629` / `t_fa083bb3`; the shared tree is *greener* (8 vs
+      64) because sibling fixes for that class are sitting uncommitted in it.
