@@ -590,6 +590,29 @@ def _quantized_forward_block(
                 linear.forward = originals[name]  # type: ignore[method-assign]
 
 
+def _terminal_loss_weight(cfg: PTQConfig, pairs) -> np.ndarray | None:
+    """Weighted-MSE weight for the block's terminal linear, or ``None`` (uniform).
+
+    The weight is the robust diagonal of the terminal linear's Phase-1 output
+    statistic ``d_out_raw`` ([NQ] App. C :3012 weighted MSE; the statistic's
+    construction is Algorithm 1 lines 2-5, Step 2-1 Eq. 2). It is detached and
+    non-trainable by construction: a host array, never a graph node.
+
+    ``cfg.block_loss_weight == "uniform"`` is the explicit ablation and returns
+    ``None``. Selecting the terminal by POSITION (the last pair) is this phase's
+    stand-in for the canonical ``down_proj``/arch-equivalent NAME lookup that
+    lands with the uniform-fallback work -- position is not the paper's rule and
+    a block whose terminal name is absent must record a fallback, not guess.
+    """
+    if cfg.block_loss_weight == "uniform":
+        return None
+    if not pairs:
+        return None
+    entry, _terminal = pairs[-1]
+    _d_in, d_out = robust_diag(entry.d_in_raw, entry.d_out_raw, tau=cfg.tau, gamma=cfg.gamma)
+    return np.asarray(d_out, dtype=np.float64)
+
+
 def _tune_fp(
     block: nn.Module,
     x_b: torch.Tensor,
@@ -604,6 +627,7 @@ def _tune_fp(
     capture_index: int | None = None,
     teacher_fingerprint: str | None = None,
     teacher_source: str = "frozen_reference_copy",
+    loss_weight: np.ndarray | None = None,
 ) -> dict:
     """TuneFP ([NQ] Step 1): T_pre steps of full-precision block tuning
     against the cached teacher with Adam + cosine lr ([NQ] App. C).
@@ -702,7 +726,16 @@ def _tune_fp(
             (step % (n // bs or 1)) * bs, (step % (n // bs or 1)) * bs + bs, device=x_b.device
         )
         out = block(x_b[idx])
-        loss = (out - y_b[idx]).pow(2).mean()
+        # Weighted MSE over the block-output residual ([NQ] App. C :3012): one
+        # weight per output feature, applied in the stage's compute dtype. The
+        # uniform case runs the SAME expression with all-ones weights, so the
+        # ablated path and the shipped path are one path. Multiplying by exactly
+        # 1.0 is bit-identical, so a uniform run is unchanged by this change.
+        if loss_weight is None:
+            w = torch.ones(out.shape[-1], dtype=out.dtype, device=out.device)
+        else:
+            w = torch.as_tensor(loss_weight, dtype=out.dtype, device=out.device)
+        loss = (w[None, :] * (out - y_b[idx]).pow(2)).mean()
         if not torch.isfinite(loss):
             skipped += 1
             opt.zero_grad()
@@ -791,6 +824,7 @@ def _tune_latent_ste(
     *,
     steps: int | None = None,
     label: str = "",
+    loss_weight: np.ndarray | None = None,
 ) -> dict:
     """TuneLatentSTE ([NQ] Step 3): joint refinement of (U, V, s1, s2) with
     the straight-through estimator against the block-level objective of
@@ -911,7 +945,14 @@ def _tune_latent_ste(
         lo = (step % (n // bs or 1)) * bs
         idx = torch.arange(lo, lo + bs, device=x_b.device)
         out = _quantized_forward_block(block, facs, x_b[idx])
-        loss = (out - y_b[idx]).pow(2).mean()
+        # Weighted MSE, same construction as TuneFP above ([NQ] App. C :3012):
+        # one detached weight per output feature in the stage's compute dtype,
+        # all-ones for the uniform case so both paths are one path.
+        if loss_weight is None:
+            w = torch.ones(out.shape[-1], dtype=out.dtype, device=out.device)
+        else:
+            w = torch.as_tensor(loss_weight, dtype=out.dtype, device=out.device)
+        loss = (w[None, :] * (out - y_b[idx]).pow(2)).mean()
         if not torch.isfinite(loss):
             skipped += 1
             opt.zero_grad()
@@ -1393,6 +1434,8 @@ def reconstruct_block(
     total_ste = max(cfg.stage_latent.epochs * (n_rows // bs_latent or 1), 1)
     ste_records: dict[str, dict] = {}
     tune_fp_record: dict | None = None
+    _tune_pairs = list(zip(stats_book, quantizable_linears, strict=False))
+    terminal_loss_weight = _terminal_loss_weight(cfg, _tune_pairs)
     for idx, (entry, (name, linear)) in enumerate(
         zip(stats_book, quantizable_linears, strict=False)
     ):
@@ -1417,6 +1460,7 @@ def reconstruct_block(
                 capture_index=capture_index,
                 teacher_fingerprint=teacher_fingerprint,
                 teacher_source=teacher_source,
+                loss_weight=terminal_loss_weight,
             )
             _note_block_progress(0, f"{name_prefix or 'block'}/tune_fp")
             if recorder is not None:
@@ -1544,6 +1588,7 @@ def reconstruct_block(
                 cfg.stage_latent.batch_size,
                 steps=total_ste,
                 label=name,
+                loss_weight=terminal_loss_weight,
             )
             per = rec["per_linear"][name]
             if cfg.paper_faithful:

@@ -329,10 +329,14 @@ def test_scn_paper_faithful_hands_ste_continuous_latents(monkeypatch):
     seen: dict[str, torch.Tensor] = {}
     real = br._tune_latent_ste
 
-    def spy(block, facs, x_b, y_b, cfg, batch_size, *, steps=None, label=""):
+    # **kwargs, not a re-listed signature: this spy intercepts a private stage
+    # function, so every new stage kwarg (lane-4's loss_weight is the first)
+    # would otherwise break the test with a TypeError that has nothing to do with
+    # what it asserts.
+    def spy(block, facs, x_b, y_b, cfg, batch_size, *, steps=None, label="", **kwargs):
         for name, fac in facs.items():
             seen[name] = fac.u_latent.detach().clone()
-        return real(block, facs, x_b, y_b, cfg, batch_size, steps=steps, label=label)
+        return real(block, facs, x_b, y_b, cfg, batch_size, steps=steps, label=label, **kwargs)
 
     monkeypatch.setattr(br, "_tune_latent_ste", spy)
     blk = _SevenLinearBlock(seed=91)
