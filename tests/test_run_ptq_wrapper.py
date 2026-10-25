@@ -29,6 +29,11 @@ _SCRIPT = _REPO / "tools" / "run-ptq-container.sh"
 # The double is a real file on an exec-able filesystem, reached by SYMLINK from
 # the (noexec) tmpdir; see `_hermetic_docker`.
 _DOCKER_STUB = _REPO / "tests" / "stubs" / "docker"
+#: The launch-ownership contract (change qk-launch-attribution; the 2026-10-25
+#: ownerless fire). Every leg declares its owner exactly as a real fire must, so
+#: `rc == 0` keeps meaning "the whole gate chain passed" -- a leg that wants the
+#: refusal passes the empty string explicitly.
+_OWNER_ENV = {"QKB_LAUNCH_OWNER": "wrapper-test", "QKB_LAUNCH_CARD": "t_29f52eb6"}
 _KNOBS = (
     "MODEL",
     "OUT",
@@ -125,7 +130,7 @@ def _launch(**env: str) -> subprocess.CompletedProcess:
     probes the digest and the name guard before it prints argv.
     """
     environment = {key: value for key, value in os.environ.items() if key not in _KNOBS}
-    environment.update({"DRY_RUN": "1", **env})
+    environment.update({**_OWNER_ENV, "DRY_RUN": "1", **env})
     _assert_interception(environment)
     return subprocess.run(
         ["sh", str(_SCRIPT)],
@@ -150,6 +155,7 @@ def _launch_past_dry_run(**env: str) -> subprocess.CompletedProcess:
     environment = {key: value for key, value in os.environ.items() if key not in _KNOBS}
     environment.update(
         {
+            **_OWNER_ENV,
             "WATCHDOG": "0",  # keep the host-side watchdog out of a unit test
             **env,
         }
@@ -541,7 +547,7 @@ def test_fence_hook_install_resolves_the_hooks_dir_in_a_linked_worktree(tmp_path
     assert not hooks_dir.exists(), "fixture precondition: the installer has to create it"
 
     environment = {key: value for key, value in os.environ.items() if key not in _KNOBS}
-    environment.update({"DRY_RUN": "1", "OUT": str(tmp_path / "out")})
+    environment.update({**_OWNER_ENV, "DRY_RUN": "1", "OUT": str(tmp_path / "out")})
     _assert_interception(environment)
     completed = subprocess.run(
         ["sh", str(worktree / "tools" / "run-ptq-container.sh")],
@@ -567,3 +573,113 @@ def test_fence_hook_install_resolves_the_hooks_dir_in_a_linked_worktree(tmp_path
     # what the mode pin checks.
     mode = installed.stat().st_mode & 0o777
     assert mode == 0o755, f"installed hook mode is {oct(mode)}, not 0o755"
+
+
+# --- launch ownership: an unattributable fire is refused (change
+# --- qk-launch-attribution; the 2026-10-25 qk-pertarget-v4 incident) ---------
+# Spec: `openspec/changes/qk-launch-attribution/specs/qk-wrapper/spec.md`.
+# The incident fire ran with no owner stamp, no announcement and no GO, and the
+# launch path could not say whose run it was. These legs pin the refusal and the
+# attribution the incident lacked, through the same DRY_RUN seam every other
+# gate in this file is proved through.
+
+_TRAIL = pathlib.Path("/opt/data/tmp/quantibbler-breadcrumbs.log")
+
+
+def test_scn_wrapper_refuses_unattributed_launch():
+    """Spec scenario ``wrapper_refuses_unattributed_launch``.
+
+    With no owner stamp the wrapper MUST refuse before the container name is
+    taken: exit 2, an error naming the variables, and no argv resolved -- the
+    refusal is a refusal, not a plan for a run it will start anyway.
+    """
+    refused = _launch(QKB_LAUNCH_OWNER="", QKB_LAUNCH_CARD="")
+    assert refused.returncode == 2, (refused.returncode, refused.stdout, refused.stderr)
+    assert "launch ownership missing" in refused.stderr
+    assert "QKB_LAUNCH_OWNER" in refused.stderr, "the refusal names the variable to set"
+    assert "QKB_LAUNCH_CARD" in refused.stderr
+    assert "'docker'" not in refused.stdout, "a refused launch must not resolve an argv"
+
+
+def test_scn_launch_ownership_label_spellings_carry_the_same_evidence():
+    """Spec scenario ``launch_ownership_label_spellings_accepted``.
+
+    The incident ruling named the container LABELS (`qkb_launch_owner` /
+    `qkb_launch_card`), and docker never shows a container its own labels, so a
+    launcher holding only that vocabulary has to hand it over as env. Those
+    spellings MUST be read as the same evidence -- never as a second, weaker
+    contract -- and the launch MUST proceed and stamp the contract labels.
+    """
+    completed = _launch(
+        QKB_LAUNCH_OWNER="",
+        QKB_LAUNCH_CARD="",
+        qkb_launch_owner="ruling-owner",
+        qkb_launch_card="t_ruling",
+    )
+    assert completed.returncode == 0, (completed.returncode, completed.stderr)
+    assert "'--label' 'qkb_launch_owner=ruling-owner'" in completed.stdout
+    assert "'--label' 'qkb_launch_card=t_ruling'" in completed.stdout
+
+
+def test_scn_attributed_launch_stamps_owner_labels_and_owner_line(tmp_path):
+    """Spec scenario ``attributed_launch_stamps_owner_labels``.
+
+    An attributed launch MUST stamp `qkb_launch_owner` and `qkb_launch_card`
+    beside `qkb_launch_id`, mirror both into the container (the driver's own
+    gate reads env -- labels are invisible from inside), and name the owner in
+    the announce and in the artifact's `launch.env`: the owner of a fire has to
+    be readable from the artifact, not from somebody's scrollback.
+    """
+    out = tmp_path / "out"
+    completed = _launch(OUT=str(out))
+    assert completed.returncode == 0, (completed.returncode, completed.stderr)
+    assert "'--label' 'qkb_launch_id=" in completed.stdout
+    assert "'--label' 'qkb_launch_owner=wrapper-test'" in completed.stdout
+    assert "'--label' 'qkb_launch_card=t_29f52eb6'" in completed.stdout
+    assert "'-e' 'QKB_LAUNCH_OWNER=wrapper-test'" in completed.stdout
+    assert "'-e' 'QKB_LAUNCH_CARD=t_29f52eb6'" in completed.stdout
+    assert "owner=wrapper-test card=t_29f52eb6" in completed.stderr
+
+    launch_env = (out / "launch.env").read_text()
+    assert "owner=wrapper-test\n" in launch_env
+    assert "card=t_29f52eb6\n" in launch_env
+
+
+def test_scn_attributed_fire_writes_the_owner_into_the_trail_header():
+    """Spec scenario ``attributed_launch_stamps_owner_labels`` (owner line).
+
+    The breadcrumb tail is what a post-mortem reads; the fire's owner MUST be
+    written there by the launcher at fire time, not remembered by the person
+    who fired it. The header keeps its leading `=== run <ISO> rank=...` shape
+    and gains `owner=... card=...` before the closing `===`.
+
+    This leg walks the REAL launch path (`_launch_past_dry_run`) rather than
+    reading the script's source, because a header nothing executes is exactly
+    the "verified by construction" gap the wrapper spec names. The trail is the
+    host's shared file, so the assertion is scoped to the tail window my own
+    launch just wrote.
+    """
+    trailer = subprocess.run(
+        ["tail", "-n", "40", str(_TRAIL)],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout
+    completed = _launch_past_dry_run(RANK="512", SOLVER="svd", SEQ_LEN="2048")
+
+    # The witness gate fails this leg closed (the double prints nothing), which
+    # is downstream of the header write -- the header is written first.
+    assert completed.returncode == 2, (completed.returncode, completed.stderr)
+
+    written = subprocess.run(
+        ["tail", "-n", "40", str(_TRAIL)],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout
+    added = [line for line in written.splitlines() if line not in trailer.splitlines()]
+    mine = [line for line in added if "owner=wrapper-test card=t_29f52eb6 ===" in line]
+    assert mine, (
+        f"the attributed fire wrote no owner line into the trail header (new lines: {added!r})"
+    )
+    assert mine[-1].startswith("=== run "), mine[-1]

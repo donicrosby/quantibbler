@@ -375,8 +375,10 @@ def _binds_report_name(node: ast.AST) -> bool:
 
 #: The launch line's identity fields, in the order design.md decision 1 pins
 #: (change qk-launch-attribution): the epoch crumb field leads the line, then
-#: pid, argv, rev, out.
-_LAUNCH_LINE_FIELDS = (" pid=", " argv=", " rev=", " out=")
+#: pid, argv, rev, out, and the launch-ownership pair (2026-10-25 incident) --
+#: owner, card. `card` is the literal `unset` when the run has no board card, so
+#: the MARKER is always present; only the value varies.
+_LAUNCH_LINE_FIELDS = (" pid=", " argv=", " rev=", " out=", " owner=", " card=")
 
 
 def _crumb_literal_text(node: ast.AST) -> str:
@@ -1008,6 +1010,9 @@ _VACUOUS_ANCHOR = "    except VacuousTeacherError as exc:\n"
 #: holes, but never inside one.
 _LAUNCH_REV_HOLE = "rev={_resolve_rev()}"
 _LAUNCH_OUT_HOLE = "out={out_dir}"
+#: The launch-ownership hole (2026-10-25 incident): a driver that starts fires
+#: naming no owner is the defect that incident proved.
+_LAUNCH_OWNER_HOLE = "owner={owner}"
 
 
 def _poison(kind: str) -> str:
@@ -1101,6 +1106,8 @@ def _poison(kind: str) -> str:
         return src.replace(_LAUNCH_REV_HOLE, "", 1)
     if kind == "launch_line_dropped_out":
         return src.replace(_LAUNCH_OUT_HOLE, "", 1)
+    if kind == "launch_line_dropped_owner":
+        return src.replace(_LAUNCH_OWNER_HOLE, "", 1)
     if kind == "launch_line_fields_reordered":
         # Swap the two holes through sentinels: the fix is to move the fields,
         # not to respell the literal text around them, so this stays honest if
@@ -1138,6 +1145,7 @@ def _poison(kind: str) -> str:
         ("stage_gate_returned_from", "exactly one return"),
         ("launch_line_dropped_rev", "missing identity field"),
         ("launch_line_dropped_out", "missing identity field"),
+        ("launch_line_dropped_owner", "missing identity field"),
         ("launch_line_fields_reordered", "out of the pinned order"),
     ],
 )

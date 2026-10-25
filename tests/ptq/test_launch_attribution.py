@@ -11,6 +11,14 @@ Scenarios covered (IDs verbatim from the spec delta):
 - ``default_path_disambiguates_concurrent_launches``
 - ``configured_path_honored_exactly``
 
+and the launch-ownership scenarios added by the 2026-10-25 incident (an
+ownerless paper-faithful fire ran on this box; nothing in the launch path could
+say whose it was):
+
+- ``driver_refuses_unattributed_launch``
+- ``label_spelled_owner_accepted``
+- ``owner_without_card_records_unset``
+
 Why the driver is invoked as a doomed start rather than a full run: the
 2026-10-20 corpse WAS a doomed start, and the whole point of this change is that
 the survivor attributes its run even when the launch protocol is violated. So
@@ -58,6 +66,15 @@ import sys
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 DRIVER = REPO_ROOT / "tools" / "quantize_hf_model.py"
 
+#: The launch-ownership contract (2026-10-25 incident, `qk-pertarget-v4`): a
+#: fire names its owner or does not start. The three owner spellings are the SAME
+#: evidence -- the incident ruling named the container labels, which a container
+#: can only receive as env (docker never shows a container its own labels).
+_OWNER_VARS = ("QKB_LAUNCH_OWNER", "QKB_LAUNCH_LABEL_OWNER", "qkb_launch_owner")
+_CARD_VARS = ("QKB_LAUNCH_CARD", "QKB_LAUNCH_LABEL_CARD", "qkb_launch_card")
+OWNER = "launch-attribution-test"
+CARD = "t_29f52eb6"
+
 #: A model-load abort costs the torch/transformers import (~10 s measured); the
 #: timeout is a hang guard, not a budget.
 DRIVER_TIMEOUT = 300
@@ -85,6 +102,13 @@ def _env(kd_tmp: pathlib.Path, breadcrumbs: pathlib.Path | None) -> dict[str, st
     env["QUANTIBBLER_KD_TMPDIR"] = str(kd_tmp)
     env["HF_HUB_OFFLINE"] = "1"
     env["TRANSFORMERS_OFFLINE"] = "1"
+    # Every run names its owner, exactly as a real fire must: the scenarios below
+    # are about the launch line, and a refused launch writes none. The refusal
+    # scenario removes all three accepted spellings deliberately -- an inherited
+    # owner (or one leaked by an earlier leg) would silently turn it into the
+    # attributed case and the leg would pass for the wrong reason.
+    env["QKB_LAUNCH_OWNER"] = OWNER
+    env["QKB_LAUNCH_CARD"] = CARD
     if breadcrumbs is None:
         env.pop("QUANTIBBLER_BREADCRUMBS", None)
     else:
@@ -132,13 +156,21 @@ def _launch_line(trail: pathlib.Path) -> str:
 
 
 def _assert_launch_identity(
-    line: str, *, pid: int, out_dir: pathlib.Path, rev: str, argv_token: str
+    line: str,
+    *,
+    pid: int,
+    out_dir: pathlib.Path,
+    rev: str,
+    argv_token: str,
+    owner: str = OWNER,
+    card: str = CARD,
 ) -> None:
     """The full identity contract for one launch line.
 
     The epoch crumb field leads the line (every crumb's first field is the
     watchdog's own timestamp) and the identity fields follow in the order
-    ``design.md`` decision 1 pins.
+    ``design.md`` decision 1 pins, with the launch-ownership fields (2026-10-25
+    incident) appended after ``out``: pid, argv, rev, out, owner, card.
     """
     assert line.split()[0].isdigit(), f"launch line does not lead with the epoch field: {line!r}"
     assert "start pid=" in line, line
@@ -149,9 +181,14 @@ def _assert_launch_identity(
         f"launch line carries no/incorrect rev ({rev!r} expected): {line!r}"
     )
     assert f"out={out_dir}" in line, f"launch line carries no resolved out dir: {line!r}"
-    order = [line.find(token) for token in (" pid=", " argv=", " rev=", " out=")]
+    assert f"owner={owner}" in line, (
+        f"launch line does not name its owner ({owner!r} expected): {line!r}"
+    )
+    assert f"card={card}" in line, f"launch line does not name its card ({card!r}): {line!r}"
+    fields = (" pid=", " argv=", " rev=", " out=", " owner=", " card=")
+    order = [line.find(token) for token in fields]
     assert -1 not in order and order == sorted(order), (
-        f"launch identity fields are not in the pinned order pid, argv, rev, out: {line!r}"
+        f"launch identity fields are not in the pinned order {fields}: {line!r}"
     )
 
 
@@ -328,4 +365,136 @@ def test_scn_configured_path_honored_exactly(tmp_path):
     # The configured path is honored EXACTLY: no per-launch sibling anywhere.
     assert not list(tmp_path.glob("**/breadcrumbs-*.log")), (
         "a pid-suffixed trail was written beside an explicitly configured path"
+    )
+
+
+# --- launch ownership: no owner, no run (2026-10-25 incident) ----------------
+# Spec delta: `openspec/changes/qk-launch-attribution/specs/qk-ptq/spec.md`.
+# On 2026-10-25T18:10:32Z an ownerless paper-faithful fire ran on this box
+# (container `quantibbler-ptq-run`, launch id `qk-pertarget-v4-20261025T1815Z`)
+# and nothing in the launch path could say whose run it was. A run that cannot
+# name its owner is now refused before it writes anything.
+#
+# RED-FIRST RECORD -- observed before this cut, against the pre-change driver
+# bytes at `HEAD` (`git show HEAD:tools/quantize_hf_model.py`, copied outside the
+# checkout):
+#
+#     env -u QKB_LAUNCH_OWNER -u QKB_LAUNCH_LABEL_OWNER -u qkb_launch_owner \
+#       QUANTIBBLER_KD_TMPDIR=<kd> python <pre-change driver> --device cpu \
+#       --model /nonexistent-model-xyz --out <out>
+#
+# started for real (exit 1 only because the model does not exist) and wrote the
+# trail's first line with NO owner field:
+#
+#     1792955343 cgroup=3.69G :: start pid=837399 argv=--device cpu --model
+#     /nonexistent-model-xyz --out ... rev=unknown out=/opt/data/tmp/prefix-red/out
+#
+# which is the defect: an unattributable run was allowed to launch, and its trail
+# could not name its owner. Post-fix the same command exits 1 with
+# `error: launch ownership missing` and writes no trail at all.
+
+
+def test_scn_driver_refuses_unattributed_launch(tmp_path):
+    """Spec scenario ``driver_refuses_unattributed_launch``.
+
+    With none of the accepted owner spellings present the driver MUST refuse:
+    nonzero exit, an error naming the variable to set, and no trail written --
+    an unattributable run has nothing to record itself into.
+    """
+    scratch = tmp_path / "unattributed"
+    scratch.mkdir()
+    kd_tmp = scratch / "kd"
+    kd_tmp.mkdir()
+    trail = scratch / "breadcrumbs.log"
+
+    env = _env(kd_tmp, trail)
+    for var in (*_OWNER_VARS, *_CARD_VARS):
+        env.pop(var, None)
+    assert not any(var in env for var in _OWNER_VARS), "the refusal case still carries an owner"
+
+    proc = _spawn(_start_cmd(DRIVER, scratch, "A"), env, cwd=REPO_ROOT)
+    _, stderr = proc.communicate(timeout=DRIVER_TIMEOUT)
+
+    assert proc.returncode != 0, f"an ownerless launch was allowed to start\n{stderr[-2000:]}"
+    assert "launch ownership missing" in stderr, stderr[-2000:]
+    assert "QKB_LAUNCH_OWNER" in stderr, "the refusal names the variable to set"
+    assert not trail.exists(), (
+        f"an unattributable run wrote a trail at {trail}: {trail.read_text()[:200]!r}"
+    )
+
+
+def test_scn_label_spelled_owner_accepted(tmp_path):
+    """Spec scenario ``label_spelled_owner_accepted``.
+
+    The incident ruling named the container LABELS, and docker never shows a
+    container its own labels, so a launcher holding only that vocabulary hands it
+    over as env. Those spellings MUST be read as the same evidence: the run
+    proceeds and the launch line records that owner and card.
+    """
+    scratch = tmp_path / "label-spelled"
+    scratch.mkdir()
+    kd_tmp = scratch / "kd"
+    kd_tmp.mkdir()
+    trail = scratch / "breadcrumbs.log"
+    out_dir = (scratch / "out-A").resolve()
+
+    env = _env(kd_tmp, trail)
+    for var in (*_OWNER_VARS, *_CARD_VARS):
+        env.pop(var, None)
+    env["qkb_launch_owner"] = "ruling-owner"
+    env["qkb_launch_card"] = "t_ruling"
+
+    proc = _spawn(_start_cmd(DRIVER, scratch, "A"), env, cwd=REPO_ROOT)
+    pid = proc.pid
+    _, stderr = proc.communicate(timeout=DRIVER_TIMEOUT)
+    assert proc.returncode != 0, (
+        f"the launch under test was meant to abort at model load\n{stderr[-2000:]}"
+    )
+
+    _assert_launch_identity(
+        _launch_line(trail),
+        pid=pid,
+        out_dir=out_dir,
+        rev=_git_head(REPO_ROOT),
+        argv_token=str(scratch / "absent-model-A"),
+        owner="ruling-owner",
+        card="t_ruling",
+    )
+
+
+def test_scn_owner_without_card_records_unset(tmp_path):
+    """Spec scenario ``owner_without_card_records_unset``.
+
+    The owner is required; the owning card id is a board fact a CI smoke leg or a
+    local diagnostic legitimately has not got. The launch line MUST say so
+    literally rather than omit the field -- a missing marker reads as "not
+    measured", which is the shape this change exists to keep out of the trail.
+    """
+    scratch = tmp_path / "owner-only"
+    scratch.mkdir()
+    kd_tmp = scratch / "kd"
+    kd_tmp.mkdir()
+    trail = scratch / "breadcrumbs.log"
+    out_dir = (scratch / "out-A").resolve()
+
+    env = _env(kd_tmp, trail)
+    for var in (*_OWNER_VARS, *_CARD_VARS):
+        env.pop(var, None)
+    env["QKB_LAUNCH_OWNER"] = "owner-only"
+
+    proc = _spawn(_start_cmd(DRIVER, scratch, "A"), env, cwd=REPO_ROOT)
+    pid = proc.pid
+    _, stderr = proc.communicate(timeout=DRIVER_TIMEOUT)
+    assert proc.returncode != 0, (
+        f"the launch under test was meant to abort at model load\n{stderr[-2000:]}"
+    )
+
+    _assert_launch_identity(
+        _launch_line(trail),
+        pid=pid,
+        out_dir=out_dir,
+        rev=_git_head(REPO_ROOT),
+        argv_token=str(scratch / "absent-model-A"),
+        owner="owner-only",
+        card="unset",
     )

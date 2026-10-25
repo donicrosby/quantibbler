@@ -90,6 +90,32 @@ if [ "$#" -ne 0 ]; then
   exit 2
 fi
 
+# --- launch ownership: an unattributable fire is refused, not announced --------
+# Incident 2026-10-25T18:10:32Z: container `quantibbler-ptq-run`, image
+# `quantibbler-ptq:rocm-official`, launch id `qk-pertarget-v4-20261025T1815Z`,
+# paper-faithful, no owner stamp, no announcement, no GO -- and nothing in the
+# launch path could say whose run it was. An ownerless fire is now REFUSED here,
+# on the host, before the name is taken and before 32g is spent; the driver
+# refuses the same launch from inside (tools/quantize_hf_model.py::_launch_owner),
+# which is what closes the direct-`docker run` path this wrapper never sees.
+#
+# The contract is QKB_LAUNCH_OWNER (who is launching) + QKB_LAUNCH_CARD (the
+# kanban card that owns the fire). The label-named spellings are accepted as the
+# SAME evidence, not as a second contract: the incident ruling named the
+# container labels (`qkb_launch_owner` / `qkb_launch_card`), and docker never
+# shows a container its own labels, so the launched process can only carry that
+# vocabulary as env. Read by the wrapper, stamped below as labels AND mirrored
+# into the container env, so the driver's gate sees the same evidence -- this
+# script is the launcher's owner-of-record, never a place to author one.
+OWNER="${QKB_LAUNCH_OWNER:-${QKB_LAUNCH_LABEL_OWNER:-${qkb_launch_owner:-}}}"
+CARD="${QKB_LAUNCH_CARD:-${QKB_LAUNCH_LABEL_CARD:-${qkb_launch_card:-}}}"
+if [ -z "$OWNER" ] || [ -z "$CARD" ]; then
+  echo "error: launch ownership missing - refusing to launch an unattributable fire" >&2
+  echo "       set QKB_LAUNCH_OWNER=<who is launching> and QKB_LAUNCH_CARD=<kanban card id>" >&2
+  echo "       (label spellings qkb_launch_owner / qkb_launch_card carry the same evidence)" >&2
+  exit 2
+fi
+
 # Say which run this is, before it runs. None of these advisories judges the
 # choice — they exist so a bare launch cannot quietly be mistaken for the
 # claimable one. An exported-but-empty SOLVER falls through to the default and
@@ -158,7 +184,7 @@ echo "run-ptq-container: model=$MODEL rank=$RANK solver=$SOLVER seq_len=$SEQ_LEN
   "factor_mode=${FACTOR_MODE:-binary} ablation=${ABLATION:-none} layer_scope=${LAYER_SCOPE:-all}" \
   "paper_faithful=${PAPER_FAITHFUL:-0} ste_flip_pass_budget=${STE_FLIP_PASS_BUDGET:-0}" \
   "compute_dtype=${COMPUTE_DTYPE:-float64} gpu=${GPU:-0} image=$IMAGE image_digest=$IMAGE_DIGEST" \
-  "eval_seqs=$EVAL_SEQS out=$OUT" >&2
+  "eval_seqs=$EVAL_SEQS out=$OUT owner=$OWNER card=$CARD" >&2
 
 mkdir -p "$OUT" 2>/dev/null || true
 # Launch provenance, written into the artifact directory BEFORE the container
@@ -189,6 +215,11 @@ mkdir -p "$OUT" 2>/dev/null || true
     "${GPU:-0}" "$IMAGE" "$IMAGE_DIGEST" \
     "$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
     "$(git -C "$REPO" status --porcelain 2>/dev/null | grep -vc '^??' || true)"
+  # Who owns the fire, recorded with the rest of the run's identity: the owner
+  # line has to outlive the terminal it was launched from, exactly like the
+  # commit and the image digest. The owner is required (refused above); the card
+  # is required here too, because this is the board's launch path.
+  printf 'owner=%s\ncard=%s\n' "$OWNER" "$CARD"
   printf 'mode=%s\n' "$MODE"
 } > "$OUT/launch.env" 2>/dev/null || echo "warning: could not write $OUT/launch.env" >&2
 # Pre-launch host free-RAM baseline, beside the artifact: the fence decision
@@ -224,7 +255,11 @@ set -- docker run --rm \
   -v /opt/data/tmp:/tmp/ptq \
   -v "$OUT:/out" \
   --label qkb_launch_id="$LAUNCH_ID" \
+  --label qkb_launch_owner="$OWNER" \
+  --label qkb_launch_card="$CARD" \
   -e QKB_LAUNCH_ID="$LAUNCH_ID" \
+  -e QKB_LAUNCH_OWNER="$OWNER" \
+  -e QKB_LAUNCH_CARD="$CARD" \
   -e HF_HOME=/hf \
   -e HF_HUB_OFFLINE=1 \
   -e TRANSFORMERS_OFFLINE=1 \
@@ -385,8 +420,14 @@ mkdir -p /opt/data/tmp "$(dirname "$OUT")"
 # killed run leaves behind: `: >` destroyed it on every launch, including the
 # one that died (`tail` from the *failed* run is the useful line, not the new
 # run's first sample).
-printf '=== run %s rank=%s solver=%s seq_len=%s tune_seq_len=%s paper_faithful=%s ste_flip_pass_budget=%s compute_dtype=%s image=%s out=%s ===\n' \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-unset}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "${COMPUTE_DTYPE:-float64}" "$IMAGE" "$OUT" \
+# The owner line rides the SAME header the forensics tail already reads, in the
+# tail's own field syntax, so the announcement of who owns a fire is written by
+# the launcher rather than remembered by the person who fired it (change
+# qk-launch-attribution; the 2026-10-25 ownerless fire had no announcement at
+# all). The leading `=== run <ISO> rank=…` shape is unchanged -- the watchdog's
+# line-silence scan and the header greps read it.
+printf '=== run %s rank=%s solver=%s seq_len=%s tune_seq_len=%s paper_faithful=%s ste_flip_pass_budget=%s compute_dtype=%s image=%s out=%s owner=%s card=%s ===\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-unset}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "${COMPUTE_DTYPE:-float64}" "$IMAGE" "$OUT" "$OWNER" "$CARD" \
   >> /opt/data/tmp/quantibbler-breadcrumbs.log
 
 

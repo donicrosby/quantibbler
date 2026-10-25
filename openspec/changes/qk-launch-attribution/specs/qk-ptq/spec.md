@@ -47,3 +47,28 @@ forensics read path are unchanged).
 - **WHEN** `QUANTIBBLER_BREADCRUMBS` points at a fixed path,
 - **THEN** the driver appends only to that path (no pid suffix) and
   its launch identity line still appears first.
+
+### Requirement: A driver run SHALL name its owner or refuse to start
+
+Every PTQ driver run SHALL resolve a launch owner from `QKB_LAUNCH_OWNER`
+(label spellings `QKB_LAUNCH_LABEL_OWNER` / `qkb_launch_owner` are the same
+evidence) and SHALL refuse to start -- named error, nonzero exit, nothing
+written to the trail -- when no owner is present. The launch line SHALL record
+`owner=<owner>` and `card=<card|unset>` after `out`, the owning card being a
+board fact that is recorded literally as `unset` when absent.
+
+#### Scenario: driver_refuses_unattributed_launch
+
+- **WHEN** the driver starts with none of the accepted owner spellings in its environment
+- **THEN** it exits nonzero with an error naming `QKB_LAUNCH_OWNER`, and no crumb trail is written
+- **AND** this is the 2026-10-25 `qk-pertarget-v4` incident's defect: an ownerless paper-faithful fire ran, and nothing in the launch path could say whose run it was
+
+#### Scenario: label_spelled_owner_accepted
+
+- **WHEN** only the label spelling `qkb_launch_owner` / `qkb_launch_card` is present
+- **THEN** the run proceeds and its launch line records that owner and card — the incident ruling named the container labels, which a container can only receive as env
+
+#### Scenario: owner_without_card_records_unset
+
+- **WHEN** an owner is present and no owning card id is
+- **THEN** the launch line records `card=unset` rather than omitting the field

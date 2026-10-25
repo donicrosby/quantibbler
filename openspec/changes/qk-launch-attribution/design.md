@@ -148,3 +148,87 @@ is a way to read a false green off the same tree:
   (`quantibbler-ptq:rocm-official`); it was not launched in this lane (container
   launches are announced first under AGENTS.md, and the box was co-tenant
   saturated), and it is left as row 3.2 rather than papered over.
+
+### 2026-10-25 — launch ownership: where the refusal lives, and why the two gates demand different things
+
+Incident: at 18:10:32Z an unattributed paper-faithful fire ran on this box
+(container `quantibbler-ptq-run`, image `quantibbler-ptq:rocm-official`, launch
+id `qk-pertarget-v4-20261025T1815Z`). It carried no owner stamp, no
+announcement, no GO, and it bypassed the launch-attribution infrastructure
+entirely — a direct `docker run` never touches the wrapper. Six choices the
+card and the requirements left open, settled here rather than left for a reader
+of the diff:
+
+- **Two gates, because one cannot see the other's launch.** The WRAPPER refuses
+  an ownerless fire on the host, before the name is taken and before 32g is
+  spent; the DRIVER refuses it from inside the container, which is the only
+  place a direct `docker run` can be stopped at all. Neither is redundant: the
+  wrapper's refusal is invisible to a bypass, and the driver's is invisible to a
+  launcher that never reaches the host-side checks. Both refusals are named,
+  and both leave nothing attributable behind (the wrapper resolves no argv; the
+  driver writes no trail).
+- **The wrapper demands owner AND card; the driver demands the owner.** A board
+  fire is born in the wrapper, so that is where the owning kanban card is a real
+  fact and is required. The driver is also run by things that legitimately own
+  no card — a CI smoke leg, a local diagnostic, the test suite spawning a
+  subprocess — and demanding a card there would force a placeholder value, which
+  is how a required field rots into ceremony. So the driver requires the owner
+  and records the card as the literal `unset`, and the launch line always
+  carries both MARKERS: an absent field reads as "not measured", which is the
+  shape this change exists to keep out of a trail. CI sets
+  `QKB_LAUNCH_OWNER=ci-harness`; the tier's driver-spawning legs set `pytest`;
+  the two delegated fires set both variables (the exact line is in the card's
+  completion comment).
+- **The refusal lives OUTSIDE `main()`.** `main()` has exactly one exit, the
+  verdict path, and `_driver_wiring_findings` flags any `raise SystemExit` or
+  `sys.exit()` inside it — correctly, because a run that exits outside the
+  verdict writes no report. `_launch_owner()` therefore sits beside
+  `_resolve_device()`, the file's existing pre-flight refusal, and is named as a
+  pre-flight rather than folded into the pin's exception list. It is called
+  before the launch-line write, so a refused run is not recorded as an anonymous
+  one.
+- **Owner evidence is env, and labels are not readable from inside a container.**
+  The incident ruling named the container LABELS (`qkb_launch_owner` /
+  `qkb_launch_card`), but docker never shows a container its own labels — there
+  is no channel from a label to the process inside it. So the label vocabulary
+  is accepted as ENV under its own spellings (`qkb_launch_owner`,
+  `QKB_LAUNCH_LABEL_OWNER`, `QKB_LAUNCH_CARD`, `qkb_launch_card`,
+  `QKB_LAUNCH_LABEL_CARD`) and the wrapper mirrors the contract variables into
+  the container, which is what makes a wrapper-launched fire compliant at both
+  gates. That is a tolerance with a hard edge, and it is named as one: a direct
+  `docker run` MUST pass `-e QKB_LAUNCH_OWNER=…`, because the labels alone reach
+  the process nowhere. The spelling tolerance exists so a launcher that read the
+  ruling rather than this contract is not hard-refused mid-program; it is the
+  same evidence under a second name, never a second, weaker contract.
+- **The owner line is machine-written at fire time, in three surfaces the
+  post-mortem already reads**: the trail's first line (`owner=… card=…`, in the
+  identity order `pid, argv, rev, out, owner, card`), the wrapper's `=== run …`
+  run header (`owner=… card=…` before the closing `===`, so the leading
+  `=== run <ISO> rank=…` shape the watchdog reads is untouched), and `launch.env`
+  beside `qkb_launch_id`. The "owner launch" announcement is thereby enforced by
+  the launcher instead of remembered by whoever fires — the failure mode of the
+  2026-10-20 corpse, restated by this incident.
+- **Attribution, not authentication.** Any non-empty value is accepted: the
+  contract's job is that a fire cannot be ANONYMOUS. Verifying the card id
+  against the board, or refusing on a value the board does not recognise, would
+  put a live external dependency on the launch path (and a board outage would
+  stop work) for a guarantee this change does not claim. Named as a
+  non-goal rather than left to be rediscovered.
+
+RED records, taken against the pre-change bytes at `HEAD` before this cut
+(`git show HEAD:<path>` into `/opt/data/tmp/prefix-red/`, so the observation is
+of the shipped tree, not of a hand-mutated copy):
+
+- Wrapper, no owner: `DRY_RUN=1 WATCHDOG=0 sh <pre-change wrapper>` → **RC=0**
+  and the full `'docker' 'run' …` argv printed — an ownerless fire launches.
+- Driver, no owner: `<pre-change driver> --device cpu --model
+  /nonexistent-model-xyz --out …` → starts for real and writes the trail's first
+  line with **no owner field** (`… rev=unknown out=…`), exiting 1 only because
+  the model does not exist.
+
+Post-change the same two commands exit nonzero/exit 2 with
+`launch ownership missing`, resolve no argv, and write no trail. The AGENTS.md
+card cites a "2026-10-27 precedent" alongside which this paragraph was to land;
+the only precedent in `AGENTS.md` at this revision is the 2026-10-20 corpse, so
+the paragraph lands there and the discrepancy is reported rather than invented
+around.

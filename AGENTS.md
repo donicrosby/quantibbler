@@ -77,6 +77,23 @@ at the 32g cap (kernel-provable: container `2d2d4b6df1e0`, 33,480,724 kB,
 no journal, events not persisted). One launch, one announcement, one
 name.
 
+**Since 2026-10-25 that rule is enforced, not remembered.** Every fire must
+carry `QKB_LAUNCH_OWNER` — plus `QKB_LAUNCH_CARD` (the owning kanban card) for a
+board fire — or it does not start: `tools/run-ptq-container.sh` refuses an
+ownerless launch on the host and stamps `qkb_launch_owner` / `qkb_launch_card`
+as container labels beside `qkb_launch_id`, and `tools/quantize_hf_model.py`
+refuses the same launch from inside the container, which is the only thing that
+stops a direct `docker run`. The owner is written at fire time into the trail's
+first line, the wrapper's `=== run …` header and `launch.env`, so an
+unattributable corpse cannot exist by construction. A launcher holding only the
+label vocabulary may pass it as env (`qkb_launch_owner` / `qkb_launch_card`);
+docker never shows a container its own labels, so a direct `docker run` MUST
+carry `-e QKB_LAUNCH_OWNER=…`. The incident this closes: at 18:10:32Z on
+2026-10-25 container `quantibbler-ptq-run` ran a paper-faithful PTQ under launch
+id `qk-pertarget-v4-20261025T1815Z` with no owner stamp, no announcement and no
+GO (killed by the orchestrator at 18:31:24Z), and nothing in the launch path
+could say whose run it was.
+
 ## Method sources
 
 Methods are implemented from the pinned papers in `docs/papers/`; cite the

@@ -748,6 +748,59 @@ def _resolve_rev() -> str:
     return proc.stdout.strip() or "unknown"
 
 
+#: Environment variables that can carry the launch-owner stamp, in precedence
+#: order (change qk-launch-attribution; the 2026-10-25 qk-pertarget-v4 incident,
+#: where an ownerless paper-faithful fire ran and nothing in the launch path
+#: could say whose it was). The label-named spellings are accepted deliberately
+#: and are the SAME evidence under another spelling, never a second contract:
+#: the incident ruling named the CONTAINER LABELS
+#: (`qkb_launch_owner` / `qkb_launch_card`), and docker never shows a container
+#: its own labels -- so a launcher that read the ruling rather than this
+#: contract can only hand that vocabulary to the process as env. A direct
+#: `docker run` therefore has to carry the owner as an environment variable;
+#: the labels alone are not visible from inside the container.
+_LAUNCH_OWNER_VARS = ("QKB_LAUNCH_OWNER", "QKB_LAUNCH_LABEL_OWNER", "qkb_launch_owner")
+_LAUNCH_CARD_VARS = ("QKB_LAUNCH_CARD", "QKB_LAUNCH_LABEL_CARD", "qkb_launch_card")
+
+
+def _launch_owner() -> tuple[str, str]:
+    """Who owns this run -- or a refusal, before anything is written.
+
+    The launch line is the trail's FIRST line, so the owner it records has to be
+    resolved before it is written: a run that cannot name its owner is refused
+    here rather than recorded as an anonymous one. This lives outside ``main()``
+    on purpose, like ``_resolve_device``: ``main()`` has exactly one exit, the
+    verdict path, and that invariant is pinned (``_driver_wiring_findings``
+    flags any ``raise SystemExit`` inside it) -- the refusal is a pre-flight, and
+    it is named as one rather than folded into the pin's exception list.
+
+    The owner is required; the owning card id is recorded as literal ``unset``
+    when absent, because a run that legitimately has no board card (a CI smoke
+    leg, a local diagnostic) still has an owner. The wrapper -- where a board
+    fire is born -- requires both.
+    """
+
+    def first(names: tuple[str, ...]) -> str:
+        for name in names:
+            value = os.environ.get(name, "").strip()
+            if value:
+                return value
+        return ""
+
+    owner = first(_LAUNCH_OWNER_VARS)
+    if not owner:
+        raise SystemExit(
+            "error: launch ownership missing -- refusing to start an unattributable "
+            "run. Set QKB_LAUNCH_OWNER=<who is launching> (and QKB_LAUNCH_CARD="
+            "<kanban card id> for a board fire). The label spellings "
+            "QKB_LAUNCH_LABEL_OWNER/QKB_LAUNCH_LABEL_CARD/qkb_launch_owner/"
+            "qkb_launch_card carry the same evidence. tools/run-ptq-container.sh "
+            "refuses the same launch on the host and stamps both as container "
+            "labels beside qkb_launch_id."
+        )
+    return owner, first(_LAUNCH_CARD_VARS) or "unset"
+
+
 def _resolve_device(requested: str) -> str:
     """Where the torch stages run -- or a refusal, before anything is loaded.
 
@@ -993,17 +1046,24 @@ def main() -> int:
     parser.add_argument("--out", type=Path, default=Path("artifacts") / "model-qpk1")
     args = parser.parse_args()
 
+    # Ownership BEFORE anything is written: a run that cannot name its owner is
+    # refused, and a refused run leaves no trail line claiming to be a launch
+    # (change qk-launch-attribution; the 2026-10-25 ownerless fire).
+    owner, card = _launch_owner()
+
     # The launch line is the trail's FIRST line and the only record a corpse is
     # guaranteed to have written: it names the process (pid), the exact argv, the
-    # code (rev) and the output target (out), so a surviving trail self-attributes
-    # without kernel records or container metadata (change qk-launch-attribution).
-    # `out` is only known after the parse, and nothing may reach the file before
-    # this line — the watchdog thread therefore starts HERE, below it, rather than
-    # above it, and the memory.events crumb follows it.
+    # code (rev), the output target (out) and who owns the run (owner, card), so
+    # a surviving trail self-attributes without kernel records or container
+    # metadata (change qk-launch-attribution). `out` is only known after the
+    # parse, and nothing may reach the file before this line — the watchdog
+    # thread therefore starts HERE, below it, rather than above it, and the
+    # memory.events crumb follows it.
     out_dir: Path = args.out.resolve()
     threading.Thread(target=_watchdog, daemon=True).start()
     _bread(
-        f"start pid={os.getpid()} argv={' '.join(sys.argv[1:])} rev={_resolve_rev()} out={out_dir}"
+        f"start pid={os.getpid()} argv={' '.join(sys.argv[1:])} rev={_resolve_rev()} "
+        f"out={out_dir} owner={owner} card={card}"
     )
     try:
         with open("/sys/fs/cgroup/memory.events") as fh:

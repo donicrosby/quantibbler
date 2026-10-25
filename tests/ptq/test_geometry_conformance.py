@@ -231,6 +231,9 @@ def test_driver_reports_sequences_for_the_calibration_knob(offline_corpus, tiny_
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     env = dict(os.environ)
+    # The launch-ownership contract (change qk-launch-attribution; the 2026-10-25
+    # ownerless fire): a driver run names its owner or refuses to start.
+    env["QKB_LAUNCH_OWNER"] = "pytest"
     env["HF_HUB_CACHE"] = str(offline_corpus)
     env["QUANTIBBLER_BREADCRUMBS"] = str(out_dir / "breadcrumbs.log")
     kd_tmp = out_dir / "kd-tmp"
