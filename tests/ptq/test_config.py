@@ -1,9 +1,12 @@
 """Task 1.1: PTQConfig defaults (scenarios config_defaults_paper_values,
 default_numerics_float64, float32_opt_in)."""
 
+import dataclasses
+
 import numpy as np
 import pytest
 
+from quantibbler.ptq.checkpoints import config_fingerprint
 from quantibbler.ptq.config import PTQConfig, StageHyper
 
 
@@ -93,3 +96,31 @@ def test_scn_config_validation():
         PTQConfig(solver_backend="numpy", rho_end=1e-4, rho_start=1e-2)
     with pytest.raises(ValueError):
         PTQConfig(solver_backend="numpy", temperature=0.0)
+
+
+def test_scn_loss_weight_knob_joins_checkpoint_fingerprint():
+    """The weighting mode is solver state, so it must reach the fingerprint.
+
+    Two configs differing ONLY in `block_loss_weight` must not share a digest: a
+    checkpoint written under terminal-gradient weighting may not resume under a
+    uniform-weighted run, and the resume refusal is the feature. `config_fingerprint`
+    hashes `dataclasses.asdict(cfg)` (checkpoints.py), so the field should join by
+    construction -- this pin holds that construction to account rather than
+    assuming it.
+    """
+    assert PTQConfig(solver_backend="numpy").block_loss_weight == "terminal_grad", (
+        "the paper-anchored mode is the default"
+    )
+
+    terminal = PTQConfig(solver_backend="numpy")
+    uniform = dataclasses.replace(terminal, block_loss_weight="uniform")
+    assert uniform.block_loss_weight == "uniform", "the knob must be a plain dataclass field"
+
+    assert config_fingerprint(terminal) != config_fingerprint(uniform), (
+        "configs differing only in the weighting mode must not share a fingerprint"
+    )
+
+    # The knob accepts exactly the two modes the spec names: an unknown mode is a
+    # construction error, never a silent fallback to the default.
+    with pytest.raises(ValueError):
+        PTQConfig(solver_backend="numpy", block_loss_weight="rowwise")

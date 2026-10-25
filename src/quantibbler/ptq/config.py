@@ -30,6 +30,7 @@ _SCALE_DTYPES = ("float16", "float32")
 _FACTOR_MODES = ("binary", "fp")
 _ABLATIONS = ("none", "untuned-signs")
 _LAYER_SCOPES = ("all", "self_attn", "mlp")
+_LOSS_WEIGHT_MODES = ("terminal_grad", "uniform")
 
 
 class PrefixProbeAbort(RuntimeError):
@@ -222,6 +223,22 @@ class PTQConfig:
     # probe changes nothing. Excluded from the checkpoint fingerprint — an
     # observer is not solver state (compare=False keeps it out of equality
     # too).
+    # --- weighted-MSE loss mode (change qk-nanoquant-alignment-lane4) -----
+    # Paper-anchored loss form ([NQ] App. C :3012, weighted MSE): the TuneFP and
+    # TuneLatentSTE losses weight each output feature by the robust diagonal of
+    # the block's terminal linear's Phase-1 output statistic (d_out_raw). The
+    # WEIGHT SOURCE is an informed assumption (design.md IA-1) -- the paper
+    # states the statistic construction (Algorithm 1 lines 2-5, Step 2-1 Eq. 2)
+    # but not that this is where it is consumed, so the stage records name the
+    # mode and the source rather than implying the paper dictated them.
+    # "terminal_grad" is the paper-anchored mode; "uniform" is the explicit
+    # ablation, distinct from the runtime fallback: an absent canonical terminal
+    # linear falls back to uniform AND records a tune_loss_uniform_fallback
+    # event, which is not the same as asking for uniform here.
+    # Solver state: it joins the checkpoint fingerprint by construction
+    # (``config_fingerprint`` hashes ``dataclasses.asdict(cfg)``), so a
+    # checkpoint written under one mode refuses resume under the other.
+    block_loss_weight: Literal["terminal_grad", "uniform"] = "terminal_grad"
     progress_probe: Any = field(default=None, compare=False, repr=False)
     verbose: bool = False
 
@@ -231,6 +248,13 @@ class PTQConfig:
         return np.dtype(self.compute_dtype)
 
     def __post_init__(self) -> None:
+        if self.block_loss_weight not in _LOSS_WEIGHT_MODES:
+            raise ValueError(
+                f"block_loss_weight must be one of {_LOSS_WEIGHT_MODES}, got "
+                f"{self.block_loss_weight!r}. The knob selects the weighting mode "
+                f"explicitly; the absent-terminal-linear case is a RUNTIME fallback "
+                f"that records tune_loss_uniform_fallback, not a silent default."
+            )
         if self.compute_dtype not in _COMPUTE_DTYPES:
             raise ValueError(
                 f"compute_dtype must be one of {_COMPUTE_DTYPES} (float32 is opt-in "

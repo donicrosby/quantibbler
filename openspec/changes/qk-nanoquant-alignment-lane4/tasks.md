@@ -2,8 +2,8 @@
 
 ## Phase 1 — Config knob + fingerprint pin (tests first)
 
-- [ ] (coder) `tests/ptq/test_config.py` — red-first: add the pin that `block_loss_weight` exists, defaults to `"terminal_grad"`, accepts only `{"terminal_grad", "uniform"}`, and that a config differing ONLY in `block_loss_weight` from another produces a different `config_fingerprint` (scenario `loss_weight_knob_joins_checkpoint_fingerprint`). Command: `pytest tests/ptq/test_config.py -q`. Expected: the new asserts FAIL on the knob-less config.
-- [ ] (coder) `src/quantibbler/ptq/config.py` — add `block_loss_weight: Literal["terminal_grad", "uniform"] = "terminal_grad"` with `__post_init__` validation and a docstring noting: paper-anchored weighted MSE ([NQ] App. C :3012), weight source is informed assumption IA-1 (design.md), solver state → joins the checkpoint fingerprint. Command: `pytest tests/ptq/test_config.py -q`. Expected: green including the new pins.
+- [x] (coder) `tests/ptq/test_config.py` — red-first: add the pin that `block_loss_weight` exists, defaults to `"terminal_grad"`, accepts only `{"terminal_grad", "uniform"}`, and that a config differing ONLY in `block_loss_weight` from another produces a different `config_fingerprint` (scenario `loss_weight_knob_joins_checkpoint_fingerprint`). Command: `pytest tests/ptq/test_config.py -q`. Expected: the new asserts FAIL on the knob-less config.
+- [x] (coder) `src/quantibbler/ptq/config.py` — add `block_loss_weight: Literal["terminal_grad", "uniform"] = "terminal_grad"` with `__post_init__` validation and a docstring noting: paper-anchored weighted MSE ([NQ] App. C :3012), weight source is informed assumption IA-1 (design.md), solver state → joins the checkpoint fingerprint. Command: `pytest tests/ptq/test_config.py -q`. Expected: green including the new pins.
 
 ## Phase 2 — Weighted MSE in TuneFP (test first)
 
