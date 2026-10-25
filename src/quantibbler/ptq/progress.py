@@ -83,6 +83,7 @@ class ProgressReporter:
         interval_s: float = PROGRESS_INTERVAL_S,
         interval_steps: int = PROGRESS_INTERVAL_STEPS,
         max_sane_eta: float = MAX_SANE_ETA,
+        work_units: int = 1,
     ) -> None:
         self.phase = phase
         self.total = total
@@ -96,6 +97,12 @@ class ProgressReporter:
         self._interval_s = interval_s
         self._interval_steps = interval_steps
         self._max_sane_eta = max_sane_eta
+        # Physical work units this loop covers. `total` counts loop steps, while
+        # the measured rate constants are per physical unit (admm/ste: one linear;
+        # tunefp: one fire). The ETA is `fraction_remaining x work_units x rate`,
+        # so a reporter local to one logical unit (the three shipped loops) keeps
+        # the default of 1 and the units cohere.
+        self._work_units = work_units
 
         self._start = clock()
         self._last_emit = self._start
@@ -229,7 +236,13 @@ class ProgressReporter:
         eta_sane = False
         phase_rate = rate_for(self.phase, self.target, self._rate_constants)
         if self.total is not None and done > 0 and phase_rate is not None:
-            eta_s = (self.total - done) * phase_rate
+            # `total` counts loop steps; the rate constants are per physical unit.
+            # Scaling by the remaining *fraction* of the loop and by how many
+            # physical work units the loop covers makes the two sets of units
+            # coherent: `(total - done) * rate` mixed steps with per-linear/
+            # per-fire seconds and rendered every admm solve `eta=unsafe`.
+            fraction_remaining = (self.total - done) / self.total
+            eta_s = fraction_remaining * self._work_units * phase_rate
             eta_sane = eta_s <= self._max_sane_eta
 
         record: dict[str, Any] = {
@@ -290,9 +303,7 @@ def breadcrumb_sink(path: str) -> Callable[[dict[str, Any]], None]:
             "unknown"
             if record["eta_s"] is None
             else (
-                "unsafe"
-                if record["eta_s"] > record["max_sane_eta"]
-                else f"{record['eta_s']:.0f}"
+                "unsafe" if record["eta_s"] > record["max_sane_eta"] else f"{record['eta_s']:.0f}"
             )
         )
         line = (

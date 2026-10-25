@@ -104,9 +104,15 @@ def test_eta_renders_unsafe_when_it_exceeds_max_sane_eta() -> None:
     clock = FakeClock()
     stream = io.StringIO()
     rates = {"ste": {"gfx1151": {"seconds_per_unit": 4000.0}}}
-    reporter = ProgressReporter("ste", 20, rate_constants=rates, clock=clock, stream=stream)
+    # The requirement's scenario is a FIRE, not one linear: twenty solves is the
+    # twenty physical work units the loop covers, so the per-loop model reaches
+    # the same ~21h (`0.95 x 20 x 4000s`) through the `work_units` parameter the
+    # model added rather than around it. With `work_units=1` a single loop's ETA
+    # is bounded by one rate constant and the fence cannot see a fire this long.
+    reporter = ProgressReporter(
+        "ste", 20, work_units=20, rate_constants=rates, clock=clock, stream=stream
+    )
 
-    # 4000s per unit => ~21h for the nineteen remaining. Past the 4h ceiling.
     record = reporter.tick(1)
 
     assert record is not None
@@ -130,8 +136,11 @@ def test_eta_sane_is_true_and_numeric_for_a_reasonable_pace() -> None:
 
     assert record is not None
     assert record["eta_sane"] is True
-    # Nineteen units remaining at the measured 89s/linear -- the constants, not the pace.
-    assert record["eta_s"] == pytest.approx(19 * 89.0)
+    # Nineteen of twenty steps remaining (fraction 0.95) x one work unit x the
+    # measured 89s/linear: the per-loop model scales the measured constant by the
+    # remaining FRACTION of the loop, not by the raw step count, so `total`'s step
+    # unit and the constant's per-linear unit cohere. The constants, not the pace.
+    assert record["eta_s"] == pytest.approx(0.95 * 89.0)
     assert "eta=unsafe" not in stream.getvalue()
 
 
@@ -304,12 +313,12 @@ def test_eta_is_derived_from_the_measured_rate_constants() -> None:
     fast_record = fast.tick(4)
 
     assert slow_record is not None and fast_record is not None
-    assert slow_record["eta_s"] == pytest.approx(6 * 10.0)
+    assert slow_record["eta_s"] == pytest.approx(0.6 * 10.0)
     assert fast_record["eta_s"] == pytest.approx(slow_record["eta_s"]), (
         "same counts, same prediction: the ETA must not follow the observed pace"
     )
     assert slow_record["eta_sane"] is True
-    assert "eta=60s" in slow_stream.getvalue()
+    assert "eta=6s" in slow_stream.getvalue()
 
 
 def test_eta_is_unknown_before_any_unit_completes() -> None:
@@ -352,9 +361,9 @@ def test_stale_constants_warning_is_rendered_on_the_first_line() -> None:
     lines = [line for line in stream.getvalue().splitlines() if line]
     assert "constants_stale=true keys=commit,torch" in lines[0], lines[0]
     # `unsafe` is the fence's word and only the fence's: this prediction is
-    # fence-clean (89s/linear, nine to go), so a false verdict from staleness
-    # renders as the number rather than claiming unreasonableness.
-    assert "eta=801s" in lines[0], lines[0]
+    # fence-clean (89s/linear, 0.9 of the loop to go -> 80s), so a false verdict
+    # from staleness renders as the number rather than claiming unreasonableness.
+    assert "eta=80s" in lines[0], lines[0]
     assert "eta=unsafe" not in lines[0], lines[0]
     assert "constants_stale" not in (second or {}), "warning is once, not noise"
     assert "constants_stale=true" not in lines[1], lines[1]

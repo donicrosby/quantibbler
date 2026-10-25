@@ -7,7 +7,7 @@
 Every long-running harness loop SHALL emit progress updates as line-oriented
 output — one line per update, newline-terminated, never CR-overwrite. A
 mid-loop death SHALL leave a forensic trail of every update written before the
-crash, flush-per-line and fsynced, matching `MemTelemetry`'s existing contract.
+crash, flush-per-line and fsynced.
 
 #### Scenario: progress_output_survives_crash
 
@@ -20,14 +20,14 @@ crash, flush-per-line and fsynced, matching `MemTelemetry`'s existing contract.
 
 Progress updates SHALL emit at a cadence, not per-iteration. The default cadence
 is every `PROGRESS_INTERVAL_S` seconds (default 5) or every
-`PROGRESS_INTERVAL_STEPS` iterations (default 10), whichever comes sooner. A
-400-step ADMM loop SHALL produce ~80 lines, not 400, and a fast 20-step loop
-SHALL produce a line roughly every 5 seconds.
+`PROGRESS_INTERVAL_STEPS` iterations (default 10), whichever comes sooner. A 400-step ADMM loop SHALL produce roughly one line per cadence interval (~40 lines
+at 0.2s/iter, not 400), and a fast 20-step loop SHALL produce a line roughly
+every 5 seconds.
 
 #### Scenario: admm_loop_not_verbose
 
 - **WHEN** an ADMM solve runs for 400 iterations at ~0.2s per iteration
-- **THEN** the progress output contains roughly 80 lines, not 400
+- **THEN** the progress output contains roughly 40 lines, not 400
 - **AND** every line carries the current iteration, total, rate, and ETA
 
 ### Requirement: progress_sink_routing
@@ -50,12 +50,12 @@ blinded to which are live — the reporter handles routing internally.
 
 #### Scenario: telemetry_sink_writes_csv_column
 
-- **WHEN** the telemetry subsystem is active (any pipeline stage that runs
-  `MemTelemetry`)
-- **THEN** every progress update appears in the telemetry CSV as a
+- **WHEN** a telemetry subsystem is active (any pipeline stage with a
+  telemetry collector that registers a sink)
+- **THEN** every progress update appears in the telemetry output as a
   `progress_json` column with one JSON object per line
-- **AND** the `progress_json` column is always present in the CSV header when
-  the progress reporter is active
+- **AND** the `progress_json` column is always present in the output header when
+  the progress reporter sink is registered
 
 #### Scenario: breadcrumb_sink_when_watchdog_active
 
@@ -68,18 +68,18 @@ blinded to which are live — the reporter handles routing internally.
 
 ### Requirement: progress_heartbeat
 
-The `MemTelemetry` thread SHALL emit a progress line on every sample (every 2
+A timer-driven heartbeat SHALL emit a progress line on a fixed cadence (every 2
 seconds by default) regardless of whether the main loop has advanced. The phase
 and cumulative counts SHALL reflect the last known state of the main loop.
 Silence for longer than one sample interval SHALL be a reliable stall signal —
-the thread writes on its own timer, so two seconds without a progress line means
-the telemetry thread itself is dead.
+the heartbeat writes on its own timer, so two seconds without a progress line
+means the timer thread itself is dead.
 
 #### Scenario: heartbeat_consumer_is_the_watchdog
 
-- **WHEN** the `MemTelemetry` thread is active
+- **WHEN** a heartbeat timer thread is active
 - **THEN** the heartbeat SHALL write to the breadcrumbs file in addition to
-  the telemetry CSV, so the existing watchdog's stall detector — which already
+  the telemetry output, so the existing watchdog's stall detector — which already
   parses `qkb:progress` lines — reads liveness without modification
 - **AND** without this consumer, the signal is available and unread, and a hang
   at minute 20 stays invisible: the `max|s|=0.0` class — an instrument that
@@ -88,7 +88,7 @@ the telemetry thread itself is dead.
 #### Scenario: progress_heartbeat_during_slower_phases
 
 - **WHEN** a solver phase takes 89 seconds per linear
-- **THEN** the telemetry CSV contains roughly 45 progress lines during that
+- **THEN** the telemetry output contains roughly 45 progress lines during that
   phase (one every 2 seconds)
 - **AND** every line carries the phase name `solver` and the latest known
   iteration count
