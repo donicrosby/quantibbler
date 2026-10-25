@@ -3,8 +3,8 @@
 - [x] (coder) Author `.github/workflows/ci.yml` per the final spec: SIX jobs (lean-python, full-python, rust-kernels, openspec, driver-smoke, abort-leg) plus a `workflow_dispatch`-only seed job; `bash -euo pipefail` defaults; SHA-pinned actions resolved fresh at landing (never from memory); `permissions: contents: read`; triggers `pull_request` + `push` to `main` (never `pull_request_target`); zero secrets. Lean job = proven recipe (fresh `uv venv` + `pip install -e . pytest`, no extras) with the absence-family assert (`import torch, transformers, tokenizers` must exit 1) BEFORE any skip-count parse; smoke labeled plumbing-only (no detection claim); abort leg restores the seeded cache strictly offline and fails closed on cache miss. Validate the YAML locally (yamllint) before first push.
 - [x] (coder) Skip-count parsing as a helper script shared by both python jobs (parse the pytest summary line) — workflow shell stays thin, parsing testable in-repo.
 - [x] (coder) Rehearse every job's command body locally in the sandbox and record each leg's real output (the lean/full/rust numbers, the smoke's offline run, the abort leg's 26–70 s abort with the recorded command) — CI YAML must not contain a command that has never been executed.
-- [ ] (bug-hunter) Review: every `uses:` line is a full SHA; no `pull_request_target`; no unrestricted `permissions`; full-python extras exactly `torch hf kernels`; openspec loop one-id-per-invocation with `set -e` semantics; lean job's absence-family assert precedes the skip-count parse; smoke asserts `exit_code == verdict_exit_code(status)` on the real report offline and claims nothing beyond plumbing; abort leg is offline-only with fail-closed cache miss; seed job is never-skippable with its network gated at step level (delta 2026-10-27 — see the section below, which supersedes the earlier `workflow_dispatch`-only shape).
-- [ ] (sec-eng) Threat pass: no secret access from PR runs (`secrets: none`), action SHAs match declared upstream heads, smoke/abort jobs cannot become executors (no `pull_request_target`, contents read-only), the seed job's live-network allowance cannot be triggered by PR content.
+- [x] (bug-hunter) Review: every `uses:` line is a full SHA; no `pull_request_target`; no unrestricted `permissions`; full-python extras exactly `torch hf kernels`; openspec loop one-id-per-invocation with `set -e` semantics; lean job's absence-family assert precedes the skip-count parse; smoke asserts `exit_code == verdict_exit_code(status)` on the real report offline and claims nothing beyond plumbing; abort leg is offline-only with fail-closed cache miss; seed job is never-skippable with its network gated at step level (delta 2026-10-20 — see the section below, which supersedes the earlier `workflow_dispatch`-only shape). **DONE (bug-hunter, 2026-10-25): all nine clauses PASS on the landed bytes** — ci.yml sha256 `d2a33700…`, working tree == HEAD `6423998`. Evidence (real RCs): 17/17 `uses:` refs are 40-hex; all 4 unique pins resolve 200 at api.github.com, and checkout `v7.0.1`/cache `v6.1.0` compare `identical` (ahead_by 0) to their pins; `pull_request_target` only in the forbidding comment (ci.yml:5); sole `permissions:` is top-level `contents: read` (:28-29), zero job-level overrides/`if`s; full-python sync exactly `--extra torch --extra hf --extra kernels --locked` (:104); openspec loop one-id-per-invocation (:171-184) under `bash -euo pipefail {0}` (:33), rehearsed verbatim on current bytes: 24 active changes valid, 0 failures, yamllint rc=0; absence step (:75-81) precedes the parse (:85-90) — lean recipe re-measured: absence rc=1, 412 passed/16 skipped (all 16 = `test_kernels_parity.py:45` Rust leg), `pytest_summary --expect-skipped 16` rc=0 (cross-check: kernels-present run 428 passed/0 skipped = 412+16 exactly, so the landed 16-constant survived lane-4's post-record additions); smoke asserts `rc == exit_code(status)` on the real offline report (driver_smoke.py:235 → report_checks.py:80-81, strict parse :46-54, plumbing-only label ci.yml:187/:202-206); abort leg offline + `fail-on-cache-miss: true` (:220-221/:240) with fail-closed `cache_findings` before any driver run (abort_leg.py:60-85/:167-169); seed has no job-level `if`, unconditional `lookup-only` (:272-278), exact gate literal on fetch/save (:280/:319), abort-leg `needs: seed-weights` (:217) — independent PyYAML parse all-pass. Gates: `uv sync --all-groups --extra kernels` rc=0; `uv run pytest` 428 passed/0 skipped rc=0 (lean+dev+kernels env, torch/hf extras pruned by the sync); `tests/test_ci_referee.py` 69 passed rc=0. Findings: 0 blockers, 1 nit (concurrent-seed save race — no `concurrency` group; recorded in the review comment for a follow-up, not a spec violation); tasks.md:7 (sec-eng threat pass) left open — not mine.
+- [x] (sec-eng) Threat pass: no secret access from PR runs (`secrets: none`), action SHAs match declared upstream heads, smoke/abort jobs cannot become executors (no `pull_request_target`, contents read-only), the seed job's live-network allowance cannot be triggered by PR content. **DONE 2026-10-25 — all four clauses PASS, zero merge-blocking findings; evidence below.**
 - [x] (orchestrator) `npx --yes @fission-ai/openspec validate qk-ci-referee --strict`; fail-fast already landed (b5712d5), so sequencing is clear; scoped stage + commit (workflow + change dir, one commit); fenced push; watch the first real CI run — the push to main itself triggers the workflow, which is this change's own acceptance test. **DONE:** commits `a91684d` (tune/eval split + `_ABORT_IDENTITY` derivation + OOM advisory) and `b8815ce` (CI auto-seed + referee pins), pushed `f438177..b8815ce` with `PUSH_RC=0`, fence restored, key cleaned.
 - [x] (orchestrator + team) Record the first CI run's verdict per job in this tasks file — the repo's first independent referee result. **DONE — run `39514036948` on `b8815ce` (event `push`), conclusion `success`: 7/7 jobs green.** Per job, **read back from the GitHub API rather than relayed**: `seed the weights cache` ✅ · `lean python` ✅ · `full python` ✅ · `rust kernels` ✅ · `openspec` ✅ · `driver smoke` ✅ · `abort leg` ✅. Step-level proof the delta works in the wild: the seed job's **lookup ran unconditionally** (step 4 success on a cold cache), the **fetch self-ran with no manual dispatch** (step 5), the "already seeded" no-op branch correctly **skipped** (step 6), the save succeeded (step 7); then the abort leg's fail-closed restore **hit** that freshly seeded cache (step 5) and executed the recorded abort command for real (step 6). No job skipped, no seed chore, no red mail.
 
@@ -276,7 +276,7 @@ default `$PWD/.venv` / `.venv-lean` and nothing else changes.
   tools/ci/abort_leg.py tests/test_ci_referee.py` is empty against the hashes
   above.
 
-### Rust-job scope fix: the purity guards now have a job that runs them (coder, 2026-10-27)
+### Rust-job scope fix: the purity guards now have a job that runs them (coder, 2026-10-20)
 
 - **Finding (my own defect, surfaced while landing the cubek purity pair):** the
   rust job was `--manifest-path`-scoped to the kernels crate, so
@@ -333,7 +333,7 @@ default `$PWD/.venv` / `.venv-lean` and nothing else changes.
   still execute only on a runner; every shell body they gate is rehearsed here,
   the new gate bodies included.
 
-### Self-seeding weights job — the delta (coder, 2026-10-27)
+### Self-seeding weights job — the delta (coder, 2026-10-20)
 
 Binding shape frozen by @planner before implementation; @bug-hunter's four-row
 battery specified up front and run against the REAL workflow text.
@@ -362,7 +362,7 @@ battery specified up front and run against the REAL workflow text.
   `seed_job_never_skippable`, `network_gated_at_step_level`,
   `cold_cache_self_heals_on_push`, `pr_runs_execute_the_abort_leg`,
   `pr_never_fabricates_a_cache`. The residual is recorded verbatim in design.md
-  ("Implementation crystallization — self-seeding weights job (2026-10-27)").
+  ("Implementation crystallization — self-seeding weights job (2026-10-20)").
 - [x] (coder) Local gates at this record: yamllint **RC=0**;
   `tests/test_ci_referee.py` **57 passed**; full suite **444 passed** (was 439);
   lean tier **359 passed / 16 skipped**, `skip discipline holds`; pre-commit
@@ -379,7 +379,7 @@ battery specified up front and run against the REAL workflow text.
   `pr-proof-abort-leg` run (planner pre-committed), and that run id is this
   delta's evidence — not a local rehearsal.
 
-### Referee-only hardening cycle (coder, 2026-10-27) — after the first 7/7
+### Referee-only hardening cycle (coder, 2026-10-21) — after the first 7/7
 
 @planner's contract for this commit, implemented as written: the
 parse-don't-enumerate route for the seed-shape pin, `pyyaml` as an explicit
@@ -436,20 +436,21 @@ poison forms returned `rc=0`, i.e. the pin missed them).
 - [x] (coder) First main run recorded above: **`39514036948`, 7/7 green**, read
   back per job from the GitHub API — the run's own job list, not a relay.
 - [x] (orchestrator + @user) **PR-shaped proof — WAIVED by @user (recorded
-  date `2026-10-27`; **unverified** — see the correction immediately below).**
-  > **Date correction (coder, 2026-10-22).** `2026-10-27` is five to six days
+  date corrected — see the correction immediately below).**
+  > **Date correction (coder, 2026-10-22).** The recorded date was five to six days
   > *after* every commit that records it: this line was authored 2026-10-22
   > 03:46 UTC and the string is impossible relative to the repository's own
-  > clock. It is **not** a typo here — it is one of **33** occurrences across
+  > clock. It was **not** a lone typo here — it was one of **33** occurrences across
   > 20+ records in this repo (`AGENTS.md:69`,
   > `crates/quantibbler-kernels/tests/cubek_cpu_reference_parity.rs:63,:74,:468`,
   > and the `qk-nq-recreation-bar`, `qk-ci-referee`, `qk-flash-attention` and
-  > archived change dirs), so it is a per-lane convention error. Whether the
-  > clock or the string is wrong is @planner/@user's call, and the true date is
-  > **not recoverable from the repository** — so I am not inventing a
-  > replacement. Census and the shortest proof (commit `f438177`, authored
-  > 2026-10-20 20:33, recording a "decision 2026-10-27"): see
-  > `qk-pertarget-cycle/design.md` §9.
+  > archived change dirs), a per-lane convention error. Whether the
+  > clock or the string was wrong was @planner/@user's call, and the true date was
+  > **not recoverable from the repository**. **@user ruled 2026-10-25
+  > (`qk-pertarget-cycle` §18): FIX THE STRINGS** — each occurrence replaced
+  > with the author date of the commit that records it (t_6f5dcf96). Census
+  > and the shortest proof (commit `f438177`, authored 2026-10-20 20:33,
+  > recording the phantom-dated decision): see `qk-pertarget-cycle/design.md` §9.
   The branch was cut and pushed (`pr-proof-abort-leg`, one empty commit), then
   deleted again: the user ruled CI sufficient ("Can we move on to fixing the
   actual root cause") before the click landed. Run 9 (`39519807660`) settled
@@ -462,3 +463,126 @@ poison forms returned `rc=0`, i.e. the pin missed them).
   mutations *in the file*. Runner trigger/skip semantics stay a runner fact: the
   7/7 establishes them for `push`, and the no-op PR is what establishes them for
   `pull_request`.
+
+## Evidence: sec-eng threat pass (2026-10-25)
+
+Scope: line 7. Audited bytes: `.github/workflows/ci.yml` as committed (working
+tree clean for `.github/` and for this change dir; `git status` confirms). Repo
+verified PUBLIC via the GitHub API (`"private": false, "visibility": "public"`,
+default branch `main`) — the untrusted-fork-PR threat model is live, which is
+what makes these clauses load-bearing. Every claim below is a command run in
+this pass, not a read-back of the design's own prose.
+
+### C1 — no secret access from PR runs (`secrets: none`): PASS
+
+- `grep -nE "secrets|GITHUB_TOKEN|persist-credentials|inherit" ci.yml` → hits
+  ONLY at `:9` and `:213`, both prose comments. Zero functional references: no
+  `secrets.*`, no `secrets: inherit`, no explicit `GITHUB_TOKEN` use.
+- Token ceiling: `permissions: contents: read` at ci.yml:28-29; job-level
+  override scan (`awk 'NR>45 && /permissions/'`) → none anywhere.
+- The only workflow file in the repo is `ci.yml` (`ls .github/workflows/`).
+- Fork PRs on a public repo receive no repo secrets by platform rule; the only
+  credential a PR run holds is the read-only `GITHUB_TOKEN`.
+- Executable tripwire: tests/test_ci_referee.py:512 (`assert "secrets." not in
+  text`) inside `test_workflow_is_supply_chain_hardened` (:503-519).
+
+### C2 — action SHAs match declared upstream heads: PASS (verified live)
+
+- All 17 `uses:` references are 40-hex full SHAs (non-full-SHA grep → empty,
+  rc 1). `git ls-remote` against each upstream with tag peeling, run
+  2026-10-25 — every declared tag resolves to exactly the pinned SHA today:
+  - `actions/checkout` v7.0.1 → `3d3c42e5…` **MATCH** (ci.yml:51, 97, 121,
+    158, 194, 224, 262)
+  - `astral-sh/setup-uv` v10.3.0 → `1c37ad07…` **MATCH** (ci.yml:53, 99, 147,
+    196, 226, 264)
+  - `actions/cache` v6.1.0 → `55cc8345…` **MATCH** for both `cache/restore`
+    (ci.yml:236, 274) and `cache/save` (ci.yml:320)
+  - `dtolnay/rust-toolchain` v1 → `683b588c…` **MATCH** (ci.yml:127; the
+    moving `v1` tag still points at the pinned commit)
+- Tripwire: test_ci_referee.py:505-510 fullmatch-pins every `uses:`.
+- Registry-installed tools stay exact-version pins without hashes
+  (`npx @fission-ai/openspec@1.14.3` ci.yml:177; `uvx --from
+  huggingface-hub==2.2.0` ci.yml:282, 284) — the design's recorded accepted
+  residual; re-adjudicated proportionate at `contents: read` + zero secrets.
+  Not merge-blocking.
+
+### C3 — smoke/abort jobs cannot become executors: PASS
+
+- Trigger set is exactly `{pull_request, push:[main], workflow_dispatch}`
+  (ci.yml:22-26). `pull_request_target` appears only in the line-5 comment;
+  the uncommented-text pins (test_ci_referee.py:511, :689) and the parsed
+  exact-trigger-set pin (:687) make adding a privileged trigger a red.
+- No `workflow_run` / `schedule` / `issue_comment` triggers (grep → rc 1).
+- Top-level `contents: read`, no job-level escalation (C1 evidence). PR runs
+  execute from the merge ref with a read-only token even when the PR rewrites
+  the workflow — matches the recorded trust model (PR green advisory, main
+  green authoritative).
+- driver-smoke and abort-leg (ci.yml:186-247) do run PR-controlled code — that
+  is inherent to CI that tests PR content — but cannot become PRIVILEGED
+  executors: `ubuntu-latest` ephemeral runners, zero secrets, read-only token,
+  and their own tooling is network-free by code
+  (`grep -nE "requests|urllib|urlopen|socket|httpx|hf_hub_download|snapshot_download|from_pretrained" tools/ci/*.py`
+  → zero hits) with `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1` forced at
+  ci.yml:190-191 and 220-221.
+- Residual (inherent-to-class, non-blocking, adjacent to the recorded
+  npx/uvx residual): a PR's own `pyproject.toml` names packages that
+  ci.yml:71 (`uv pip install -e .`) and ci.yml:104 (`uv sync`) install and
+  execute on the runner. No escalation path exists: ephemeral runner, no
+  secrets, read-only token, PR-scope cache writes invisible to main.
+
+### C4 — the seed job's live-network allowance cannot be triggered by PR content: PASS
+
+- The only live-network steps in the file are the seed fetch (ci.yml:279-312)
+  and save (ci.yml:318-323); both carry exactly
+  `if: steps.seeded.outputs.cache-hit != 'true' && github.event_name != 'pull_request'`
+  (ci.yml:280, 319). `github.event_name` is runner context, not
+  PR-controllable: on every `pull_request` event it is `'pull_request'` and
+  both steps skip.
+- Only three `if:` conditions exist in the whole file (:280, :314, :319) — no
+  other conditionality to subvert; the seed job carries no job-level `if`
+  (ci.yml:249-259; pinned at test_ci_referee.py:694), and abort-leg
+  `needs: seed-weights` (ci.yml:217) cannot inherit a skip.
+- Every `${{ }}` in the file interpolates `env.*` only (9 occurrences:
+  ci.yml:55, 101, 149, 198, 228, 239, 266, 277, 323) — no PR-controlled value
+  reaches a `run:` or `if:` body, so there is no expression-injection route
+  into the gate.
+- A PR can gut the guard in its own workflow copy — but the fetch then runs on
+  the PR's own ephemeral secret-free runner, and its `cache/save` writes the
+  PR's merge-ref scope, which main-scope restores never read (GitHub cache
+  branch isolation; recorded in design.md). The abort leg restores only,
+  fail-closed, under the workflow-fixed `env.HF_CACHE_KEY` (ci.yml:43,
+  235-240): no PR-reachable cache-poisoning path to main's weights.
+- Boundary (not a finding): `workflow_dispatch` of an attacker's branch would
+  pass the event guard, but dispatch requires write access — an actor with
+  write can already push to main.
+
+### Findings
+
+- **Merge-blocking: none.** Zero proven vulnerabilities, zero plausible
+  weaknesses beyond the design's already-recorded accepted residuals.
+- Hardening opportunities (informational, non-blocking; do NOT hold the merge
+  for either):
+  1. `actions/checkout` defaults `persist-credentials: true`, leaving the
+     read-only token in the runner's git config for the rest of the job. On a
+     public repo with `contents: read` that token has zero exfiltration value;
+     `persist-credentials: false` would be tidy if the file is ever touched
+     again.
+  2. The PR-controlled dependency-install residual (C3) is distinct from the
+     recorded npx/uvx registry-compromise residual; one sentence naming it in
+     design.md's accepted residuals would make the adjudication explicit.
+
+### Gates (this pass)
+
+- `uv sync --all-groups --extra kernels` → rc 0.
+- `uv run pytest -q -rs` → **428 passed, 0 failed, 0 skipped, rc 0**
+  (re-run confirmed rc 0). Tier honesty: this sandbox venv has
+  torch/transformers/tokenizers ABSENT (proven via `importlib.util.find_spec`
+  → three `False`) with the kernels extension present; `tests/ptq` collects
+  228/231 lean (3 integration-marker deselections). The CI full-python job
+  (torch extras, zero-skip assertion) is where the torch tier is enforced —
+  that is not what ran here, and this count is not a substitute for it.
+
+### Unticked items (not this task's scope)
+
+- Line 6 (bug-hunter review) remains `[ ]` — no evidence of it having run was
+  observed in this pass; it is not mine to tick.

@@ -194,7 +194,7 @@ it becomes load-bearing the day this public repo takes an outside PR.
   `tests/test_ci_referee.py` off the hash the sign-off transfer table records,
   which is a higher cost than the residual.
 
-## Implementation crystallization — self-seeding weights job (2026-10-27)
+## Implementation crystallization — self-seeding weights job (2026-10-20)
 
 **The problem the delta fixes, measured in the first real runs:** the seed job
 was `workflow_dispatch`-only. That bought the no-PR-content property with a

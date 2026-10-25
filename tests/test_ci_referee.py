@@ -539,7 +539,7 @@ def test_workflow_smoke_is_plumbing_only_and_the_abort_leg_is_offline_and_fail_c
 
 
 # ---------------------------------------------------------------------------
-# The self-seeding weights job (qk-ci-referee delta, 2026-10-27)
+# The self-seeding weights job (qk-ci-referee delta, 2026-10-20)
 #
 # The seed job used to be `workflow_dispatch`-only: the no-PR-content property
 # was bought with a job-level `if`, and the price was that nobody ever ran it —

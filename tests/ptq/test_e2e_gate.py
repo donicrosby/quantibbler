@@ -19,12 +19,15 @@ Test-speed stage overrides live in e2e.gate_config (A-10, documented);
 the paper defaults remain the PTQConfig defaults.
 """
 
+import dataclasses
+
 import numpy as np
 import pytest
 import torch
 
 from quantibbler import qpk1
 from quantibbler.ptq.api import QuantizedModel, quantize_model
+from quantibbler.ptq.config import PTQConfig
 from quantibbler.ptq.e2e import (
     TinyGateModel,
     build_gate_batches,
@@ -33,10 +36,23 @@ from quantibbler.ptq.e2e import (
 )
 
 
+def _gate_cfg(*, seed: int = 0) -> PTQConfig:
+    """``gate_config`` with the NumPy parity arm pinned by name.
+
+    The production default is torch, and ``resolve_device`` refuses an IMPLICIT
+    device on a box with no accelerator, so a bare ``gate_config()`` cannot
+    solve on CI's GPU-less runner (fail-closed by design). The gate's subject is
+    the artifact round trip, and NumPy is the only arm runnable there and the
+    tier's unit-test reference -- pinned explicitly rather than weakening the
+    refusal.
+    """
+    return dataclasses.replace(gate_config(seed=seed), solver_backend="numpy")
+
+
 def _quantize_gate_fixture():
     """One deterministic quantize -> serialize -> reload round for the
     fixture assertions (identical to run_e2e_gate's happy path)."""
-    cfg = gate_config(seed=0)
+    cfg = _gate_cfg(seed=0)
     model = TinyGateModel(seed=cfg.seed)
     batches = build_gate_batches(seed=cfg.seed)
     probe = batches[0]
@@ -55,7 +71,7 @@ def _quantize_gate_fixture():
 def test_scn_e2e_tiny_gate():
     """e2e_tiny_gate_passes: the full gate on the honest artifact — max
     absolute logit delta vs the fp teacher within the recorded A-8 bound."""
-    result = run_e2e_gate()
+    result = run_e2e_gate(cfg=_gate_cfg())
     assert result["bits_identical"] is True
     assert result["logit_delta"] <= 1.0, (
         f"max logit delta {result['logit_delta']} exceeds the recorded A-8 "
@@ -115,4 +131,4 @@ def test_scn_e2e_gate_detects_corruption():
     """e2e_gate_detects_corruption: the deliberately corrupted artifact
     FAILS the gate (A-8's wrong-choice signature — the gate is not vacuous)."""
     with pytest.raises(AssertionError):
-        run_e2e_gate(flip_one_bit=True)
+        run_e2e_gate(cfg=_gate_cfg(), flip_one_bit=True)

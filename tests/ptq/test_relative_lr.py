@@ -77,7 +77,11 @@ def test_scn_e2e_gate_svd_solver_path():
 
     from quantibbler.ptq.e2e import gate_config, run_e2e_gate
 
-    cfg = dataclasses.replace(gate_config(), solver="svd")
+    # ``solver_backend="numpy"`` by name, for the same reason the sibling pins
+    # in this file do: the production default is torch, and on a box with no
+    # accelerator ``resolve_device`` refuses an IMPLICIT device by design. The
+    # arm under test is the SVD ablation, not the backend.
+    cfg = dataclasses.replace(gate_config(), solver="svd", solver_backend="numpy")
     result = run_e2e_gate(cfg=cfg)
     assert result["bits_identical"], result
     assert float(result["logit_delta"]) < 1.0, result
@@ -93,7 +97,13 @@ def test_scn_polish_gamma_rebalance_is_product_invariant():
     vv = vt0[:6].T * np.sqrt(s0[:6])
     from quantibbler.ptq.lb_admm import magnitude_balance
 
-    bal = magnitude_balance(uu.copy(), vv.copy(), np.ones(24), np.ones(16), target=w)
+    # Pin the parity reference explicitly: NumPy is the unit-test arm (and the
+    # only arm runnable on a box with no accelerator), while the production
+    # default is torch and fails closed there by design. Every sibling call
+    # site in the tier pins it the same way.
+    bal = magnitude_balance(
+        uu.copy(), vv.copy(), np.ones(24), np.ones(16), target=w, backend="numpy"
+    )
     bal.s1 = bal.s1 * 1e-6  # force the split polish will inherit
 
     # bal.Ub/Vb are solver artifacts and may be device int8 tensors; int8 `@`
