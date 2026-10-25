@@ -22,6 +22,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+import numpy as np
+
 __all__ = [
     "DEFAULT_SOLVER_BACKEND",
     "NumpyBackend",
@@ -30,6 +32,7 @@ __all__ = [
     "available_backends",
     "get_backend",
     "resolve_device",
+    "to_host_np",
     "solver_backend_provenance",
 ]
 
@@ -56,6 +59,22 @@ def solver_backend_provenance(default: str) -> tuple[str, str]:
         msg = f"{SOLVER_BACKEND_ENV} must be one of {_SOLVER_BACKEND_NAMES}, got {raw!r}"
         raise ValueError(msg) from None
     return value, "env"
+
+
+def to_host_np(value, dtype=np.float64) -> np.ndarray:
+    """The host-side boundary idiom for solver artifacts.
+
+    Solver outputs are backend-native: a NumPy array on the oracle, a torch tensor
+    on the accelerated backend -- and ``np.asarray`` on a DEVICE tensor RAISES
+    instead of copying ("can't convert cuda:0 device type tensor to numpy"). Every
+    consumer that needs host numbers (tools, tests, the polish entry) goes through
+    here, so the accelerator path is inspected by exactly the same code as a CPU
+    run and nobody decides the copy policy twice. NumPy inputs pass through
+    unchanged.
+    """
+    if hasattr(value, "detach"):  # torch tensor: move to host before converting
+        value = value.detach().cpu().numpy()
+    return np.asarray(value, dtype=dtype)
 
 
 def resolve_device(name: str, *, device: str | None = None) -> str:
