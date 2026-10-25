@@ -227,8 +227,11 @@ def _healthy_report(**overrides) -> str:  # noqa: ANN003
         "status": "ok",
         "wall_seconds": 48.2,
         # A faithful claim, so the EFFECT half of the stage gate applies to this
-        # report and not just the presence half.
+        # report and not just the presence half. The gate keys on the CLAIM
+        # (`fidelity_conditions.paper_faithful_flag`), not the rolled-up verdict
+        # (`paper_faithful`), which is False on any failed run.
         "paper_faithful": True,
+        "fidelity_conditions": {"paper_faithful_flag": True},
         # Stage evidence (real-shaped): both long stages carry the trio, so a
         # healthy report is one that can show its stages did work.
         "stages": [
@@ -384,7 +387,7 @@ def test_stage_evidence_effect_floor_is_a_fidelity_requirement():
     text = json.dumps(report, allow_nan=False)
     assert report_checks.stage_evidence_findings(text), "a faithful claim must be caught"
 
-    report["paper_faithful"] = False
+    report["fidelity_conditions"]["paper_faithful_flag"] = False
     assert report_checks.stage_evidence_findings(json.dumps(report, allow_nan=False)) == []
 
 
@@ -399,6 +402,31 @@ def test_stage_evidence_gate_ignores_a_recorded_skip():
                 {"event": "tune_fp", "skipped": "block_carries_no_second_target", "steps": 0}
             )
     assert report_checks.stage_evidence_findings(json.dumps(report, allow_nan=False)) == []
+
+
+def test_stage_evidence_gate_keys_on_the_faithful_claim_not_the_verdict():
+    """The v5 re-fire's measured shape, reproduced inline.
+
+    ``--paper-faithful`` was on the argv, so the run CLAIMS fidelity
+    (``fidelity_conditions.paper_faithful_flag`` is True) and ran full budgets —
+    but the rolled-up VERDICT ``paper_faithful`` is False because an unrelated
+    probe aborted. The effect floor is keyed to the CLAIM, so it still applies:
+    12 TuneFP cycles + 14 STE rows netted exactly 0.0 against ``STEPS_EFFECT_EPS``
+    (measured on ``artifacts/…v5-pertarget/quantize_report.json``), so at least one
+    no-op finding is owed. Keying on the verdict returned 0 findings — the
+    detector disabled in exactly the shape its own scenario names.
+    """
+    report = json.loads(_healthy_report())
+    # The verdict is False (a failed run) while the claim stands True.
+    report["paper_faithful"] = False
+    report["fidelity_conditions"]["paper_faithful_flag"] = True
+    for entry in report["stages"]:
+        if entry.get("event") == "tune_fp":
+            entry["residual_after"] = entry["residual_before"]
+        for rec in (entry.get("per_linear") or {}).values():
+            rec["residual_after"] = rec["residual_before"]
+    findings = report_checks.stage_evidence_findings(json.dumps(report, allow_nan=False))
+    assert len(findings) >= 1, findings
 
 
 def test_smoke_and_abort_assertions_reject_non_finite_json_constants():

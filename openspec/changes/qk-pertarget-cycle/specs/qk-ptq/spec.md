@@ -62,12 +62,12 @@ The test `test_driver_stage_map.py` SHALL replace the overruled pin (`tune_fp.in
 
 #### Scenario: stage_evidence_gate_on_faithful
 
-- **WHEN** a report claims `paper_faithful: true`
+- **WHEN** a report claims `paper_faithful_flag: true` (the claim that `--paper-faithful` was on the argv), regardless of the rolled-up `paper_faithful` verdict
 - **THEN** the gate verifies that STE's per-cycle net reduction exceeds `STEPS_EFFECT_EPS` for at least one linear — a no-op stage on a faithful run is a finding
 
 #### Scenario: stage_evidence_gate_on_non_faithful
 
-- **WHEN** a report does NOT claim `paper_faithful: true` (e.g. epochs=0 non-faithful runs)
+- **WHEN** a report does NOT claim `paper_faithful_flag: true` (e.g. epochs=0 non-faithful runs)
 - **THEN** the gate performs shape checks only — the non-faithful driver's `stage_pre` sets `epochs=0`, leaving TuneFP at one step of the paper's 256, and asserting the floor there would red-light correct behavior
 
 ### Requirement: A host-side stall watchdog SHALL detect frozen pipeline runs
