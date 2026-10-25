@@ -12,6 +12,8 @@ refinement was inert in the configuration the pipeline actually ran, and a
 zero-flip completion was indistinguishable from a healthy stage.
 """
 
+import math
+
 import pytest
 import torch
 from torch import nn
@@ -134,6 +136,52 @@ def _fac_from_weight(weight: torch.Tensor, rank: int, bias: torch.Tensor | None 
     return FactorizedLinear.from_weight(weight, rank, bias)
 
 
+def _push_latents_off_the_boundary(fac) -> None:
+    """Give every entry a margin, so no step inside the budget can cross zero.
+
+    The abort-path fixtures want a GEOMETRY where the finite steps flip nothing
+    (so ``zero_crossings`` is True unless a rolled-back step is counted) and a
+    value a poisoned entry can be flipped away from deterministically.
+    """
+    with torch.no_grad():
+        for latent in (fac.u_latent, fac.v_latent):
+            sign = torch.where(
+                latent.data >= 0, torch.ones_like(latent.data), -torch.ones_like(latent.data)
+            )
+            latent.data.copy_(sign * latent.data.abs().clamp_min(0.5))
+
+
+def _abort_on_the_second_step(monkeypatch, fac, *, at_call: int = 2) -> dict:
+    """Make the ``at_call``-th optimizer step land non-finite AND sign-flipped.
+
+    The defect is about ORDER — the flip counters are written before the
+    finiteness gate, so a step the armor then rolls back has already voted in
+    ``zero_crossings`` (the mechanism ladder's input). The abort therefore has
+    to be engineered so the step is a genuine sign change as well as
+    non-finite; hunting for that in an accidental numeric overflow would make
+    the fixture's premise depend on the platform. The hook runs AFTER the real
+    step and overwrites one latent entry with an infinity whose sign is
+    opposite to the one it carried.
+
+    Returns the counter of steps this hook observed, so a fixture can prove it
+    reached the poisoned step rather than passing on a stage that never ran.
+    """
+    real_step = torch.optim.Adam.step
+    seen = {"n": 0}
+
+    def step(self, *args, **kwargs):
+        out = real_step(self, *args, **kwargs)
+        seen["n"] += 1
+        if seen["n"] == at_call:
+            with torch.no_grad():
+                entry = fac.u_latent.data.reshape(-1)
+                entry[0] = -math.copysign(1.0, float(entry[0])) * float("inf")
+        return out
+
+    monkeypatch.setattr(torch.optim.Adam, "step", step)
+    return seen
+
+
 def test_scn_ste_records_its_own_objective_effect():
     """The stage's effect is measured and recorded, not inferred from flips.
 
@@ -224,6 +272,113 @@ def test_scn_zero_flip_completion_is_never_silent():
     for rec in per.values():
         if rec["zero_crossings"] is False:
             assert rec["declared"] == "paper_ste"
+
+
+# --------------------------------------------------------------------------
+# The non-finite abort path: a rolled-back step must not vote
+# --------------------------------------------------------------------------
+
+
+def test_aborted_step_contributes_no_flips(monkeypatch, capsys):
+    """A step the finiteness armor rolls back has not flipped anything.
+
+    The counters are written BEFORE the gate, so a step that lands non-finite
+    is counted and then undone: ``zero_crossings`` — a restatement of the flip
+    counters, and the exact field the mechanism ladder reads — reads False on
+    latents that were restored to the snapshot uncrossed, and
+    ``stats["steps"]``/``per_linear[...]["steps"]`` disagree by one. Engineering
+    the abort step to flip an entry is what makes the phantom visible: with the
+    gate ahead of the counters the step contributes neither a flip nor a step.
+    """
+    linear = _explicit_linear(13)
+    fac = _fac_from_weight(linear.weight.detach(), rank=6)
+    _push_latents_off_the_boundary(fac)
+    _set_linear(linear, fac)
+
+    gen = torch.Generator().manual_seed(14)
+    x_b = torch.randn(8, 4, 16, generator=gen, dtype=torch.float64)
+    y_b = torch.randn(8, 4, 12, generator=gen, dtype=torch.float64)
+
+    cfg = PTQConfig(solver_backend="numpy", rank=6, stage_latent=StageHyper(1e-3, 4, 4))
+    seen = _abort_on_the_second_step(monkeypatch, fac)
+    entry_value = float(fac.u_latent.detach()[0, 0])
+    stats = _tune_latent_ste(linear, {"": fac}, x_b, y_b, cfg, 4, steps=8, label="probe")
+    rec = stats["per_linear"][""]
+
+    # Precondition, not the claim: the fixture DID reach the non-finite abort
+    # path, on the step the poison was aimed at (true before and after the fix).
+    out = capsys.readouterr().out
+    assert seen["n"] == 2, "the fixture never reached the poisoned optimizer step"
+    assert "non-finite parameters after step 1; restored snapshot" in out, (
+        "the fixture never took the non-finite abort path"
+    )
+    # The armor restored the entry the poison flipped (true before and after).
+    assert abs(entry_value) >= 0.5, "the fixture's latents are not off the boundary"
+    assert float(fac.u_latent.detach()[0, 0]) == entry_value, "the snapshot was not restored"
+
+    assert rec["flips_u"] == 0 and rec["flips_v"] == 0, (
+        f"a rolled-back step's sign changes were counted: "
+        f"flips_u={rec['flips_u']} flips_v={rec['flips_v']}"
+    )
+    assert rec["per_step_flips"] == [0], (
+        f"the per-step trace booked the rolled-back step: {rec['per_step_flips']}"
+    )
+    assert rec["steps"] == 1, f"the rolled-back step was booked as a step: {rec['steps']}"
+    assert rec["first_flip_step"] is None
+    assert rec["zero_crossings"] is True, "the ladder's input was poisoned by a rolled-back step"
+    assert stats["steps"] == rec["steps"], (
+        f"the stage and the per-linear record disagree on the step count: "
+        f"{stats['steps']} vs {rec['steps']}"
+    )
+
+
+def test_aborted_step_does_not_skip_the_mechanism_ladder(monkeypatch):
+    """A linear whose STE aborted on a phantom flip is not declared paper_ste.
+
+    The consequence of the poisoned counters, end to end through
+    ``reconstruct_block``: ``per["zero_crossings"]`` gates the bounded discrete
+    flip pass, so a phantom flip declares the linear ``paper_ste`` and skips the
+    ladder while its latents sit where the snapshot left them.
+    """
+    from quantibbler.ptq import block_recon as br
+
+    real = br._tune_latent_ste
+    poisoned: dict = {}
+
+    # **kwargs, not a re-listed signature: a spy on a private stage function
+    # must not break the day the real one gains a kwarg.
+    def spy(block, facs, x_b, y_b, cfg, batch_size, *, steps=None, label="", **kwargs):
+        name, fac = next(iter(facs.items()))
+        if not poisoned:
+            poisoned["name"] = name
+            _push_latents_off_the_boundary(fac)
+            _abort_on_the_second_step(monkeypatch, fac)
+        return real(block, facs, x_b, y_b, cfg, batch_size, steps=steps, label=label, **kwargs)
+
+    monkeypatch.setattr(br, "_tune_latent_ste", spy)
+    sink: list = []
+    block = _SevenLinearBlock(seed=51)
+    cfg = PTQConfig(
+        solver_backend="numpy",
+        rank=3,
+        stage_latent=StageHyper(1e-8, 4, 8),
+        ste_flip_pass_budget=4,
+    )
+    calib = _calib(8, seed=51)
+    br.reconstruct_block(
+        block, calib, cfg, cotangent=_fixed_cot(block, calib), recorder=_recorder(sink)
+    )
+    ste = [info for event, info in sink if event == "ste"][0]
+    rec = ste["per_linear"][poisoned["name"]]
+
+    assert rec["zero_crossings"] is True, (
+        f"{poisoned['name']}: the rolled-back step's phantom flips reached the "
+        f"ladder input (flips_u={rec['flips_u']}, flips_v={rec['flips_v']})"
+    )
+    assert rec["declared"] in {"discrete_flip_pass", "scale_only"}, (
+        f"{poisoned['name']}: the mechanism ladder was skipped on rolled-back "
+        f"flips — declared {rec['declared']!r}"
+    )
 
 
 # --------------------------------------------------------------------------

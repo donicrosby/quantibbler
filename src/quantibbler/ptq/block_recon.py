@@ -1095,6 +1095,24 @@ def _tune_latent_ste(
                     grad_sq += float(p.grad.detach().pow(2).sum())
             first_grad_norm = float(np.sqrt(grad_sq))
         opt.step()
+        # The finiteness gate runs BEFORE the counters, and the order is the
+        # contract: a step the armor rolls back contributed no sign change, so
+        # counting it first would poison ``zero_crossings`` (the mechanism
+        # ladder's input) with flips the snapshot restore undid — the block
+        # would skip the ladder and declare ``paper_ste`` on latents restored
+        # uncrossed, and the stage's step count would disagree with the
+        # per-linear record's.
+        if not all(bool(torch.isfinite(p).all()) for p in params):
+            with torch.no_grad():
+                for name, fac in facs.items():
+                    for p, p0 in zip(_fac_params(fac), snapshot[name], strict=True):
+                        p.copy_(p0)
+            print(
+                f"[tune_latent_ste:{label}] non-finite parameters after step {step}; "
+                "restored snapshot, ending stage early",
+                flush=True,
+            )
+            break
         step_flips = 0
         for name, fac in facs.items():
             rec = per_linear[name]
@@ -1110,17 +1128,6 @@ def _tune_latent_ste(
             step_flips += fu + fv
             if (fu or fv) and rec["first_flip_step"] is None:
                 rec["first_flip_step"] = step
-        if not all(bool(torch.isfinite(p).all()) for p in params):
-            with torch.no_grad():
-                for name, fac in facs.items():
-                    for p, p0 in zip(_fac_params(fac), snapshot[name], strict=True):
-                        p.copy_(p0)
-            print(
-                f"[tune_latent_ste:{label}] non-finite parameters after step {step}; "
-                "restored snapshot, ending stage early",
-                flush=True,
-            )
-            break
         stats["steps"] = step + 1
         if step_flips:
             stats.setdefault("flip_steps", []).append(step)
@@ -1217,8 +1224,10 @@ def _discrete_flip_pass(
         k = min(int(budget), int(flat.numel()))
         if k <= 0:
             continue
-        # torch.argsort is stable for ties in index order on CPU; the tuple
-        # sort below makes the ordering explicit and backend-independent.
+        # Ascending |latent|, ties broken by first-seen index order (row-major
+        # within a factor, u's entries ahead of v's): torch.argsort with
+        # stable=True keeps that order, which is what makes the sweep
+        # backend-independent.
         picked = torch.argsort(flat, stable=True)[:k].tolist()
         rows, cols = latent.shape
         for flat_idx in picked:
