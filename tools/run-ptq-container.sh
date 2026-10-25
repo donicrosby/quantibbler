@@ -76,24 +76,8 @@ STE_FLIP_PASS_BUDGET="${STE_FLIP_PASS_BUDGET:-}"
 CALIBRATION_SEQS="${CALIBRATION_SEQS:-128}"
 EVAL_SEQS="${EVAL_SEQS:-40}"
 DRY_RUN="${DRY_RUN:-0}"
-# Lane 0 modes (qk-nanoquant-alignment-lane0): MODE=ptq is the pipeline driver
-# this wrapper has always wrapped. lane0-rehearsal runs the statistics pass
-# ONLY; lane0-fire runs the decisive probe. Both fail closed without GPU=1,
-# carry a wall-clock stop net (WALL_MIN), and write their knobs into
-# launch.env. The red parent-bytes path was retired after two box deaths; a
-# lane0 rehearsal on anything but the checkpointed build is not launchable
-# through this wrapper by construction.
+# Lane 0 modes (lane0-rehearsal, lane0-fire) retired at e5c6939 — the harness was deleted.
 MODE="${MODE:-ptq}"
-REHEARSAL_BATCHES="${REHEARSAL_BATCHES:-1}"
-CHUNK_TOKENS="${CHUNK_TOKENS:-256}"
-WALL_MIN="${WALL_MIN:-30}"
-# Host memory-floor kill-switch for lane0 modes: kfd-granted device memory is
-# invisible to the cgroup fence, so the ONLY thing that can stop a run before
-# it kills the box is a host-side watcher on the host's own free memory. The
-# watcher polls `free` every 3s and docker-stops the container when host
-# available memory falls under the floor -- the box survives, the run dies
-# with a trace. 0 disables (rehearsals on this box keep it armed at 20G).
-MEM_FLOOR_GB="${MEM_FLOOR_GB:-20}"
 
 # Refuse arguments instead of ignoring them. This wrapper pins the eval geometry
 # below, so a stray flag — or SEQ_LEN=2048 written in argument position — used to
@@ -132,17 +116,6 @@ fi
 # the exact failure the rocm Dockerfile's own build assertion exists to make
 # unbuildable. Required, not defaulted: a wrong tag is refused before the launch,
 # because the run's record cannot repair a wrong binary after the fact.
-# Lane 0 pins its image rather than inheriting one. The ambient environment is
-# not a launch parameter: a stale `IMAGE` exported from an earlier session flows
-# straight into the run, and the tag guard below cannot tell one rocm-tagged
-# image from another -- `quantibbler-ptq:rocm` (the retired DIY image) satisfies
-# `*rocm*` exactly as well as `:rocm-official` does. Identity is the digest, and
-# the digest is checked where it becomes known.
-LANE0_IMAGE_PIN="quantibbler-ptq:rocm-official"
-LANE0_IMAGE_DIGEST_PIN="sha256:6bad266ffdff7243ad2db2d8afd15a593bdfa04c44e73e3669e4e95ba2a19ed4"
-if [ "$MODE" != "ptq" ]; then
-  IMAGE="${IMAGE:-$LANE0_IMAGE_PIN}"
-fi
 IMAGE="${IMAGE:-quantibbler-ptq:latest}"
 if [ "${GPU:-0}" = "1" ]; then
   case "$IMAGE" in
@@ -150,40 +123,22 @@ if [ "${GPU:-0}" = "1" ]; then
     *) echo "error: GPU=1 requires a rocm-tagged image (IMAGE=$IMAGE); refusing to hand ROCm devices to a non-ROCm torch" >&2; exit 2 ;;
   esac
 fi
-# Lane 0 is an accelerator-only lane by mandate: fail closed on MODE without
-# GPU=1 rather than silently running the decisive probe on CPU.
+# Only MODE=ptq remains. The lane0 modes were retired with their harness
+# (e5c6939), and are now refused by name so a stale launcher learns why.
 case "$MODE" in
-  ptq|lane0-rehearsal|lane0-fire) ;;
-  *) echo "error: MODE=$MODE unknown (ptq | lane0-rehearsal | lane0-fire)" >&2; exit 2 ;;
+  ptq) ;;
+  lane0-rehearsal|lane0-fire)
+    echo "error: MODE retired: $MODE — lane0 harness deleted at e5c6939; only MODE=ptq remains" >&2
+    exit 2 ;;
+  *) echo "error: MODE=$MODE unknown (only ptq)" >&2; exit 2 ;;
 esac
-if [ "$MODE" != "ptq" ] && [ "${GPU:-0}" != "1" ]; then
-  echo "error: MODE=$MODE requires GPU=1 (accelerator-only lane); refusing" >&2
-  exit 2
-fi
 CONTAINER_NAME="quantibbler-ptq-run"
-[ "$MODE" = "lane0-rehearsal" ] && CONTAINER_NAME="quantibbler-lane0-rehearsal"
-[ "$MODE" = "lane0-fire" ] && CONTAINER_NAME="quantibbler-lane0-fire"
 # The digest, not just the tag: a tag is a mutable name, so a rebuild changes the
 # bytes while the name stays put -- the same "two arms indistinguishable" gap as
 # compute_dtype and rho_end, only quieter. Unknown is stated rather than implied
 # (a DRY_RUN has no image to inspect).
 IMAGE_DIGEST="$(docker inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
 [ -n "$IMAGE_DIGEST" ] || IMAGE_DIGEST=unknown
-# A tag is a mutable name; the digest is the identity. Lane 0 fails closed on a
-# digest it was not cleared for, because the failure it prevents -- handing ROCm
-# hardware an image whose kernels never launched -- looks like an unexplained
-# 60-second death, not like a wrong binary. The override names the digest it
-# authorizes rather than waving the check off, so the artifact still records what
-# was cleared.
-if [ "$MODE" != "ptq" ] && [ "$IMAGE_DIGEST" != "$LANE0_IMAGE_DIGEST_PIN" ] \
-  && [ "${LANE0_IMAGE_DIGEST_ALLOW:-}" != "$IMAGE_DIGEST" ]; then
-  if [ "$IMAGE_DIGEST" = "unknown" ] && [ "${DRY_RUN:-0}" = "1" ]; then
-    echo "note: DRY_RUN with an unresolvable image digest; the real launch fails closed" >&2
-  else
-    echo "error: lane0 image identity is pinned: IMAGE=$IMAGE has digest $IMAGE_DIGEST, expected $LANE0_IMAGE_DIGEST_PIN ($LANE0_IMAGE_PIN). To authorize a different build, set LANE0_IMAGE_DIGEST_ALLOW=$IMAGE_DIGEST." >&2
-    exit 2
-  fi
-fi
 
 # Stream contract, deliberate and now pinned from both sides: STDOUT is the
 # machine channel and carries the resolved argv and NOTHING else, so a verifier
@@ -198,18 +153,12 @@ fi
 if [ "$PAPER_FAITHFUL" != "1" ]; then
   echo "note: PAPER_FAITHFUL unset -> gate-shaped stage budgets (TuneFP 1 step); the paper's method is PAPER_FAITHFUL=1" >&2
 fi
-if [ "$MODE" != "ptq" ]; then
-  echo "run-ptq-container: mode=$MODE device=cuda rehearsal_batches=$REHEARSAL_BATCHES" \
-    "chunk_tokens=$CHUNK_TOKENS wall_min=${WALL_MIN}m gpu=1 image=$IMAGE" \
-    "image_digest=$IMAGE_DIGEST out=$OUT" >&2
-else
 echo "run-ptq-container: model=$MODEL rank=$RANK solver=$SOLVER seq_len=$SEQ_LEN" \
   "tune_seq_len=${TUNE_SEQ_LEN:-unset} calibration_seqs=$CALIBRATION_SEQS" \
   "factor_mode=${FACTOR_MODE:-binary} ablation=${ABLATION:-none} layer_scope=${LAYER_SCOPE:-all}" \
   "paper_faithful=${PAPER_FAITHFUL:-0} ste_flip_pass_budget=${STE_FLIP_PASS_BUDGET:-0}" \
   "compute_dtype=${COMPUTE_DTYPE:-float64} gpu=${GPU:-0} image=$IMAGE image_digest=$IMAGE_DIGEST" \
   "eval_seqs=$EVAL_SEQS out=$OUT" >&2
-fi
 
 mkdir -p "$OUT" 2>/dev/null || true
 # Launch provenance, written into the artifact directory BEFORE the container
@@ -219,22 +168,12 @@ mkdir -p "$OUT" 2>/dev/null || true
 # rho_end_source: an attribution pass must be identifiable from its own
 # directory, not from somebody's scrollback.
 {
-  # Lane 0 records the harness's knobs, not the driver's. Those ptq geometry
-  # fields are not lane0 defaults, they are another lane's fields: rank=8 and
-  # seq_len=512 beside a lane0 run invite exactly the misreading this room has
-  # already paid for once.
-  if [ "$MODE" = "ptq" ]; then
-    printf 'model=%s\nrank=%s\nsolver=%s\nseq_len=%s\ntune_seq_len=%s\n' \
-      "$MODEL" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-}"
-    printf 'calibration_seqs=%s\neval_seqs=%s\nfactor_mode=%s\nablation=%s\n' \
-      "$CALIBRATION_SEQS" "$EVAL_SEQS" "${FACTOR_MODE:-}" "${ABLATION:-}"
-    printf 'layer_scope=%s\npaper_faithful=%s\nste_flip_pass_budget=%s\ncompute_dtype=%s\n' \
-      "${LAYER_SCOPE:-}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "${COMPUTE_DTYPE:-float64}"
-  else
-    printf 'model=%s\ndevice=%s\nout=%s\n' "$MODEL" "cuda" "$OUT"
-    printf 'no_cuda_memory_caching=1\nattn_impl=%s\nmem_csv=rehearsal-mem.csv\n' \
-      "${QK_ATTN_IMPL:-sdpa}"
-  fi
+  printf 'model=%s\nrank=%s\nsolver=%s\nseq_len=%s\ntune_seq_len=%s\n' \
+    "$MODEL" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-}"
+  printf 'calibration_seqs=%s\neval_seqs=%s\nfactor_mode=%s\nablation=%s\n' \
+    "$CALIBRATION_SEQS" "$EVAL_SEQS" "${FACTOR_MODE:-}" "${ABLATION:-}"
+  printf 'layer_scope=%s\npaper_faithful=%s\nste_flip_pass_budget=%s\ncompute_dtype=%s\n' \
+    "${LAYER_SCOPE:-}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "${COMPUTE_DTYPE:-float64}"
   # SOLVER_BACKEND is stamped beside the rho override for the same reason: the
   # solver arm is run identity, and "torch" alone does not say which device ran.
   # Unset resolves to the config default (numpy); the driver re-resolves and
@@ -250,8 +189,7 @@ mkdir -p "$OUT" 2>/dev/null || true
     "${GPU:-0}" "$IMAGE" "$IMAGE_DIGEST" \
     "$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
     "$(git -C "$REPO" status --porcelain 2>/dev/null | grep -vc '^??' || true)"
-  printf 'mode=%s\nrehearsal_batches=%s\nchunk_tokens=%s\nwall_min=%s\nmem_floor_gb=%s\n' \
-    "$MODE" "$REHEARSAL_BATCHES" "$CHUNK_TOKENS" "$WALL_MIN" "$MEM_FLOOR_GB"
+  printf 'mode=%s\n' "$MODE"
 } > "$OUT/launch.env" 2>/dev/null || echo "warning: could not write $OUT/launch.env" >&2
 # Pre-launch host free-RAM baseline, beside the artifact: the fence decision
 # reads the kfd-visible peak against what the host actually had going in.
@@ -309,15 +247,6 @@ fi
 if [ -n "${DEVICE_AUDIT:-}" ]; then
   set -- "$@" -e "QUANTIBBLER_DEVICE_AUDIT=$DEVICE_AUDIT"
 fi
-# The rehearsal releases as it runs. With the caching allocator on, freed blocks
-# stay in the pool and the host keeps seeing the high-water mark -- which is the
-# difference between "the allocator is holding it" and "the process is using it".
-# Lane0 only: the ptq driver's peak is a measured quantity with the allocator in
-# its normal configuration, and moving it there would move a number the campaign
-# is compared against.
-if [ "$MODE" != "ptq" ]; then
-  set -- "$@" -e PYTORCH_NO_CUDA_MEMORY_CACHING=1
-fi
 set -- "$@" -e "QUANTIBBLER_IMAGE=$IMAGE" -e "QUANTIBBLER_IMAGE_DIGEST=$IMAGE_DIGEST"
 
 # GPU access is opt-in and explicit. These are host kernel devices, so passing
@@ -363,23 +292,6 @@ if [ -n "${QK_SOLVER_PROBE_PATH:-}" ]; then
   set -- "$@" -e "QK_SOLVER_PROBE_PATH=$QK_SOLVER_PROBE_PATH"
 fi
 # ...and the container command continues the same argument list.
-if [ "$MODE" = "lane0-rehearsal" ]; then
-  set -- "$@" \
-    "$IMAGE" \
-    python tools/lane0_precond_probe.py \
-      --device cuda --rehearsal \
-      --rehearsal-batches "$REHEARSAL_BATCHES" \
-      --chunk-tokens "$CHUNK_TOKENS" \
-      --out /out/rehearsal.json
-elif [ "$MODE" = "lane0-fire" ]; then
-  set -- "$@" \
-    "$IMAGE" \
-    python tools/lane0_precond_probe.py \
-      --real --device cuda \
-      --chunk-tokens "$CHUNK_TOKENS" \
-      --jsonl /out/rows.jsonl \
-      --out /out/report.json
-else
 set -- "$@" \
   "$IMAGE" \
   python tools/quantize_hf_model.py \
@@ -389,7 +301,6 @@ set -- "$@" \
     --solver "$SOLVER" \
     --checkpoint-dir /out/checkpoints \
     --out /out
-fi
 
 # The split knob is appended only when it was set. Passing it unconditionally
 # would make the wrapper the author of the tuning geometry - and an empty
@@ -397,9 +308,6 @@ fi
 # Same rule as TUNE_SEQ_LEN: the wrapper passes the precision only when it was
 # asked for, so the wrapper is never the author of the run's numerics. The
 # driver default (float64) is what launch.env records when it is unset.
-# All of these are quantize_hf_model flags — the lane0 harness rejects them,
-# so lane0 modes append none of them.
-if [ "$MODE" = "ptq" ]; then
 if [ -n "${COMPUTE_DTYPE:-}" ]; then
   set -- "$@" --compute-dtype "$COMPUTE_DTYPE"
 fi
@@ -423,7 +331,6 @@ if [ "$PAPER_FAITHFUL" = "1" ]; then
 fi
 if [ -n "$STE_FLIP_PASS_BUDGET" ]; then
   set -- "$@" --ste-flip-pass-budget "$STE_FLIP_PASS_BUDGET"
-fi
 fi
 
 # DRY_RUN=1 prints the exact command line (copy-pasteable) and stops: the launch
@@ -478,10 +385,8 @@ printf '=== run %s rank=%s solver=%s seq_len=%s tune_seq_len=%s paper_faithful=%
 WATCHDOG="${WATCHDOG:-1}"
 WATCHDOG_STALL_MIN="${WATCHDOG_STALL_MIN:-15}"
 WATCHDOG_KILL_AFTER_MIN="${WATCHDOG_KILL_AFTER_MIN:-0}"
-# The breadcrumb watchdog is ptq-mode only: the lane0 harness does not write
-# breadcrumbs, so line-silence would be a false stall. lane0 modes get the
-# wall-clock stop net below instead.
-if [ "$WATCHDOG" = "1" ] && [ "$MODE" = "ptq" ]; then
+if [ "$WATCHDOG" = "1" ]; then
+  # shellcheck disable=SC2094  # deliberate: the redirect forwards the watchdog's console output into the same file its own --log already writes
   nohup sh "$REPO/tools/qkb-stall-watchdog.sh" \
     --breadcrumbs /opt/data/tmp/quantibbler-breadcrumbs.log \
     --container "$CONTAINER_NAME" \
@@ -489,49 +394,6 @@ if [ "$WATCHDOG" = "1" ] && [ "$MODE" = "ptq" ]; then
     --kill-after-min "$WATCHDOG_KILL_AFTER_MIN" \
     --log "$OUT/watchdog.log" >>"$OUT/watchdog.log" 2>&1 &
   echo "watchdog: pid=$! stall=${WATCHDOG_STALL_MIN}m kill_after=${WATCHDOG_KILL_AFTER_MIN}m log=$OUT/watchdog.log" >&2
-fi
-
-# Wall-clock stop net for the lane0 modes: a host-side sleeper that hard-stops
-# the container at the deadline, so a run that neither completes nor OOMs
-# cannot hang the box. The fence cannot see kfd memory and the watchdog cannot
-# hear this harness, so the deadline is the binding constraint.
-if [ "$MODE" != "ptq" ] && [ "${WALL_MIN:-0}" -gt 0 ] 2>/dev/null; then
-  nohup sh -c "sleep $((WALL_MIN * 60)); \
-    id=\$(docker inspect -f '{{index .Config.Labels \"qkb_launch_id\"}}' '$CONTAINER_NAME' 2>/dev/null || true); \
-    if [ \"\$id\" = '$LAUNCH_ID' ]; then docker stop '$CONTAINER_NAME' >/dev/null 2>&1; \
-    else echo \"wall-stop: name '$CONTAINER_NAME' is not launch $LAUNCH_ID (id=\$id); not stopping\" >> '$OUT/watchdog.log'; fi" \
-    >/dev/null 2>&1 &
-  echo "wall-stop-net: pid=$! deadline=${WALL_MIN}m container=$CONTAINER_NAME" >&2
-fi
-
-# Host memory-floor kill-switch: the one net that actually catches a kfd
-# drain, since only the host can see its own free memory. Polls every 3s and
-# docker-stops the container the moment host available memory drops under the
-# floor -- before the box can die. The trace lands in watchdog.log.
-if [ "$MODE" != "ptq" ] && [ "${MEM_FLOOR_GB:-0}" -gt 0 ] 2>/dev/null; then
-  nohup sh -c '
-    floor=$1; name=$2; log=$3; want=$4
-    while :; do
-      state=$(docker inspect -f "{{.State.Running}}" "$name" 2>/dev/null || echo missing)
-      # Exit only when the container is genuinely gone or already stopped.
-      # A transient daemon blip must NOT disarm the net (fail-closed).
-      case "$state" in missing|false) break ;; esac
-      avail=$(free -g | awk "/^Mem:/{print \$NF}")
-      if [ "${avail:-999}" -lt "$floor" ]; then
-        id=$(docker inspect -f '{{index .Config.Labels "qkb_launch_id"}}' "$name" 2>/dev/null || true)
-        if [ "$id" != "$want" ]; then
-          echo "mem-floor: name $name is not launch $want (id=$id); not stopping" >> "$log"
-          break
-        fi
-        echo "mem-floor: host available ${avail}G < floor ${floor}G; stopping $name" >> "$log"
-        docker stop "$name" >/dev/null 2>&1
-        break
-      fi
-      sleep 3
-    done
-  ' sh "$MEM_FLOOR_GB" "$CONTAINER_NAME" "$OUT/watchdog.log" "$LAUNCH_ID" \
-    >/dev/null 2>&1 &
-  echo "mem-floor-net: pid=$! floor=${MEM_FLOOR_GB}G container=$CONTAINER_NAME" >&2
 fi
 
 # --- container stdout/stderr witness (container_log_witness, spec law) ---------
@@ -564,10 +426,13 @@ case "$CONTAINER_RC" in
   ''|*[!0-9]*) CONTAINER_RC=unknown ;;
 esac
 { echo "qkb_launch_id=$LAUNCH_ID"; echo "--- container exit ---"; echo "container_exit_code=$CONTAINER_RC"; echo "container_log=$CONTAINER_LOG"; } >> "$OUT/launch.env" 2>/dev/null || true
-# Fail closed: a lane0 run whose witness is absent cannot be read after the
-# fact, and "it died with no reason" is the exact failure this lane keeps
-# paying for. Recorded loudly rather than discovered later.
-if [ "$MODE" != "ptq" ] && [ ! -s "$CONTAINER_LOG" ]; then
+# Fail closed, for ANY mode: a run whose witness is absent cannot be read
+# after the fact, and "it died with no reason" is the exact failure this lane
+# keeps paying for. The `MODE != ptq` qualifier that used to gate this was
+# dead twice over -- the law is unconditional (`container_log_witness`) and
+# the lane0 modes that motivated it are retired, so `MODE` can only be `ptq`
+# and the check never ran. Recorded loudly rather than discovered later.
+if [ ! -s "$CONTAINER_LOG" ]; then
   echo "error: container_log_witness missing or empty at $CONTAINER_LOG; the run's account was not captured" >&2
   exit 2
 fi

@@ -35,10 +35,6 @@ _KNOBS = (
     "GPU",
     "DRY_RUN",
     "MODE",
-    "REHEARSAL_BATCHES",
-    "CHUNK_TOKENS",
-    "WALL_MIN",
-    "LANE0_IMAGE_DIGEST_ALLOW",
 )
 
 
@@ -52,6 +48,83 @@ def _launch(**env: str) -> subprocess.CompletedProcess:
     """
     environment = {key: value for key, value in os.environ.items() if key not in _KNOBS}
     environment.update({"DRY_RUN": "1", **env})
+    return subprocess.run(
+        ["sh", str(_SCRIPT)],
+        cwd=_REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _launch_past_dry_run(tmp_path: pathlib.Path, **env: str) -> subprocess.CompletedProcess:
+    """Run the wrapper through its REAL launch path, with no daemon in the loop.
+
+    `DRY_RUN` exits before the container starts, so everything that happens
+    after the launch (the container witness, the exit-code plumbing) is
+    unreachable from `_launch`. A silent `docker` stub on the head of PATH
+    stands in for the daemon: the run completes, exit 0, having printed
+    nothing -- which is exactly the shape of a fire whose account was not
+    captured.
+
+    The stub is a SYMLINK to `/bin/true`, not a written script, and that is
+    load-bearing: `/tmp` is mounted `noexec` on this host (as in CI sandboxes
+    generally), and a shell does not stop at a PATH entry it cannot exec --
+    dash prints `Permission denied` for the stub, moves to the next PATH
+    entry, and runs the REAL `/usr/bin/docker`. Measured, not reasoned: the
+    first cut of this leg started a real 32 GiB container. The symlink
+    resolves to an exec-able inode, so the stub wins wherever it is placed.
+
+    `infrastructure_interception_proof` (openspec/changes/qk-wrapper-contract)
+    makes the in-band proof below non-optional: a test that overrides `PATH`
+    to intercept a command which launches real infrastructure SHALL assert the
+    resolved binary is the shim, in the same environment handed to the code
+    under test, BEFORE that code runs. `command -v` alone does not discharge
+    that -- it happily reports the stub the shell later refuses to exec, which
+    is precisely how the noexec fall-through above survived a green suite. The
+    exec probe is the assertion that actually binds.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    stub = bindir / "docker"
+    stub.symlink_to("/bin/true")
+
+    environment = {key: value for key, value in os.environ.items() if key not in _KNOBS}
+    environment.update(
+        {
+            "WATCHDOG": "0",  # keep the host-side watchdog out of a unit test
+            "PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
+            **env,
+        }
+    )
+
+    # Proven in-band, in this very environment, before the wrapper runs.
+    resolved = subprocess.run(
+        ["sh", "-c", "command -v docker"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert resolved.stdout.strip() == str(stub), (
+        f"the shell resolves docker to {resolved.stdout.strip()!r}, not the stub {stub}"
+    )
+    probe = subprocess.run(
+        ["docker", "inspect", "--format", "{{.Id}}", "qkb-interception-probe"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (probe.returncode, probe.stdout, probe.stderr) == (0, "", ""), (
+        "the stub did not answer -- the real docker answers this inspect (no such object, or a "
+        "daemon refusal) and would put this leg on real infrastructure under the test's timeout",
+        probe.returncode,
+        probe.stdout,
+        probe.stderr,
+    )
+
     return subprocess.run(
         ["sh", str(_SCRIPT)],
         cwd=_REPO,
@@ -148,10 +221,9 @@ def test_gpu_requires_a_rocm_tagged_image():
     DRY_RUN inspects a launch without executing it, so an absent /dev/kfd +
     /dev/dri is an advisory for the dry run (whose argv is the plan for a GPU
     host) and a refusal for the real launch. Measured on a GPU-less ubuntu
-    runner: with the presence check binding the dry run too, this leg and four
-    sibling lane0 legs died at "GPU=1 but /dev/kfd is absent on this host"
-    before printing any argv -- the seam unable to inspect a launch it never
-    runs.
+    runner: with the presence check binding the dry run too, this leg and its
+    siblings died at "GPU=1 but /dev/kfd is absent on this host" before printing
+    any argv -- the seam unable to inspect a launch it never runs.
     """
     refused = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048", GPU="1")
     assert refused.returncode == 2, refused.stderr
@@ -244,95 +316,45 @@ def test_wrapper_never_truncates_the_breadcrumb_trail():
     assert "=== run %s rank=%s solver=%s" in src
 
 
-_LANE0 = {
-    "MODE": "lane0-rehearsal",
-    "GPU": "1",
-    "REHEARSAL_BATCHES": "1",
-    "CHUNK_TOKENS": "256",
-    "WALL_MIN": "30",
-}
-_BROKEN_DIY = "quantibbler-ptq:rocm"
-_BROKEN_DIY_DIGEST = "sha256:42649ada93e0bd4221075999ba85a40d9142d3e644281fdaaa20f7afafad0a6b"
+def test_retired_lane0_modes_are_refused_by_name():
+    """The lane0 modes were retired with their harness (`e5c6939`).
 
-
-def _resolves(image: str) -> bool:
-    """Can docker tell us this image's digest on this machine?"""
-    try:
-        done = subprocess.run(
-            ["docker", "inspect", "--format", "{{.Id}}", image],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except FileNotFoundError:
-        return False
-    return done.returncode == 0 and done.stdout.strip() != ""
-
-
-def test_lane0_pins_its_image_rather_than_inheriting_the_ambient_one():
-    """Lane 0 must not launch on whatever `IMAGE` the shell happens to carry.
-
-    The green-1 failure: an `IMAGE` exported from the retired-DIY arc flowed
-    straight into the launch, and the rocm-tag guard waved it through because
-    `quantibbler-ptq:rocm` satisfies `*rocm*` exactly as well as the real one.
+    A deleted probe behind a live `MODE` arm is a silent dud: the launch looks
+    valid and dies inside the container. The wrapper refuses both retired mode
+    names up front instead, so a stale launcher learns at the wrapper rather
+    than at a missing file.
     """
-    completed = _launch(**_LANE0)
-    assert completed.returncode == 0, completed.stderr
-    assert "quantibbler-ptq:rocm-official" in completed.stdout
+    for mode in ("lane0-rehearsal", "lane0-fire"):
+        completed = _launch(MODE=mode)
+        assert completed.returncode == 2, (mode, completed.returncode, completed.stderr)
+        assert "MODE retired" in completed.stderr
+        assert mode in completed.stderr
+        assert "'docker'" not in completed.stdout, "a refused MODE must not resolve an argv"
 
 
-def test_lane0_refuses_the_unpinned_diy_digest():
-    """The image that actually killed green-1 is refused, by digest not by tag.
+def test_only_ptq_is_a_valid_mode():
+    """`ptq` is the only surviving mode; anything else is refused by name."""
+    completed = _launch(MODE="bogus")
+    assert completed.returncode == 2, (completed.returncode, completed.stderr)
+    assert "unknown" in completed.stderr
+    assert "only ptq" in completed.stderr
+    assert "'docker'" not in completed.stdout
 
-    Two environments, two documented readings, both asserted -- and neither one
-    a skip. Where the retired DIY image is present, the refusal itself is the
-    assertion. Where it is not (a fresh CI runner holds no image at all),
-    the digest is unresolvable, so the wrapper's documented DRY_RUN reading is
-    asserted instead: it ADVISES and the real launch is the one that fails
-    closed. Skipping there was the earlier shape and it was worse than a hole:
-    it added two skips to a tier whose count is exact (16) and to a full tier
-    that asserts zero, so the guard read as green CI while asserting nothing.
+
+def test_launch_env_records_the_mode_and_no_retired_lane0_knobs(tmp_path):
+    """The provenance block names the mode and carries no retired lane0 fields.
+
+    The lane0 knobs (`rehearsal_batches`, `chunk_tokens`, `wall_min`,
+    `mem_floor_gb`) were written unconditionally into launch.env before the
+    modes were retired; they are now gone with the modes, and `mode` remains.
     """
-    completed = _launch(IMAGE=_BROKEN_DIY, **_LANE0)
-    if _resolves(_BROKEN_DIY):
-        assert completed.returncode == 2, (completed.returncode, completed.stdout)
-        assert "lane0 image identity is pinned" in completed.stderr
-        return
+    completed = _launch(OUT=str(tmp_path))
     assert completed.returncode == 0, completed.stderr
-    assert (
-        "DRY_RUN with an unresolvable image digest; the real launch fails closed"
-        in completed.stderr
-    )
-    assert "lane0 image identity is pinned" not in completed.stderr
-
-
-def test_lane0_digest_override_names_the_digest_it_authorizes():
-    """The door exists, and it opens only for a digest someone wrote down.
-
-    The override is what makes an otherwise-refused launch legal, so it is
-    asserted where the digest resolves: the run proceeds AND carries the
-    authorized digest in its announce. Where no image is present the digest is
-    `unknown` -- and the override cannot manufacture one, which is the same
-    fail-closed direction: the leg asserts the `unknown` it actually recorded
-    rather than skipping the leg and asserting nothing.
-    """
-    resolvable = _resolves(_BROKEN_DIY)
-    completed = _launch(IMAGE=_BROKEN_DIY, LANE0_IMAGE_DIGEST_ALLOW=_BROKEN_DIY_DIGEST, **_LANE0)
-    assert completed.returncode == 0, completed.stderr
-    expected_digest = _BROKEN_DIY_DIGEST if resolvable else "unknown"
-    assert f"image_digest={expected_digest}" in completed.stderr
-
-
-def test_lane0_launch_env_records_harness_knobs_not_driver_geometry(tmp_path):
-    """The record must describe the run that happened, not the other lane's."""
-    completed = _launch(OUT=str(tmp_path), **_LANE0)
-    assert completed.returncode == 0, completed.stderr
-    lines = (tmp_path / "launch.env").read_text().splitlines()
-    text = "\n".join(lines)
-    assert "mode=lane0-rehearsal" in text
-    assert "rehearsal_batches=1" in text and "chunk_tokens=256" in text
-    for foreign in ("rank=", "seq_len=", "compute_dtype=", "eval_seqs=", "calibration_seqs="):
-        assert foreign not in text, f"lane0 launch.env carries ptq geometry: {foreign}"
+    text = (tmp_path / "launch.env").read_text()
+    assert "mode=ptq" in text
+    lines = text.splitlines()
+    for retired in ("rehearsal_batches=", "chunk_tokens=", "wall_min=", "mem_floor_gb="):
+        assert retired not in text, f"retired lane0 field in launch.env: {retired}"
     # The splice defect that put a bare `?` line in the green-1 record.
     assert "?" not in lines, f"stray splice line in launch.env: {lines}"
     assert any(
@@ -340,27 +362,37 @@ def test_lane0_launch_env_records_harness_knobs_not_driver_geometry(tmp_path):
     ), lines
 
 
-def test_lane0_disables_the_caching_allocator_and_ptq_does_not():
-    """The rehearsal releases as it runs; the campaign keeps its normal allocator.
+def test_absent_container_log_witness_fails_closed(tmp_path):
+    """The witness is fail-closed for ANY mode, and `ptq` is now every mode.
 
-    With caching on, freed blocks stay in the pool and the host keeps seeing the
-    high-water mark -- the difference between "the allocator is holding it" and
-    "the process is using it". The ptq peak is a number the campaign is compared
-    against, so its allocator configuration must not move.
+    `container_log_witness` law: a fire whose `container.log` is absent or
+    empty SHALL fail closed, because a run with no captured account cannot be
+    read after the fact -- "it died with no reason" is the failure this
+    wrapper exists to stop paying for. The gate was written for the lane0
+    probing path and carried a `MODE != ptq` qualifier; with the lane0 modes
+    retired, `MODE` can only be `ptq`, so that qualifier made the gate
+    permanently dead. It is dropped here, and this is the pin.
+
+    The `ptq` happy path writes `container.log` through `tee`, so in normal
+    operation the gate never fires; only a genuinely-uncaptured run reaches
+    it. A container that exits cleanly and prints nothing leaves a zero-byte
+    witness -- the smallest real instance of that case.
+
+    The law now lives in `openspec/changes/qk-wrapper-contract/specs/qk-wraper/
+    spec.md` (`container_log_witness`, extracted from the archived lane0 delta),
+    whose sibling requirement `wrapper_failclosed_branches_hermetic_tests` names
+    `witness fail-closed` in the branch list that SHALL be covered by a hermetic
+    test. This is that test.
     """
-    lane0 = _launch(**_LANE0)
-    assert lane0.returncode == 0, lane0.stderr
-    assert "PYTORCH_NO_CUDA_MEMORY_CACHING=1" in lane0.stdout
+    out = tmp_path / "out"
+    completed = _launch_past_dry_run(
+        tmp_path, RANK="512", SOLVER="svd", SEQ_LEN="2048", OUT=str(out)
+    )
 
-    ptq = _launch(MODE="ptq")
-    assert ptq.returncode == 0, ptq.stderr
-    assert "PYTORCH_NO_CUDA_MEMORY_CACHING" not in ptq.stdout
+    witness = out / "container.log"
+    assert witness.exists(), "the tee must have produced the witness for this leg to mean anything"
+    assert witness.stat().st_size == 0, "fixture precondition: the witness is empty"
 
-
-def test_lane0_launch_env_records_the_release_configuration(tmp_path):
-    completed = _launch(OUT=str(tmp_path), **_LANE0)
-    assert completed.returncode == 0, completed.stderr
-    text = (tmp_path / "launch.env").read_text()
-    assert "no_cuda_memory_caching=1" in text
-    assert "attn_impl=sdpa" in text
-    assert "mem_csv=rehearsal-mem.csv" in text
+    assert completed.returncode == 2, (completed.returncode, completed.stdout, completed.stderr)
+    assert "container_log_witness missing or empty" in completed.stderr
+    assert str(witness) in completed.stderr
