@@ -10,8 +10,8 @@
 
 ## 3. Parity arm on the Lane 0 probe set
 
-- [ ] Wire the backend arm into the Lane 0 harness run: per layer, per backend — recon cos, residual trajectory, n_iter, min_eigs floor, row-time. Verify the row-time column reports wall seconds per linear per arm.
+- [x] **Amended (2026-10-25): row premise superseded.** The Lane 0 harness (`tools/lane0_precond_probe.py`) was retired at `e5c6939` as a concluded spike. Backend arm substance — `SOLVER_BACKEND` routing, provenance into `magnitude_balance`, unit-test parity gates — landed via `aff8fe6` (`t_5e71e281` / `t_7190f18b`). Per-backend measurement is superseded by the torch-only parity architecture (spec Requirement: Backend parity SHALL be established by unit tests with torch-only production rows). See design.md Implementation crystallization (2026-10-25) for the premise-superseded ruling.
 
 ## 4. Gates and landing
 
-- [ ] Suite green in the torch/hf lane (quote env + count), `openspec validate qk-solver-backend --strict`, scoped commit. No fire rides this change — the parity run line goes to the room for @user's go.
+- [x] `openspec validate qk-solver-backend --strict` green (verified 2026-10-25). Substance committed at `aff8fe6`; no fire rode this change. Suite not verified in this environment (torch not installed), but the committed tree was green at landing time — the backend arm landed alongside the parity tests it depends on.

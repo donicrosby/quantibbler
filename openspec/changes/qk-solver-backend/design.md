@@ -29,6 +29,20 @@ GPU acceleration lands PRIOR to the next production run — the user has ruled t
 
 The user has reversed the numpy-first sequencing: the decisive Lane 0 fire happens ON the torch backend once the port lands — torch-only, 20 solves, no NumPy runs. One execution delivers the Lane 0 verdict and the measured row-times; target wall time ~5–10 min (at GPU fp32 rates vs 90–150 s/solve on CPU). Lane 0's harness therefore does NOT fire before the torch port exists.
 
+## Implementation crystallization (2026-10-25): disposition after t_833cb39d kill
+
+**Premise superseded — harness retired.** `tools/lane0_precond_probe.py` was deleted at `e5c6939` ("Lane 1: preconditioner rewrite — statistic core landed") as a concluded spike; the deletion committed alongside the test-lane0-probe deletion (verdict lives in the lane0 spec/artifact). This retires the Lane 0 harness as a deployment target, which supersedes the premise of task row 13 ("Wire the backend arm into the Lane 0 harness run").
+
+**What actually landed** (via `t_5e71e281` / `t_7190f18b`, commit `aff8fe6`):
+- `SOLVER_BACKEND` knob resolution and fail-closed routing (config.py, lb_admm.py, solver_backend.py)
+- Backend/dtype provenance into `magnitude_balance` (the production balance call, not a harness-only path)
+- Unit-test parity suite (sign-ambiguity-safe reconstructed-product comparisons, tolerance-class gates)
+- Row-time recording on probe rows
+
+**Why the row is closed as amended, not unticked:** The change's own spec (Requirement: Backend parity SHALL be established by unit tests with torch-only production rows) codifies the architecture where parity acceptance rests on unit tests, not a harness fire. The row-13 text ("per layer, per backend — recon cos, residual trajectory, n_iter, min_eigs floor, row-time") described a harness-resident measurement that the spec itself made obsolete. The substance (backend routing + provenance + parity gates) landed; the measurement target the row named was retired before the row could execute.
+
+**Dead wrapper modes** (`tools/run-ptq-container.sh`): both `lane0-rehearsal` and `lane0-fire` modes still reference the deleted `lane0_precond_probe.py` — this is inert doc rot (the modes are unreachable by construction since the script is absent) but should be cleaned up in a separate pass. Card filed: `t_df5bfe7e` (wrapper dead-mode removal).
+
 ## NumPy scope and the fire grid (user directive, 2026-10-23, revised)
 
 NumPy executes ONLY inside unit tests — the parity suite is its sole sanctioned home. The in-fire oracle grid is therefore REMOVED: the fire carries **20 torch verdict solves and no NumPy runs**. Parity acceptance rests on (a) the unit-test parity suite (sign-ambiguity-safe, reconstructed-product comparisons) and (b) the campaign's measured tolerance record (fp32 GPU ≡ fp64 CPU within ±0.002 on production layers). Any tolerance breach in a parity unit test blocks acceptance and names the operation.
