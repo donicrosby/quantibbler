@@ -46,18 +46,28 @@ def test_unknown_backend_is_refused():
         get_backend("numpyish")
 
 
-def test_default_backend_is_numpy_torch_opt_in():
-    """Contract (qk-solver-backend): numpy default, torch opt-in.
+def test_default_backend_is_torch_and_fails_closed_without_accelerator():
+    """Contract (qk-solver-backend spec.md:5-7): torch default, numpy test-only.
 
-    The torch default landed un-ratified and silently turned every dev-box
-    measurement into an unlabelled torch-CPU run; the written contract is the
-    authority, and the accelerated arm stays reachable by name or knob.
+    "The ADMM solver SHALL default to the torch backend with NumPy
+    unit-test-only ... a torch request without an accelerator SHALL fail rather
+    than resolve to NumPy." This pin previously asserted a numpy default, which
+    was the pre-amendment contract; the spec is the authority and the refusal is
+    half of what it requires.
     """
+    import torch
+
     from quantibbler.ptq.solver_backend import DEFAULT_SOLVER_BACKEND
 
-    assert DEFAULT_SOLVER_BACKEND == "numpy"
-    assert get_backend().name == "numpy"
-    # The accelerated arm is opt-in, and an explicit device reaches it.
+    assert DEFAULT_SOLVER_BACKEND == "torch"
+    if torch.cuda.is_available():
+        assert get_backend().name == "torch"
+    else:
+        with pytest.raises(RuntimeError, match="requires an accelerator"):
+            get_backend()
+    # NumPy is the unit-test parity reference, reachable by explicit request.
+    assert get_backend("numpy").name == "numpy"
+    # The parity/diagnostic path stays reachable on an explicit device.
     assert get_backend("torch", device="cpu").name == "torch"
 
 

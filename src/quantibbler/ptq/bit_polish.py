@@ -70,11 +70,18 @@ def greedy_polish(
     Raises:
         ValueError: on shape mismatches or non-finite inputs.
     """
-    w = np.ascontiguousarray(w, dtype=np.float64)
-    ub = np.asarray(ub, dtype=np.float64).copy()
-    vb = np.asarray(vb, dtype=np.float64).copy()
-    s1 = np.asarray(s1, dtype=np.float64).copy()
-    s2 = np.asarray(s2, dtype=np.float64).copy()
+    # The sign matrices arrive as solver artifacts, so on the accelerated path
+    # they are DEVICE tensors: `np.asarray` on one of those raises instead of
+    # copying ("can't convert cuda:0 device type tensor to numpy"). Coerce on the
+    # host first -- the polish math below is NumPy-only and device-agnostic, and
+    # it must not be the thing that decides whether a GPU run can polish.
+    from .solver_backend import to_host_np
+
+    w = np.ascontiguousarray(to_host_np(w), dtype=np.float64)
+    ub = to_host_np(ub).copy()
+    vb = to_host_np(vb).copy()
+    s1 = to_host_np(s1).copy()
+    s2 = to_host_np(s2).copy()
     if w.ndim != 2:
         raise ValueError(f"target must be 2-D, got {w.shape}")
     dout, din = w.shape

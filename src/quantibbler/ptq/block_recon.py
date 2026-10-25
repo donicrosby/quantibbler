@@ -66,6 +66,7 @@ from .calibration import LayerStatsBook, collect_stats, robust_diag
 from .config import PTQConfig
 from .lb_admm import lb_admm, magnitude_balance
 from .progress import ProgressReporter
+from .solver_backend import to_host_np
 
 # Artifact markers (greppable in code, spec, and the run record).
 #
@@ -172,11 +173,11 @@ def _record_solver_probe(name, w, bal, res, cfg) -> None:
     from .lb_admm import admm_reg_provenance, rho_end_provenance
     from .solver_backend import resolve_device, solver_backend_provenance
 
-    u = np.asarray(bal.U, dtype=np.float64)
-    v = np.asarray(bal.V, dtype=np.float64)
-    s1 = np.asarray(bal.s1, dtype=np.float64)
-    s2 = np.asarray(bal.s2, dtype=np.float64)
-    wf = np.asarray(w, dtype=np.float64)
+    u = to_host_np(bal.U)
+    v = to_host_np(bal.V)
+    s1 = to_host_np(bal.s1)
+    s2 = to_host_np(bal.s2)
+    wf = to_host_np(w)
 
     def _cos(recon: np.ndarray) -> float:
         num = float(np.sum(wf * recon))
@@ -1103,8 +1104,8 @@ def extract_and_pack(
         )
     from .. import kernels
 
-    u_np = np.asarray(u_latent, dtype=np.float64)
-    v_np = np.asarray(v_latent, dtype=np.float64)
+    u_np = to_host_np(u_latent)
+    v_np = to_host_np(v_latent)
     ub = np.where(u_np >= 0.0, np.int8(1), np.int8(-1)).astype(np.int8)
     vb = np.where(v_np >= 0.0, np.int8(1), np.int8(-1)).astype(np.int8)
     packed_u = kernels.pack_bits(ub)
@@ -1455,10 +1456,10 @@ def reconstruct_block(
         # and every later block's calibration inputs.
         check_layer_magnitude(
             name,
-            np.asarray(bal.U),
-            np.asarray(bal.V),
-            np.asarray(bal.s1),
-            np.asarray(bal.s2),
+            to_host_np(bal.U),
+            to_host_np(bal.V),
+            to_host_np(bal.s1),
+            to_host_np(bal.s2),
             w,
             cfg,
         )
@@ -1476,10 +1477,10 @@ def reconstruct_block(
         if polish:
             ub_p, vb_p, s1_p, s2_p = greedy_polish(
                 w,
-                np.asarray(bal.Ub, dtype=np.float64),
-                np.asarray(bal.Vb, dtype=np.float64),
-                np.asarray(bal.s1, dtype=np.float64),
-                np.asarray(bal.s2, dtype=np.float64),
+                to_host_np(bal.Ub),
+                to_host_np(bal.Vb),
+                to_host_np(bal.s1),
+                to_host_np(bal.s2),
                 rounds=cfg.polish_rounds,
             )
             # Exact refold: latents = polished bits themselves (sign(latent) is
@@ -1495,14 +1496,10 @@ def reconstruct_block(
             # untuned-signs mode they are exported as their signs with the Eq. 8
             # scale fold and zero refinement (D-3).
             _dev = linear.weight.device
-            u0 = torch.from_numpy(np.ascontiguousarray(np.asarray(bal.U, dtype=np.float64))).to(
-                _dev
-            )
-            v0 = torch.from_numpy(np.ascontiguousarray(np.asarray(bal.V, dtype=np.float64))).to(
-                _dev
-            )
-            s1_p = np.asarray(bal.s1, dtype=np.float64)
-            s2_p = np.asarray(bal.s2, dtype=np.float64)
+            u0 = torch.from_numpy(np.ascontiguousarray(to_host_np(bal.U))).to(_dev)
+            v0 = torch.from_numpy(np.ascontiguousarray(to_host_np(bal.V))).to(_dev)
+            s1_p = to_host_np(bal.s1)
+            s2_p = to_host_np(bal.s2)
         s1_np = np.ascontiguousarray(s1_p)
         s2_np = np.ascontiguousarray(s2_p)
         bias0 = original_bias[name]

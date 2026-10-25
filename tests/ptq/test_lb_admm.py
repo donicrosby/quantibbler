@@ -237,7 +237,9 @@ def _rel_fit(res, w) -> float:
     an elementwise ``U * P_u`` is a different object entirely and must never be
     used as a reconstruction.
     """
-    approx = np.asarray(res.U) @ np.asarray(res.V).T
+    from quantibbler.ptq.solver_backend import to_host_np
+
+    approx = to_host_np(res.U) @ to_host_np(res.V).T
     return float(np.linalg.norm(approx - w) / np.linalg.norm(w))
 
 
@@ -269,7 +271,9 @@ def test_scn_normalized_regressor_design_matrix():
         assert _rel_fit(res, w) < 5e-2, (
             f"returned U V^T does not reconstruct the target (rel {_rel_fit(res, w):.3e})"
         )
-        approx = np.asarray(res.U) @ np.asarray(res.V).T
+        from quantibbler.ptq.solver_backend import to_host_np
+
+        approx = to_host_np(res.U) @ to_host_np(res.V).T
         cos = float(np.sum(approx * w) / (np.linalg.norm(approx) * np.linalg.norm(w)))
         assert cos > 0.999, f"map-back product cos={cos:.6f} is not a valid factorization"
 
@@ -366,8 +370,7 @@ def test_scn_new_solver_state_joins_fingerprint(monkeypatch):
 
     for name in ("admm_reg", "rho_start", "rho_end"):
         assert name not in _FINGERPRINT_EXCLUDED, (
-            f"{name!r} sits in _FINGERPRINT_EXCLUDED: solver state would be dropped "
-            "from the digest"
+            f"{name!r} sits in _FINGERPRINT_EXCLUDED: solver state would be dropped from the digest"
         )
 
     monkeypatch.delenv("QK_ADMM_REG", raising=False)
@@ -378,8 +381,7 @@ def test_scn_new_solver_state_joins_fingerprint(monkeypatch):
     for kwargs in ({"admm_reg": 4e-2}, {"rho_start": 5e-3}, {"rho_end": 5e-1}):
         other = dataclasses.replace(base, **kwargs)
         assert config_fingerprint(other) != base_fp, (
-            f"a config differing only in {next(iter(kwargs))} hashes identically "
-            "to the base config"
+            f"a config differing only in {next(iter(kwargs))} hashes identically to the base config"
         )
 
     # Effective (env-resolved) values are RECORDED, not folded. The digest must
@@ -388,8 +390,7 @@ def test_scn_new_solver_state_joins_fingerprint(monkeypatch):
     # value is still visible in the artifact, which is what a human needs.
     monkeypatch.setenv("QK_RHO_END", "0.5")
     assert config_fingerprint(base) == base_fp, (
-        "an env-resolved value moved the fingerprint: that is a resume lock, "
-        "not a record"
+        "an env-resolved value moved the fingerprint: that is a resume lock, not a record"
     )
     assert effective_solver_state(base)["rho_end"] == pytest.approx(0.5)
     assert effective_solver_state(base)["rho_end_source"] == "env"

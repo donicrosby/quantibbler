@@ -96,7 +96,16 @@ def test_scn_polish_gamma_rebalance_is_product_invariant():
     bal = magnitude_balance(uu.copy(), vv.copy(), np.ones(24), np.ones(16), target=w)
     bal.s1 = bal.s1 * 1e-6  # force the split polish will inherit
 
-    before = (bal.s1[:, None] * (bal.Ub @ bal.Vb.T)) * bal.s2[None, :]
+    # bal.Ub/Vb are solver artifacts and may be device int8 tensors; int8 `@`
+    # is not implemented on the accelerator ('addmm_cuda' for 'Char'), so the
+    # product is taken in host float64 where +-1 products are exact.
+    from quantibbler.ptq.solver_backend import to_host_np
+
+    ub_h, vb_h = to_host_np(bal.Ub), to_host_np(bal.Vb)
+    s1_h, s2_h = to_host_np(bal.s1), to_host_np(bal.s2)
+    # Hand scales too: multiplying a DEVICE tensor by a host array converts
+    # the device tensor, which raises the same way the copies above did.
+    before = (s1_h[:, None] * (ub_h @ vb_h.T)) * s2_h[None, :]
     ub, vb, s1, s2 = greedy_polish(w, bal.Ub, bal.Vb, bal.s1, bal.s2, rounds=2)
     after = (s1[:, None] * (ub @ vb.T)) * s2[None, :]
 
