@@ -116,3 +116,41 @@ The delta scenario `rho_end_bounded_for_convergence` was amended by the planner 
   supporting evidence that the non-monotone shape is structural, not a fixture artifact.
 
 - `openspec validate qk-fix-admm-solver --strict` re-run after the edit (green below).
+
+## Implementation crystallization — 2026-10-25 (rho_end reconciliation, ruling R4)
+
+**The delta's `rho_end ≤ 1e-1` bound was STALE against the regime the solver
+accepts, and is amended in place to the closed interval `[0.0, 1.0]`.**
+
+- **The shipped regime moved and the delta did not.** Lane-3's normalized
+  regime landed at `97a4725`; `PTQConfig.rho_end` defaults to **`1.0`**
+  (`src/quantibbler/ptq/config.py:181`) with `rho_start = 0.0` and
+  `admm_reg = 3e-2`, and the schema refuses `rho_end < rho_start`
+  (`config.py:303-304`). Folding `≤ 1e-1` into `openspec/specs/qk-ptq/spec.md`
+  would have written a requirement of record that the shipped default
+  violates on every run — the delta out of step with its own code.
+- **The tighter endpoint was refuted operationally.** The faithful-ADMM probe
+  card `t_83ef0ef7` was killed by @user on 2026-10-24 on the forensics that the
+  **rho endpoint cap dominates the SVID-fix effect** in faithful runs — the
+  rho cap, not the proxy, is the dominant lever on the measured residual and
+  cos trajectories. An endpoint retained only because it was once written down,
+  against both the shipped default and the measurement, is precisely the defect
+  this requirement's own last sentence names ("an endpoint that prevents
+  convergence is a defect"). It therefore cannot ride into the requirements of
+  record.
+- **The bounded-shape intent is preserved, only the interval moved.** The
+  requirement still constrains `rho_end` to a stated interval in the normalized
+  regime, and now also names the ordering constraint the schema enforces. The
+  paper prescribes the linear *shape* ([NQ] App. C :3008), never the endpoint —
+  the endpoints are explicitly an implementation choice, which is what makes
+  amending them a reconciliation rather than a paper deviation.
+- `npx --yes @fission-ai/openspec validate qk-fix-admm-solver --strict` re-run
+  after this edit → valid, RC=0.
+
+### Superseded wording
+
+The prior delta sentence read: *"The rho endpoint SHALL be bounded so the
+consensus term does not overwhelm the unit-scale data term: in the normalized
+regime …, `rho_end` SHALL NOT exceed `1e-1`."* That text is retracted and must
+not be quoted as the requirement: it contradicted `config.py:181`. The amended
+sentence above replaces it in the same file.

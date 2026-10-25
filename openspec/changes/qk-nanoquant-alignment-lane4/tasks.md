@@ -1,29 +1,21 @@
-# qk-nanoquant-alignment-lane4 — tasks
+# Tasks: qk-nanoquant-alignment-lane4 (rewritten 2026-10-25)
 
-## Phase 1 — Config knob + fingerprint pin (tests first)
+> **Audit landing note (2026-10-25, `t_039035de`, ruling: verdicts from
+> `qk-spec-audit`).** This `tasks.md` is a REWRITE, not the historical ledger:
+> it replaces the prior task list so the open rows are the change's real
+> backlog. Completed work is summarized above the open rows; the detailed
+> row-by-row history is in git. Any numeric "suite state" reading below is the
+> audit's, taken at the then-current HEAD — re-measure before quoting it.
 
-- [x] (coder) `tests/ptq/test_config.py` — red-first: add the pin that `block_loss_weight` exists, defaults to `"terminal_grad"`, accepts only `{"terminal_grad", "uniform"}`, and that a config differing ONLY in `block_loss_weight` from another produces a different `config_fingerprint` (scenario `loss_weight_knob_joins_checkpoint_fingerprint`). Command: `pytest tests/ptq/test_config.py -q`. Expected: the new asserts FAIL on the knob-less config.
-- [x] (coder) `src/quantibbler/ptq/config.py` — add `block_loss_weight: Literal["terminal_grad", "uniform"] = "terminal_grad"` with `__post_init__` validation and a docstring noting: paper-anchored weighted MSE ([NQ] App. C :3012), weight source is informed assumption IA-1 (design.md), solver state → joins the checkpoint fingerprint. Command: `pytest tests/ptq/test_config.py -q`. Expected: green including the new pins.
+## Completed
 
-## Phase 2 — Weighted MSE in TuneFP (test first)
+Most tasks checked. Code landed: `d8da177`, `45417d4`, `5c73fe0`, `afb220e`. Phases 1-4 mostly complete. Phase 5 (full gate suite) [x]. Orchestrator validate VALID.
 
-- [x] (coder) `tests/ptq/test_tune_loss_weighting.py` — red-first fixture for scenario `weighting_reaches_the_loss_poisoned_weight_changes_loss` (TuneFP half): a toy block with a terminal linear; run `_tune_fp` twice, identical inputs, second run with one entry of the weight statistic poisoned to a sentinel (e.g. ×1e6); assert the two first-step readings differ — a poisoned weight vector changes the step-0 reading. Command: `pytest tests/ptq/test_tune_loss_weighting.py -q -k weighting_reaches_the_loss_poisoned_weight_changes_loss`. Expected: FAIL (loss is plain MSE; poison has no effect). Anchor correction (reconcile): tests are named `test_scn_<scenario_id>` per the spec-naming rule, so the row's `-k tune_fp` selector collects 0; and the stage records no first-step LOSS VALUE — only `stats["gradient_norm"]` (the step-0 loss gradient) — which is what the shipped fixture asserts on.
-- [x] (coder) `src/quantibbler/ptq/block_recon.py` — TuneFP loss site becomes `(w[None, :] * (out - y_b[idx]).pow(2)).mean()` with `w` = detached `robust_diag` of the terminal linear's `d_out_raw` (uniform when mode is `uniform`; fallback path per Phase 4). Site symbol: the loss expression in `_tune_fp` (`block_recon.py:809`; the row's `:667` was pre-change rot). Command: `pytest tests/ptq/test_tune_loss_weighting.py -q -k weighting_reaches_the_loss_poisoned_weight_changes_loss`. Expected: green.
-- [x] (coder) Confirm no regression in the existing teacher guard: `pytest tests/ptq/test_tunefp_teacher.py -q`. Expected: green (guard semantics untouched).
+## Open
 
-## Phase 3 — Weighted MSE in TuneLatentSTE (test first)
+- [ ] Phase 4, box 4: driver-stage-map pin — test/record-surface pin not yet written. Write the pin: a run carrying a fallback event surfaces it in the run record (stage_map/event counts).
+- [ ] Fold surviving REQUIREMENTS into `openspec/specs/`, then archive.
 
-- [x] (coder) `tests/ptq/test_tune_loss_weighting.py` — extend the poisoned-weight fixture to the STE half (scenario `weighting_reaches_the_loss_poisoned_weight_changes_loss`): run `_tune_latent_ste` twice, poisoned statistic on the second run, assert the first-step readings differ. Command: `pytest tests/ptq/test_tune_loss_weighting.py -q -k ste`. Expected: FAIL (plain MSE at the STE loss site).
-- [x] (coder) `src/quantibbler/ptq/block_recon.py` — STE loss site gets the same weighting construction; the weight is applied in the stage's compute dtype, detached, non-trainable. Site symbol: the loss expression in `_tune_latent_ste` (`block_recon.py:1029`; the row's `:871` was pre-change rot). Command: `pytest tests/ptq/test_tune_loss_weighting.py -q -k ste`. Expected: green.
-- [x] (coder) Regression sweep over the touched region: `pytest tests/ptq/test_block_recon.py tests/ptq/test_ste_sign_adaptation.py tests/ptq/test_relative_lr.py -q`. Expected: green.
+## Notes (2026-10-25)
 
-## Phase 4 — Uniform fallback + stage records (tests first)
-
-- [x] (coder) `tests/ptq/test_tune_loss_weighting.py` — red-first fixtures for scenarios `uniform_fallback_recorded_on_down_proj_less_block` and `stage_records_carry_weighting_mode`: (a) a toy block whose linears carry NO down_proj/arch-equivalent terminal name, terminal_grad requested → assert the fallback fires AND the recorder captured a `tune_loss_uniform_fallback` event naming the block and the missing canonical layer; (b) assert the returned `tune_fp` and `ste` records carry `loss_weight` and `loss_weight_source`. Command: `pytest tests/ptq/test_tune_loss_weighting.py -q -k "fallback or record"`. Expected: FAIL (no fallback, no fields). Reconcile note: (b) is asserted inside the same fallback test, over both stages and both modes; there is no separately named `test_scn_stage_records_carry_weighting_mode`.
-- [x] (coder) `src/quantibbler/ptq/block_recon.py` — implement the name-based terminal lookup (canonical `down_proj`, arch-equivalent alias map, uniform fallback + `tune_loss_uniform_fallback` event — never silent), and add `loss_weight` / `loss_weight_source` to both stage records (set at record construction so the vacuous-teacher early return also carries them). Update `TUNE_FP_LOSS_MARKER` to name the [NQ] :3012 weighted-MSE form with the weight source flagged as informed assumption. Command: `pytest tests/ptq/test_tune_loss_weighting.py -q`. Expected: green.
-- [ ] (coder) `tests/ptq/test_driver_stage_map.py` (or qk_report surface) — pin that a run carrying a fallback event surfaces it in the run record (stage_map/event counts), so the fallback is visible in artifacts, not just in-process. Command: targeted pytest. Expected: green.
-- [x] (planner) `npx --yes @fission-ai/openspec validate qk-nanoquant-alignment-lane4 --strict`. Expected: VALID.
-
-## Phase 5 — Full gate suite
-
-- [x] (coder) Run the full gate suite and record results: `pytest tests/ptq tests/test_ci_referee.py tests/test_qk_report.py` + `cargo test` + `cargo clippy --all-targets -- -D warnings` + `cargo fmt --all -- --check` + `maturin build --manifest-path crates/quantibbler-kernels/Cargo.toml`. Expected: all green. Anchor correction (reconcile): the row's `tests/ci/` and `tests/qk_report/` directories do not exist — they are files at the `tests/` root — and a bare `maturin build` at the repo root cannot parse the pure-workspace `Cargo.toml` ("missing field `package`"); the crate-scoped manifest path is the working form. Results recorded in design.md, "Gate run" entry.
+Template rot: `tests/ci/` → `tests/test_ci_referee.py`, `tests/qk_report/` → `tests/test_qk_report.py`, bare `maturin build` → `--manifest-path` form.

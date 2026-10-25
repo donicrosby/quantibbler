@@ -26,7 +26,7 @@ The continuous update SHALL solve `(VᵀV + (ρ+λ)I)Uᵀ = VᵀW~ᵀ + ρ(Z_U �
 
 ### Requirement: The ADMM penalty SHALL follow a linear schedule over K iterations with epsilon as an early stop
 
-The penalty parameter SHALL follow a linear schedule across K outer iterations ([NQ] App. C :3008), and ADMM SHALL stop early when the consensus residual falls below the tolerance epsilon; otherwise it SHALL run to the K-iteration cap. The rho endpoint SHALL be bounded so the consensus term does not overwhelm the unit-scale data term: in the normalized regime (target divided by its Frobenius norm at entry per [NQ] Step 2), `rho_end` SHALL NOT exceed `1e-1`. The paper prescribes the linear shape; the endpoints are an implementation choice, and an endpoint that prevents convergence is a defect.
+The penalty parameter SHALL follow a linear schedule across K outer iterations ([NQ] App. C :3008), and ADMM SHALL stop early when the consensus residual falls below the tolerance epsilon; otherwise it SHALL run to the K-iteration cap. The rho endpoint SHALL stay within the stated endpoint interval so the consensus term does not overwhelm the unit-scale data term: in the normalized regime (target divided by its Frobenius norm at entry per [NQ] Step 2), `rho_end` SHALL lie in the closed interval `[0.0, 1.0]`, with the schema refusing `rho_end < rho_start`. The paper prescribes the linear shape; the endpoints are an implementation choice, and an endpoint that prevents convergence is a defect.
 
 #### Scenario: penalty_schedule_stopping
 

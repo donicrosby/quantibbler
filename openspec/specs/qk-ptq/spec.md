@@ -68,22 +68,44 @@ For each linear layer, the pipeline SHALL form the preconditioned target `W~ = D
 
 ### Requirement: LB-ADMM SHALL iterate continuous updates, SVID proxies, and scaled duals to a stated stopping rule
 
-The continuous update SHALL solve `(VᵀV + (ρ+λ)I)Uᵀ = VᵀW~ᵀ + ρ(Z_U − Λ_U)ᵀ` (Eq. 5) via stabilized Cholesky decomposition, symmetrically for V; system matrices SHALL be symmetric positive definite for ρ > 0, λ ≥ 0 ([NQ] App. B.4, Lemma 2). The proxy update SHALL apply the sign-structure-preserving SVID operator to the consensus variables (Eq. 6), and the dual update SHALL accumulate `Λ ← Λ + U − Z` ([NQ] App. B.3).
+The continuous update SHALL solve `(VᵀV + (ρ+λ)I)Uᵀ = VᵀW~ᵀ + ρ(Z_U − Λ_U)ᵀ` (Eq. 5) via stabilized Cholesky decomposition, symmetrically for V ([NQ] App. B.4, Lemma 2). The proxy update SHALL apply the two-sided optimal rank-1 SVID operator to the consensus variables (Eq. 6): `Z = sign(P) ⊙ (g hᵀ)` where (g, h) is the top rank-1 SVD of `sign(P)∘P` ([NQ] :592, "optimal rank-1 approximation that preserves the sign structure"). The dual update SHALL accumulate `Λ ← Λ + U − Z` ([NQ] App. B.3).
 
 #### Scenario: admm_consensus_convergence
 
 - **WHEN** LB-ADMM factorizes a matrix with an exact rank-r structure
-- **THEN** the consensus residual `max(||U−Z_U||_F, ||V−Z_V||_F)` decreases across iterations and terminates below epsilon or at the K-iteration cap, with the SVID proxy preserving the sign structure of its input at every proxy update
+- **THEN** the consensus residual `max(||U−Z_U||_F, ||V−Z_V||_F)` decreases across iterations and terminates below epsilon or at the K-iteration cap
+- **AND** the SVID proxy preserves the sign structure of its input at every proxy update
+
+#### Scenario: svid_is_two_sided_optimum
+
+- **WHEN** the SVID proxy processes a consensus variable `P = U + Λ` with sign structure `S = sign(P)`
+- **THEN** the returned Z is `S ⊙ (g hᵀ)` where (g, h) are the top rank-1 SVD factors of `S∘P`
+- **AND** for a column-constant input the two-sided optimum is exactly the column-only solution — the fix is a strict superset, never a regression on the existing test fixtures
+
+#### Scenario: svid_sign_preserved
+
+- **WHEN** SVID processes any input matrix
+- **THEN** `sign(Z) == sign(input)` entrywise, with sign(0) = +1 per the A-11 convention
+- **AND** dead columns (all-zero input) receive the positive `DEFAULT_SCALE_FLOOR`
 
 ### Requirement: The ADMM penalty SHALL follow a linear schedule over K iterations with epsilon as an early stop
 
-The penalty parameter SHALL follow a linear schedule across K outer iterations ([NQ] App. C, App. D.4), and ADMM SHALL stop early when the consensus residual falls below the tolerance epsilon; otherwise it SHALL run to the K-iteration cap.
+The penalty parameter SHALL follow a linear schedule across K outer iterations ([NQ] App. C :3008), and ADMM SHALL stop early when the consensus residual falls below the tolerance epsilon; otherwise it SHALL run to the K-iteration cap.
 
 #### Scenario: penalty_schedule_stopping
 
 - **WHEN** LB-ADMM runs with default ADMM parameters on a fixed target
 - **THEN** the penalty value increases linearly per iteration up to K, and the solver halts at whichever comes first: residual below epsilon or the K-th iteration
+### Requirement: The rho endpoint SHALL lie in the stated interval in the normalized regime
 
+The rho endpoint SHALL stay within the stated endpoint interval so the consensus term does not overwhelm the unit-scale data term: in the normalized regime (target divided by its Frobenius norm at entry per [NQ] Step 2), `rho_end` SHALL lie in the closed interval `[0.0, 1.0]`, with the schema refusing `rho_end < rho_start`. The paper prescribes the linear shape; the endpoints are an implementation choice, and an endpoint that prevents convergence is a defect.
+
+#### Scenario: rho_end_bounded_for_convergence
+
+- **WHEN** LB-ADMM factorizes a planted rank-32 target at rank-64 factorization (`gamma=0.2`; warm-start cos ≥0.99 — the fixture the convergence gate exercises) with the paper's `tau`/`gamma` preconditioning; real-layer evidence: all 20 recorded `layers.0` probe rows in `artifacts/lane0-fire-r3-20261024/rows.jsonl` are non-monotone (2–66 rises each; one row — arm B `self_attn.o_proj` — does not net-decrease over the first 200), confirming the shape is structural, not a fixture artifact
+- **THEN** the consensus residual makes net progress across the first 200 iterations (net decrease from start of the second half, with the first half dominated by the consensus-term pull onto the ±1 proxy before the data term reasserts itself) and the solver terminates at the K-iteration cap — `converged=False` is expected with a ±1-structured proxy and does not indicate solver failure
+- **AND** the post-iteration continuous reconstruction satisfies `cos(UVᵀ, W) > 0.5`, proving the ADMM produces a usable initializer (cos loss from the unconstrained truncated-SVD warm start is expected; the SVID proxy pushes latents into the ±1-signed rank-1 subspace, and the paper's pipeline compensates in STE refinement per [NQ] Step 3)
+- **AND** `cos(UVᵀ, W) > cos(sign(zu) @ sign(zv)ᵀ, W)` — the continuous reconstruction beats a naive sign-only assignment, proving the ADMM iteration does meaningful work beyond trivial binarization
 ### Requirement: LB-ADMM SHALL conclude with latent magnitude balancing that yields Ub, Vb, s1, s2
 
 Upon ADMM convergence, the pipeline SHALL recover unscaled proxies `Û = D~_out⁻¹ P_U`, `V̂ = D~_in⁻¹ P_V`, compute the equilibrium factor `η = sqrt(||V̂||_F / ||Û||_F)` (Eq. 7), extract scales `[s1]_i = mean(|η û_i|)`, `[s2]_j = mean(|η⁻¹ v̂_j|)` (Eq. 8), and set final latents `U = η Û`, `V = η⁻¹ V̂` (Eq. 9) ([NQ] Step 2-3). Initialization of the layer is complete only when all of (Ub, Vb, s1, s2) are produced.
@@ -92,7 +114,15 @@ Upon ADMM convergence, the pipeline SHALL recover unscaled proxies `Û = D~_out
 
 - **WHEN** ADMM converges and magnitude balancing executes on the recovered proxies
 - **THEN** the balanced factor norms satisfy the η relation of Eq. 7, the extracted scales equal per-row mean absolute values per Eq. 8, and no scale entry is NaN; an all-zero row receives the clamped scale floor rather than an undefined value
+### Requirement: The ADMM exit SHALL rescale to preserve scale equivariance
 
+The ADMM exit SHALL rescale factors from the normalized space back to the target's scale with `factor_scale = sqrt(target_scale)` applied to each of `(U, V, P_U, P_V)` — a single factor of `target_scale` on the product `UVᵀ`, maintaining scale equivariance: scaling the entry target by `c` SHALL scale the returned product by `c`, not `c²`.
+
+#### Scenario: exit_rescale_is_equivariant
+
+- **WHEN** the ADMM entry target is scaled by a nonzero factor c
+- **THEN** the returned product `UVᵀ` scales by exactly c — not c² — verified within relative tolerance 1e-5
+- **AND** the iteration trajectory in the normalized space is identical regardless of the entry scale
 ### Requirement: Block-wise reconstruction SHALL refine factors against quantized-prefix inputs and teacher targets
 
 Phase 2 SHALL process transformer blocks sequentially. For each block it SHALL capture inputs `X_b` by pushing calibration data through the already-quantized prefix and teacher outputs `Y_b` from the fp block ([NQ] Algorithm 1 lines 9–10), and SHALL tune the block's fp weights against (X_b, Y_b) for T_pre steps before factorization ([NQ] Step 1, error propagation mitigation).
@@ -641,3 +671,206 @@ Any harness change that touches a production import SHALL be accompanied by the 
 
 - **WHEN** a Lane 0 fire is staged
 - **THEN** the harness change's surface table exists with every production touchpoint row citing its call-site line, all rows read `matches`, and any DEFECT row blocks the launch — instance six gets caught by a grep, not a floor-switch
+
+### Requirement: Checkpoint resume SHALL bind the model identity
+
+The resume fingerprint SHALL bind the identity of the model being quantized: the
+quantized-parameter scope's module inventory, each module's `(dout, din)` shape, and
+its weight dtype, all derived from the LIVE model at fingerprint-write time. A resume
+SHALL refuse a diverged identity, naming the diverged component(s), and SHALL refuse a
+directory with no recorded identity. A repository id or path SHALL NOT be the identity.
+
+#### Scenario: model_identity_binds_the_resume
+
+- **WHEN** a checkpoint directory written while quantizing model A is resumed by a run
+  quantizing model B under an identical `PTQConfig`
+- **THEN** `check_fingerprint` raises before any block archive is applied, and no
+  block of B is restored from A's archives
+
+#### Scenario: model_identity_mismatch_names_the_divergence
+
+- **WHEN** the live model's quantized-parameter scope differs from the recorded
+  identity in module membership, in a per-module `(dout, din)` shape, or in a weight
+  dtype
+- **THEN** the refusal names the diverged module(s) and what diverged about them, so
+  the mismatch is diagnosable from the error alone
+
+#### Scenario: legacy_fingerprint_without_model_identity_is_refused
+
+- **WHEN** a checkpoint directory's `fingerprint.json` carries no model-identity
+  component (it was written before this binding existed)
+- **THEN** the resume refuses and says the directory predates the model-identity
+  component, so its provenance with respect to the live model cannot be verified
+
+#### Scenario: driver_default_checkpoint_dir_is_per_run
+
+- **WHEN** `tools/quantize_hf_model.py` runs without an explicit `--checkpoint-dir`
+- **THEN** it checkpoints into a FRESH per-run directory rather than a shared stable
+  path, so two defaulted launches never share block archives; resumption is opt-in by
+  naming the directory, and the chosen directory is named in the launch's output
+
+### Requirement: Calibration and eval data knobs SHALL count sequences, not packed batches
+
+The `--calibration-seqs` and `--eval-seqs` knobs SHALL denote **sequences**, matching the [NQ] protocol unit (128 calibration sequences, [NQ] Sec 3.4/App. C). The loader SHALL convert sequences to packed batches internally (`n_chunks = N // BATCH`, `BATCH = 8`), fail-closed when N is not divisible by BATCH, and the reported counter SHALL be computed at the same boundary as the chunking — before any tune-window slice that changes the chunk count.
+
+#### Scenario: calibration_knob_counts_sequences
+
+- **WHEN** the driver runs with `--calibration-seqs 128`
+- **THEN** the loader produces chunks covering exactly 128 sequences (16 packed batches of 8)
+- **AND** the reported `calibration_rows` equals 128, matching the [NQ] protocol, so the report's deviation flag does not fire
+- **AND** the counter is computed before the `tune_seq_len != seq_len` slice at the loader/driver boundary (a fix placed after that slice computes the value 4× too large under `TUNE_SEQ_LEN=512`)
+
+#### Scenario: calibration_knob_fails_closed_on_odd_count
+
+- **WHEN** `--calibration-seqs` is not divisible by the packed batch size
+- **THEN** the driver exits nonzero with an error naming the knob and the divisibility requirement
+
+#### Scenario: eval_knob_counts_sequences
+
+- **WHEN** the driver derives the maximal local eval window
+- **THEN** `--eval-seqs` denotes sequences and the window derivation is expressed in sequences (18 batches of 8 re-expressed as 144 sequences), with the eval gate comparing like units at every comparison
+
+#### Scenario: red_first_unit_test
+
+- **WHEN** the unit tests run against the pre-fix driver
+- **THEN** an end-to-end assertion `len(calib) * BATCH == CALIBRATION_SEQS` fails with the current value 1024 (red-first), and passes after the fix with 128
+
+### Requirement: The fail-fast verdict machinery SHALL prove geometry-invariance or re-derive constants per geometry
+
+Every gate constant used by the prefix fail-fast verdict SHALL either be geometry-invariant by construction or be re-derived per geometry. The collapse line, pedestals, and the prefix probe each follow the classification stated in the scenarios below.
+
+#### Scenario: collapse_line_is_paper_anchored
+
+- **WHEN** any run evaluates the depth-2 prefix ratio against the collapse line
+- **THEN** the line is exactly the published-anchor derivation asserted in `tests/test_qk_report.py`, with no run-specific calibration and no code movement on geometry change
+
+#### Scenario: pedestal_tracks_geometry
+
+- **WHEN** a run changes calibration or eval geometry
+- **THEN** its baseline and fp-prefix pedestals are measured at that run's own geometry and recorded in the run's provenance before any ratio verdict is computed
+
+#### Scenario: prefix_probe_same_depth_same_object
+
+- **WHEN** the prefix probe computes its ratio
+- **THEN** the quantized-prefix PPL and the fp-prefix PPL are measured on the same object at the same depth, dividing depth-dependent floor effects out of the ratio
+
+### Requirement: The pipeline SHALL be held to a paper-recreation bar pinned to [NQ] Table 2 rows for Qwen3-0.6B
+
+An acceptance run SHALL demonstrate, on Qwen3-0.6B over [NQ]'s WikiText-2 sequence-length-2048 protocol, a perplexity at or below `1.15 * row` for one of the three NanoQuant rows of [NQ] Sec. 4.2 Table 2 (27.56 @1.00 bits, 33.79 @0.80 bits, 52.94 @0.55 bits, against the 12.66 baseline), with byte-derived `effective_bpw` at or below the targeted row's bit budget.
+
+#### Scenario: bar_constants_asserted
+
+- **WHEN** the suite runs
+- **THEN** a test asserts the four row constants and the tolerance arithmetic (`1.15 * row` for each targeted row) are the values pinned in this delta, and that no runtime path recomputes them
+
+#### Scenario: bar_undefined_below_lowest_row
+
+- **WHEN** an artifact's bit budget is below 0.55 bits
+- **THEN** no recreation row exists for it; it is beyond-paper research — never recorded under the word recreation, never granted ledger status on interpolation
+
+#### Scenario: bar_tolerance_provisional_until_measured
+
+- **WHEN** artifacts are still far from any row
+- **THEN** the 1.15 tolerance stands as the pre-registered provisional, and the first artifact landing within 2x of a targeted row obligates re-deriving the tolerance from that artifact's measured run-to-run eval variance and re-pinning it as a spec change
+
+#### Scenario: bar_never_recalibrates_the_band
+
+- **WHEN** a band-edge recalibration is ever proposed
+- **THEN** moving an edge so a paper-reference artifact (including [NQ]'s own rows, e.g. @0.55 ratio 4.18) reads `ok` is prohibited — the band is never tuned to flatter a reference; it recalibrates only from production healthy-extreme evidence
+
+#### Scenario: bar_not_purchased_with_bits
+
+- **WHEN** an artifact claims a bar row
+- **THEN** its serialized-byte `effective_bpw` is at or below that row's bit budget — a lower PPL at a higher bit budget meets no row
+
+#### Scenario: bar_requires_paper_protocol
+
+- **WHEN** an acceptance run executes
+- **THEN** it evaluates at sequence length 2048 over the WT2 test partition per [NQ] Sec. 4.2; seq-512 numbers alone are recorded alongside, never substituted for the bar
+
+#### Scenario: bar_recorded_not_gated
+
+- **WHEN** an acceptance run completes
+- **THEN** a ledger entry records model id, commit hash, targeted row, eval protocol, measured PPL, ratio, effective_bpw, and the operational-gate verdict — the bar is a documented human-gated acceptance criterion, not a per-run gate verdict
+
+#### Scenario: bar_distinct_from_landing_gate
+
+- **WHEN** any artifact is classified
+- **THEN** the `ok/degraded/failed` band remains the only per-run verdict; an `ok` artifact may still be below the bar, and no artifact above the bar receives `ok` on bar evidence alone
+
+### Requirement: The PTQ driver SHALL support independent tune and evaluation sequence lengths
+
+The driver's `--seq-len` SHALL remain the evaluation geometry, and a `--tune-seq-len` flag SHALL bound the per-block reconstruction windows independently. When `--tune-seq-len` is unset it SHALL default to `--seq-len`, preserving single-geometry behavior exactly.
+
+#### Scenario: split_mode_preserves_eval_geometry
+
+- **WHEN** the driver runs with `--seq-len 2048 --tune-seq-len 512`
+- **THEN** evaluation PPL runs over 2048-token WT2 test sequences while block reconstruction tunes on 512-token windows, and the report records both lengths
+
+#### Scenario: default_single_geometry_unchanged
+
+- **WHEN** `--tune-seq-len` is unset
+- **THEN** tuning windows use `--seq-len` exactly as before the flag existed — existing run behavior is unchanged and no silent geometry change occurs
+
+### Requirement: The ADMM solver SHALL default to the torch backend with NumPy unit-test-only
+
+The solver SHALL default to the torch backend, the only backend that produces artifacts, resolved fail-closed once per run with the `QK_RHO_END` provenance idiom. NumPy SHALL execute ONLY inside unit tests, as the parity reference — never in a fire, harness, or integration path — with NO fallback: a torch request without an accelerator SHALL fail rather than resolve to NumPy. `solver_is_admm` SHALL remain an algorithm condition.
+
+#### Scenario: backend_knob_provenance
+
+- **WHEN** a run selects `SOLVER_BACKEND=torch` (or resolves the default)
+- **THEN** launch.env, the checkpoint fingerprint, and every solver-probe row record backend and dtype
+- **AND** the default resolves to torch — the accelerated backend
+- **AND** a torch backend without an available accelerator device fails closed at startup, on the same pattern as `GPU=1` requiring a rocm-tagged image — a torch backend running on CPU is a slowdown wearing an optimization's name
+
+#### Scenario: numpy_is_unit_test_only
+
+- **WHEN** the NumPy backend executes
+- **THEN** it executes inside a unit test and nowhere else — no fire, no harness, no integration path
+
+#### Scenario: admm_algorithm_unchanged
+
+- **WHEN** either backend factorizes a matrix
+- **THEN** it executes the same continuous-update, SVID-proxy, dual-update, and magnitude-balance steps, and `solver_is_admm` remains true on either backend
+
+### Requirement: Backend parity SHALL be established by unit tests with torch-only production rows
+
+The torch backend SHALL be accepted on its unit-test parity suite — the only place the NumPy reference executes — together with the campaign's measured tolerance record (fp32 GPU ≡ fp64 CPU within ±0.002 on production layers). Production and probe fires are torch-only, and every probe row SHALL carry row-time so the measured win replaces the estimate.
+
+#### Scenario: torch_only_fire_rows
+
+- **WHEN** the Lane 0 fire executes
+- **THEN** all 20 solves run on torch, no NumPy process runs, and every row carries row-time alongside recon cos, residual trajectory, n_iter, and min_eigs
+
+#### Scenario: unit_test_parity_is_the_gate
+
+- **WHEN** the backend's parity suite runs as unit tests
+- **THEN** tests compare reconstructed products (sign-ambiguity-safe) within the tolerance class, and a failing parity test blocks acceptance
+
+#### Scenario: tolerance_breach_named
+
+- **WHEN** any parity unit test moves outside the tolerance class
+- **THEN** the failing test names the operation and its delta, and acceptance fails instead of passing silently
+
+### Requirement: Checkpoint restore SHALL refuse a mis-shaped state before writing any layer
+
+Checkpoint restore SHALL validate each stored state's arrays against the live
+linear's weight and bias shapes before writing any layer. A state whose
+Ub/Vb/s1/s2/bias cannot factorize to the live `(dout, din)` weight SHALL raise
+naming the block, layer, and stored shapes, leaving the block untouched.
+
+#### Scenario: restore_refuses_mis_shaped_state
+
+- **WHEN** a resumed run applies a checkpointed state whose arrays cannot
+  produce the live linear's weight `(dout, din)` — Ub not `(dout, r)`, Vb not
+  `(din, r)` with a shared r, s1 not `(dout,)`, s2 not `(din,)`, or a stored
+  bias not `(dout,)`
+- **THEN** `apply_layer_states` raises a RuntimeError naming the block, the
+  layer, the stored shapes, and the live weight shape, refusing to write the
+  state
+
+#### Scenario: mis_shaped_refusal_leaves_block_untouched
+
+- **WHEN** a right-key/wrong-shape archive is applied to a multi-layer block
+- **THEN** the raise fires before the first `copy_`, and every linear's weight
+  in the block is bit-identical to its value before the restore

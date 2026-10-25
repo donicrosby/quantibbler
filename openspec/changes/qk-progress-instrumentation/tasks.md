@@ -1,39 +1,23 @@
-# qk-progress-instrumentation — tasks
+# Tasks: qk-progress-instrumentation (rewritten 2026-10-25)
 
-## 1. `ProgressReporter` class
+> **Audit landing note (2026-10-25, `t_039035de`, ruling: verdicts from
+> `qk-spec-audit`).** This `tasks.md` is a REWRITE, not the historical ledger:
+> it replaces the prior task list so the open rows are the change's real
+> backlog. Completed work is summarized above the open rows; the detailed
+> row-by-row history is in git. Any numeric "suite state" reading below is the
+> audit's, taken at the then-current HEAD — re-measure before quoting it.
 
-- [x] 1.1 Create `src/quantibbler/ptq/progress.py` with `ProgressReporter(phase, total, *, target, rate_constants, clock, stream, interval_s, interval_steps, max_sane_eta)`; sinks attach via `register_sink`, never a constructor argument
-- [x] 1.2 Implement cadence-bounded update: emit when `elapsed >= PROGRESS_INTERVAL_S` OR the step count since the last emit `>= PROGRESS_INTERVAL_STEPS`, whichever comes first (the first tick always emits; a step delta, not `iter % N`, so a time-cadence emission cannot re-emit inside the step window)
-- [x] 1.3 Implement ETA computation: `fraction_remaining = (total - done) / total; eta_s = fraction_remaining * work_units * rate_for(phase, target)` — checked against the per-phase rate constants and fenced by `MAX_SANE_ETA` (per-loop model, design.md Decision 2)
-- [x] 1.4 Implement dual-sink dispatch: `attach_telemetry` → telemetry column, `attach_breadcrumbs` → `qkb:progress ...`
-- [ ] 1.5 Heartbeat: `MemTelemetry` thread calls `reporter.tick()` with current phase/iter on every sample — **deferred: the `MemTelemetry` host was retired by e5c6939 (Lane 1 rewrite); `ProgressReporter.heartbeat()` exists but has zero production callers at HEAD. Needs a timer thread that exists.**
+## Completed
 
-## 2. Progress constants
+Core `ProgressReporter` landed (`50e3c73`, `cae79b9`, etc). Tasks 1.1–1.4 (class + cadence + ETA + dual-sink dispatch) [x]. Tasks 2.1–2.2 (progress constants) [x]. Tasks 3.2–3.3 (lb_admm and block_recon integration) [x]. Task 6 (tests: cadence, ETA, dual-sink, mock loop, forensic tail, stale constants) [x].
 
-- [x] 2.1 Create `src/quantibbler/ptq/progress_constants.py` with the measured rate dict
-- [x] 2.2 Stale-constants detection: compare recorded date/commit/ROCm/PT version at init
+## Open
 
-## 3. Integration into existing loops
+- [ ] 1.5 Heartbeat: `MemTelemetry` host was retired by `e5c6939` (Lane 1 rewrite). `ProgressReporter.heartbeat()` exists but has zero production callers at HEAD. Needs a timer thread.
+- [ ] 3.1 Wire into `run_arms`'s statistics phase — **moot**: `run_arms` and lane0 harness retired by `e5c6939`; replacement `calibration.collect_stats` is a one-shot pass that does not need a progress reporter. Close with disposition note.
+- [ ] 4.1–4.2 Telemetry CSV integration: `MemTelemetry` host retired. The `jsonl_sink` and `attach_telemetry` functions exist but have zero production callers at HEAD. Needs a telemetry collector that registers the sink.
+- [ ] 5.1 PTQ breadcrums: `breadcrumb_sink` and `attach_breadcrumbs` exist but have zero production callers at HEAD. Wire-up: call `attach_breadcrumbs` at reporter construction time in the three existing loops (admm, tunefp, ste).
 
-- [ ] 3.1 Wire `ProgressReporter` into `run_arms`'s statistics phase (one reporter per arm) — **moot: `run_arms` and the lane0 harness were retired by e5c6939; the replacement `calibration.collect_stats` is a one-shot pass that does not need a progress reporter.**
-- [x] 3.2 Wire `ProgressReporter` into `lb_admm.py`'s solve loop (400 iterations → ~40 lines; ruling: the cadence rule produces ~40 at 0.2s/iter — the spec number was wrong, not the code)
-- [x] 3.3 Wire `ProgressReporter` into `block_recon.py`'s TuneFP and STE stages
+## Notes (2026-10-25)
 
-## 4. Telemetry CSV integration
-
-- [ ] 4.1 Add `progress_json` column to telemetry CSV header — **deferred: the `MemTelemetry` host was retired by e5c6939; the `jsonl_sink` and `attach_telemetry` functions exist in `progress.py` but have zero production callers at HEAD. Wire-up needs a telemetry collector that registers the sink.**
-- [ ] 4.2 Write progress line on every telemetry sample during solve mode — **deferred: same host dependency as 4.1.**
-
-## 5. PTQ breadcrumbs
-
-- [ ] 5.1 Write `qkb:progress ...` on every cadence tick during ptq mode — **deferred: the `breadcrumb_sink` and `attach_breadcrumbs` functions exist in `progress.py` but have zero production callers at HEAD. The existing `_note_block_progress` writes stage markers to the breadcrumb file directly (not through ProgressReporter). Wire-up: call `attach_breadcrumbs` at reporter construction time in the three existing loops (admm, tunefp, ste).**
-- [x] 5.2 Verify watchdog's existing stall detector parses the line unchanged
-
-## 6. Tests
-
-- [x] 6.1 Unit: `ProgressReporter` cadence logic (5s / 10 steps, whichever first)
-- [x] 6.2 Unit: ETA computation and sanity check (suppress at 4h)
-- [x] 6.3 Unit: dual-sink dispatch writes correct format to each sink
-- [x] 6.4 Integration: a 10-step mock loop writes 1 line, not 10 (the cadence bounds output; the test name still says `to_two_lines` — non-blocking, recorded)
-- [x] 6.5 Integration: killed process leaves forensic tail (last-written line visible)
-- [x] 6.6 Unit: stale-constants warning emitted on version mismatch
+The deferred items all share one dependency: a runtime host (telemetry collector, breadcrumb caller) that doesn't exist. The core class and its unit tests are complete. When a telemetry collector or breadcrumb host is re-introduced, the wire-up is a one-line call at construction time per loop.
