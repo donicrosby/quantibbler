@@ -37,7 +37,10 @@ import pytest
 import torch
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-DRIVER = REPO_ROOT / "tools" / "quantize_hf_model.py"
+# The RED records are taken against the PRE-FIX driver revision, so the path is
+# overridable: `QHFM_DRIVER=<pre-fix driver> uv run pytest ...` reproduces the
+# red-first failure without touching the working tree.
+DRIVER = pathlib.Path(os.environ.get("QHFM_DRIVER", REPO_ROOT / "tools" / "quantize_hf_model.py"))
 
 VOCAB = 512
 SEQ_LEN = 32
@@ -45,6 +48,8 @@ BLOCKS = 3
 DRIVER_TIMEOUT = 900
 
 CALIBRATION_SEQS = 128  # the [NQ] protocol value, in sequences
+PAPER_SEQ_LEN = 2048  # the protocol sequence length ([NQ] Sec 3.4/App. C)
+PAPER_BLOCKS = 145  # wikitext-2 test at 2048: the maximal local eval window
 
 
 def _load_driver():
@@ -171,19 +176,43 @@ def test_help_text_names_the_knobs_unit():
 # --- the eval axis -----------------------------------------------------------
 
 
-def test_eval_window_re_expresses_in_sequences(driver):
-    """The maximal local window is expressed in sequences: 18 batches -> 144.
+def test_eval_knob_counts_sequences(driver):
+    """Spec scenario ``eval_knob_counts_sequences``: 18 batches -> 144 sequences.
 
-    ``evaluation_record`` keeps its ``full_local_window_batches`` key (a harness
-    fact, asserted by its own tests); the *gate* compares like units, so the
-    window it demands is ``batches * BATCH``. At the paper geometry (wikitext-2
-    test, seq 2048) that is 145 blocks -> 18 batches -> 144 sequences, which is
-    the number ``--eval-seqs`` must now carry.
+    The derivation is the driver's own, fed the run record it is actually fed:
+    ``evaluation_record`` at the paper geometry (wikitext-2 test, seq 2048)
+    gives 145 blocks and keeps ``full_local_window_batches == 18`` — a harness
+    fact in BATCHES, pinned as such by the report's own tests — while
+    ``--eval-seqs`` counts SEQUENCES, so the paper-faithful gate's demanded
+    value is ``eval_window_sequences(record) == 18 * BATCH == 144``. A gate
+    comparing the knob against the raw batch count would call an 18-sequence
+    window (2 batches) maximal.
+
+    RED-FIRST RECORD (pre-fix driver, ``84b4615^``): this test fails with
+    ``AttributeError: module 'qhfm_geometry' has no attribute
+    'eval_window_sequences'`` — the sequence-unit derivation does not exist
+    there. The unit defect it replaces was observable at the CLI: the pre-fix
+    ``--help`` read ``--eval-seqs 5 batches of 8 = 40 eval rows`` and the gate
+    demanded ``--eval-seqs {batches}``, so ``18`` named 18 packed batches (144
+    sequences) and 144 was not a legal value of the knob at all.
     """
-    full_blocks = 145
-    batches = full_blocks // driver.BATCH
-    assert batches == 18
-    assert batches * driver.BATCH == 144
+    evaluation = driver.evaluation_record(
+        evaluator=driver.EVAL_EVALUATOR,
+        source_tokens=PAPER_BLOCKS * PAPER_SEQ_LEN,
+        seq_len=PAPER_SEQ_LEN,
+        selected_blocks=0,
+        batch=driver.BATCH,
+        selection_seed=0,
+        selection_fingerprint="0" * 16,
+    )
+    assert evaluation["full_blocks"] == PAPER_BLOCKS == 145
+    assert evaluation["full_local_window_batches"] == 18
+    window = driver.eval_window_sequences(evaluation)
+    assert window == 144 == 18 * driver.BATCH
+    # The unit is not cosmetic: the raw batch count is a different number, and
+    # the knob's own conversion is the exact inverse of the derivation.
+    assert window != evaluation["full_local_window_batches"]
+    assert driver.packed_chunks(window, "--eval-seqs") == evaluation["full_local_window_batches"]
 
 
 # --- wiring: the driver actually uses the boundary ---------------------------
