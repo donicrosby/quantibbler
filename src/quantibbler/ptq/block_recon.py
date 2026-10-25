@@ -70,15 +70,19 @@ from .solver_backend import to_host_np
 
 # Artifact markers (greppable in code, spec, and the run record).
 #
-# ``TUNE_FP_LOSS_MARKER`` — the corpus names the TuneFP call but never writes
-# its internal loss formula; this stage uses the block-output squared error
-# against the cached teacher (design.md, "Remaining informed assumption").
+# ``TUNE_FP_LOSS_MARKER`` — the corpus names the TuneFP call AND anchors the loss
+# FORM ("weighted MSE", [NQ] App. C :3012) but writes no weight formula. This stage
+# weights the block-output squared residual against the cached teacher by the terminal
+# linear's robust-diagonalized Phase-1 output statistic; WHICH statistic does the
+# weighting is the design's informed assumption IA-1, not a paper pin. The marker
+# therefore declares the anchor (nq_3012) and the assumption together, so a reader of
+# a run record cannot mistake one for the other.
 # ``STE_RESCOPE_MARKER`` — a scoped linear whose refinement produced zero
 # accepted sign flips is declared scale-only in the run record under this
 # marker (qk-fix-ste-sign-adaptation, scenario
 # ``sign_adaptation_is_effective_or_declared``); a zero-flip completion
 # without the declaration is impossible by construction.
-TUNE_FP_LOSS_MARKER = "tune_fp_loss: informed_assumption"
+TUNE_FP_LOSS_MARKER = "tune_fp_loss: weighted_mse_nq_3012 (weight source: informed_assumption)"
 STE_RESCOPE_MARKER = "ste_scale_only_declared"
 
 
