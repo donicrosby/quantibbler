@@ -97,16 +97,24 @@
 
 ## Phase 4 — Gate suite
 
-- [ ] (coder) Full gate suite: `pytest tests/ptq/ tests/ci/ tests/qk_report/` +
-      `cargo test` + `cargo clippy --all-targets -D warnings` + `cargo fmt --check` +
-      `maturin build`. All green required. Record results.
-      *(Status 2026-10-25 (t_2d5b0a67): LEFT UNTICKED — not literally green, so the
-      row's own "All green required" text is not true of the tree. Rust legs green
-      (kernels-scoped and CI-exact forms + `maturin build --manifest-path`); the
-      pytest leg is red only on co-tenant uncommitted edits — `8 failed, 430 passed,
-      3 skipped, 4 deselected` (dev CPU wheel) / `12 failed, 426 passed, 3 skipped,
-      4 deselected` (`quantibbler-ptq:rocm-official`); a clean HEAD worktree runs the
-      same red files 116 passed. Two doc facts: `tests/ci/ tests/qk_report/` do not
-      exist (RC=4), and bare `uv run maturin build` at the root fails on the workspace
-      manifest — the working form is `--manifest-path
-      crates/quantibbler-kernels/Cargo.toml`. Full evidence on card t_2d5b0a67.)*
+- [x] (coder) Full gate suite (commands corrected 2026-10-25 — this repo has no
+      `tests/ci/` or `tests/qk_report/`, and `maturin build` needs a
+      `--manifest-path`): `uv run --no-sync --extra torch --extra kernels --extra hf
+      pytest` (root, full suite) + `cargo test` + `cargo clippy --all-targets -D
+      warnings` + `cargo fmt --check` (kernels-scoped) + `maturin build
+      --manifest-path crates/quantibbler-kernels/Cargo.toml`. All green required.
+      Record results.
+      *(Closed 2026-10-25 (t_6ed481cc, the wave-disposition landing card). This note
+      supersedes the attributed-RED status recorded here earlier the same day: the
+      four `test_progress.py` reds and four `test_qk_report.py` reds it reported were
+      co-tenant wave damage (the progress.py ETA rework and qk-launch-attribution's
+      scratch-root extraction breaking qk-ci-referee's scratch-dir pin), and both
+      surfaces were landed with their owners in that pass.
+      Observed on the CLEAN tree: `tests` **756 passed** in 65.90s; `tests/ptq`
+      **257 passed, 3 skipped, 4 deselected** in 626.96s; suite rc=0 (1013 passed,
+      0 failed). Interpreter `/opt/venv`, `torch 2.14.1+cpu`,
+      `cuda.is_available()=False` — the dev CPU wheel, so the accelerated pair is
+      still unmeasured here. Rust: `cargo test` 24 passed rc=0; `cargo clippy
+      --all-targets -- -D warnings` rc=0; `cargo fmt --all -- --check` rc=0;
+      `pre-commit run --all-files` rc=0. The 4 deselected are the default marker
+      filter's integration tests, not a silent skip.)*
