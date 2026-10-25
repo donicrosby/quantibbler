@@ -25,13 +25,17 @@ import pytest
 import torch
 from torch import nn
 
-from quantibbler.ptq import block_recon, calibration
+from quantibbler.ptq import _factorized, block_recon, calibration
 from quantibbler.ptq.block_recon import FactorizedLinear, _set_linear, reconstruct_block
 from quantibbler.ptq.checkpoints import config_fingerprint
 from quantibbler.ptq.config import PTQConfig
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-MODULE_PATH = REPO_ROOT / "src" / "quantibbler" / "ptq" / "block_recon.py"
+#: The D-1 cluster -- ``_factor_terms`` and the three expression sites that must
+#: consult it -- lives in ``_factorized``. The pin parses the module that OWNS
+#: the helper, and the three sites must stay in
+#: it: separating them is what the pin exists to forbid.
+MODULE_PATH = REPO_ROOT / "src" / "quantibbler" / "ptq" / "_factorized.py"
 MODULE_SRC = MODULE_PATH.read_text()
 
 _HELPER = "_factor_terms"
@@ -55,9 +59,9 @@ def _fac(d: int = 6, r: int = 3, seed: int = 0, **kwargs) -> FactorizedLinear:
 
 
 def _helper():
-    fn = getattr(block_recon, _HELPER, None)
+    fn = getattr(_factorized, _HELPER, None)
     assert fn is not None, (
-        f"block_recon has no {_HELPER!r} -- D-1 requires ONE definition of a "
+        f"_factorized has no {_HELPER!r} -- D-1 requires ONE definition of a "
         "factorized layer's effective terms, consulted by all three sites"
     )
     return fn
@@ -316,7 +320,7 @@ def test_live_ste_path_consults_the_helper(monkeypatch):
         calls.append(factor_mode)
         return real(fac, activation_dtype, factor_mode)
 
-    monkeypatch.setattr(block_recon, _HELPER, spy, raising=False)
+    monkeypatch.setattr(_factorized, _HELPER, spy, raising=False)
     block = _ScopedBlock(6, seed=7)
     _events(PTQConfig(solver_backend="numpy", rank=3), block)
     assert calls, "the live STE path never consulted the helper"
@@ -336,7 +340,7 @@ def test_set_linear_consults_the_helper_by_spy_not_just_by_equality(monkeypatch)
         calls.append(factor_mode)
         return real(fac, activation_dtype, factor_mode)
 
-    monkeypatch.setattr(block_recon, _HELPER, spy, raising=False)
+    monkeypatch.setattr(_factorized, _HELPER, spy, raising=False)
     fac = _fac(seed=14)
     linear = nn.Linear(fac.din, fac.dout, dtype=torch.float64)
     _set_linear(linear, fac, factor_mode="binary")

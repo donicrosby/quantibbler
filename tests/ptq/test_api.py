@@ -207,7 +207,7 @@ def test_scn_phase1_statistics_are_collected_once_over_the_pristine_model(monkey
     stream — line 9's TUNING input — instead of the paper's raw calibration
     set. `collect_stats` is booby-trapped here: any per-block call fails.
     """
-    from quantibbler.ptq import block_recon as br
+    from quantibbler.ptq import _block_stage as stage
 
     model = _TinyApiModel(seed=11)
     batches = _calib(seed=12)
@@ -222,7 +222,9 @@ def test_scn_phase1_statistics_are_collected_once_over_the_pristine_model(monkey
             "Phase-1 book, never re-collect from the compressed-prefix stream"
         )
 
-    monkeypatch.setattr(br, "collect_stats", explode)
+    # The per-block statistics trap guards the ``_block_stage.reconstruct_block``
+    # loop, so patch the caller's namespace, not ``block_recon``'s.
+    monkeypatch.setattr(stage, "collect_stats", explode)
 
     qm = quantize_model(model, batches, _gate_cfg(), recorder=recorder)
     assert {"lin1", "lin2"} <= set(qm.layers)

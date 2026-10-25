@@ -51,7 +51,10 @@ def _fixed_cot(module, batches, *, seed: int = 9):
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-MODULE_PATH = REPO_ROOT / "src" / "quantibbler" / "ptq" / "block_recon.py"
+#: The TuneFP placement pin parses the module that HOLDS the call site:
+#: ``_block_stage`` (``reconstruct_block``'s per-target loop), not
+#: ``block_recon``.
+MODULE_PATH = REPO_ROOT / "src" / "quantibbler" / "ptq" / "_block_stage.py"
 
 
 # --------------------------------------------------------------------------

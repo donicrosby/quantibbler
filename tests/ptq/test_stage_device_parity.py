@@ -47,9 +47,10 @@ from quantibbler.ptq.config import PTQConfig, StageHyper
 #: is not an acceptance gate).
 TOLERANCE = 2e-3
 
-_SRC = (
-    pathlib.Path(__file__).resolve().parents[2] / "src" / "quantibbler" / "ptq" / "block_recon.py"
-)
+#: The block-reconstruction stage modules, scanned as a package rather than one
+#: filename: the scenario is about the stages, not about which file holds them.
+_PTQ_DIR = pathlib.Path(__file__).resolve().parents[2] / "src" / "quantibbler" / "ptq"
+_STAGE_SOURCES = tuple(sorted(_PTQ_DIR.glob("*.py")))
 
 #: The accelerator is the point of this file; without one the accelerator legs
 #: cannot run at all (the CPU reference legs still run everywhere, so the fixture
@@ -235,12 +236,13 @@ def _pipeline_records(device: str, dtype: torch.dtype) -> dict:
 
 def test_scn_device_authority_not_globals() -> None:
     """Movement routes through the activation/weight authority, never globals."""
-    src = _SRC.read_text()
-    for banned in ("set_default_device", ".cuda(", "torch.device("):
-        assert banned not in src, (
-            f"block_recon.py uses {banned!r}: device state must come from the owning "
-            "tensor (x_b.device / linear.weight.device), not from a global"
-        )
+    for path in _STAGE_SOURCES:
+        src = path.read_text()
+        for banned in ("set_default_device", ".cuda(", "torch.device("):
+            assert banned not in src, (
+                f"{path.name} uses {banned!r}: device state must come from the owning "
+                "tensor (x_b.device / linear.weight.device), not from a global"
+            )
     cpu = _pipeline_records("cpu", torch.float64)
     assert cpu["tune_fp"]["device"] == "cpu"
     assert {per["device"] for per in cpu["ste"]["per_linear"].values()} == {"cpu"}

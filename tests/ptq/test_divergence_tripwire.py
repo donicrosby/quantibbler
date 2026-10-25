@@ -29,11 +29,12 @@ def test_scn_e2e_gate_detects_divergence_before_export(monkeypatch):
 
     inflated_balance.done = False
     monkeypatch.setattr(lb_mod, "magnitude_balance", inflated_balance)
-    # ...but block_recon imported the symbol directly; patch through the
-    # caller's namespace too (both faces must see the inflated balance).
-    import quantibbler.ptq.block_recon as br_mod
+    # ...but the block stage imported the symbol directly; patch through the
+    # caller's namespace too (both faces must see the inflated balance). The
+    # caller is ``_block_stage.reconstruct_block``.
+    import quantibbler.ptq._block_stage as stage_mod
 
-    monkeypatch.setattr(br_mod, "magnitude_balance", inflated_balance)
+    monkeypatch.setattr(stage_mod, "magnitude_balance", inflated_balance)
 
     model = TinyGateModel(seed=0)
     cfg = PTQConfig(solver_backend="numpy", seed=0, rank=4)
@@ -59,9 +60,9 @@ def test_scn_e2e_gate_detects_divergence_artifact_bytes_absent(monkeypatch):
         return bal
 
     inflated_balance.done = False
-    import quantibbler.ptq.block_recon as br_mod
+    import quantibbler.ptq._block_stage as stage_mod
 
-    monkeypatch.setattr(br_mod, "magnitude_balance", inflated_balance)
+    monkeypatch.setattr(stage_mod, "magnitude_balance", inflated_balance)
 
     model = TinyGateModel(seed=0)
     cfg = PTQConfig(solver_backend="numpy", seed=0, rank=4)

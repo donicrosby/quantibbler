@@ -340,9 +340,10 @@ def test_aborted_step_does_not_skip_the_mechanism_ladder(monkeypatch):
     flip pass, so a phantom flip declares the linear ``paper_ste`` and skips the
     ladder while its latents sit where the snapshot left them.
     """
+    from quantibbler.ptq import _block_stage as stage
     from quantibbler.ptq import block_recon as br
 
-    real = br._tune_latent_ste
+    real = stage._tune_latent_ste
     poisoned: dict = {}
 
     # **kwargs, not a re-listed signature: a spy on a private stage function
@@ -355,7 +356,7 @@ def test_aborted_step_does_not_skip_the_mechanism_ladder(monkeypatch):
             _abort_on_the_second_step(monkeypatch, fac)
         return real(block, facs, x_b, y_b, cfg, batch_size, steps=steps, label=label, **kwargs)
 
-    monkeypatch.setattr(br, "_tune_latent_ste", spy)
+    monkeypatch.setattr(stage, "_tune_latent_ste", spy)
     sink: list = []
     block = _SevenLinearBlock(seed=51)
     cfg = PTQConfig(
@@ -479,10 +480,11 @@ def _faithful_cfg(**kwargs) -> PTQConfig:
 
 def test_scn_paper_faithful_hands_ste_continuous_latents(monkeypatch):
     """The faithful path must hand STE the Eq. 9 latents, not +-1 polish bits."""
+    from quantibbler.ptq import _block_stage as stage
     from quantibbler.ptq import block_recon as br
 
     seen: dict[str, torch.Tensor] = {}
-    real = br._tune_latent_ste
+    real = stage._tune_latent_ste
 
     # **kwargs, not a re-listed signature: this spy intercepts a private stage
     # function, so every new stage kwarg (lane-4's loss_weight is the first)
@@ -493,7 +495,7 @@ def test_scn_paper_faithful_hands_ste_continuous_latents(monkeypatch):
             seen[name] = fac.u_latent.detach().clone()
         return real(block, facs, x_b, y_b, cfg, batch_size, steps=steps, label=label, **kwargs)
 
-    monkeypatch.setattr(br, "_tune_latent_ste", spy)
+    monkeypatch.setattr(stage, "_tune_latent_ste", spy)
     blk = _SevenLinearBlock(seed=91)
     calib = _calib(8, seed=91)
     br.reconstruct_block(blk, calib, _faithful_cfg(), cotangent=_fixed_cot(blk, calib))
@@ -506,16 +508,17 @@ def test_scn_paper_faithful_hands_ste_continuous_latents(monkeypatch):
 
 def test_scn_paper_faithful_disables_greedy_polish(monkeypatch):
     """`paper_faithful_disables_greedy_polish`: the production path is untouched."""
+    from quantibbler.ptq import _block_stage as stage
     from quantibbler.ptq import block_recon as br
 
     calls: list[int] = []
-    real = br.greedy_polish
+    real = stage.greedy_polish
 
     def spy(*args, **kwargs):
         calls.append(1)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(br, "greedy_polish", spy)
+    monkeypatch.setattr(stage, "greedy_polish", spy)
     sink: list = []
     blk = _SevenLinearBlock(seed=91)
     calib = _calib(8, seed=91)
@@ -693,8 +696,14 @@ def test_flip_acceptance_objective_is_the_block_forward():
     # call and not a literal spelling of it.
     assert "(_forward_chunked(block, x_b) - y_b).pow(2).mean()" in src
     assert "block_tuned" in inspect.getsource(br.reconstruct_block) or True
-    # The dimensionally-incoherent layer-local form must not appear anywhere.
-    module_src = inspect.getsource(br)
+    # The dimensionally-incoherent layer-local form must not appear anywhere in
+    # the block-reconstruction stage modules: the forwards live in
+    # ``_factorized``/``_block_stage``, so the scan follows the
+    # code across the whole ptq package instead of one module's source.
+    import pathlib
+
+    ptq_dir = pathlib.Path(__file__).resolve().parents[2] / "src" / "quantibbler" / "ptq"
+    module_src = "\n".join(p.read_text() for p in sorted(ptq_dir.glob("*.py")))
     assert "Wq@x_b" not in module_src and "Wq @ x_b" not in module_src
 
 

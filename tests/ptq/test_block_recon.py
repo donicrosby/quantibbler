@@ -113,6 +113,7 @@ def test_block_loop_consumes_the_phase1_book_entry_for_entry(monkeypatch):
     look the same in the record, so the test watches the objects handed to
     ``reconstruct_block``.
     """
+    from quantibbler.ptq import _block_stage as stage
     from quantibbler.ptq import block_recon as br
     from quantibbler.ptq.block_recon import reconstruct_model
     from quantibbler.ptq.calibration import collect_stats
@@ -141,7 +142,9 @@ def test_block_loop_consumes_the_phase1_book_entry_for_entry(monkeypatch):
     def explode(*args, **kwargs):  # noqa: ANN002, ANN003
         raise AssertionError("the block loop collected its own statistics")
 
-    monkeypatch.setattr(br, "collect_stats", explode)
+    # The per-block statistics trap guards the ``_block_stage.reconstruct_block``
+    # loop, so the caller's namespace is the stage module.
+    monkeypatch.setattr(stage, "collect_stats", explode)
 
     reconstruct_model(model, batches, cfg, stats_book=book)
     assert len(handed) == 2, "only the quantizable blocks carry statistics"
