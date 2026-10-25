@@ -74,6 +74,7 @@ def _record_solver_probe(name, w, bal, res, cfg) -> None:
     if not os.environ.get(SOLVER_PROBE_ENV):
         return
 
+    from ..serialization import SolverProbeRow
     from .lb_admm import admm_reg_provenance, rho_end_provenance
     from .solver_backend import resolve_device
 
@@ -105,6 +106,13 @@ def _record_solver_probe(name, w, bal, res, cfg) -> None:
     # an unlabelled device is the same mislabelling class as an unlabelled rho.
     backend_value, backend_source = solver_backend_provenance(cfg.solver_backend)
     solver_device = resolve_device(backend_value, device=os.environ.get("QUANTIBBLER_DEVICE"))
+    # The SPD floor over the solve's system matrices. The spec names it among
+    # the quantities every probe row carries, so this writer records it exactly
+    # as the sibling sweep writer does: the same `min(trace.min_eigs)`, and the
+    # same `nan` when the trace is degenerate -- never a fabricated 0.0, which
+    # would read as "the system was singular".
+    trace = getattr(res, "trace", None)
+    floors = getattr(trace, "min_eigs", None)
     row = {
         "name": name,
         "solver": cfg.solver,
@@ -132,6 +140,7 @@ def _record_solver_probe(name, w, bal, res, cfg) -> None:
         "solver_device": solver_device,
         "n_iter": getattr(res, "n_iter", None),
         "converged": getattr(res, "converged", None),
+        "min_eigs": float(min(floors)) if floors else float("nan"),
         "w_fro": nw,
         "wq_raw_fro": float(np.linalg.norm(recon_raw)),
         "wq_pack_fro": float(np.linalg.norm(recon_pack)),
@@ -142,10 +151,19 @@ def _record_solver_probe(name, w, bal, res, cfg) -> None:
         "rank": int(u.shape[1]),
         "ts": time.time(),
     }
+    # Validate through the row model, then emit THIS writer's object with the
+    # version stamped in front: the row's key set is the writer's own contract,
+    # so the model refuses a bad row without reshaping the corpus. Serializing
+    # the model instead would reorder the keys and, because the row model
+    # declares the sweep writer's fields too, drop whichever optional field a
+    # solve left unset -- a partial row, which the owning requirement forbids.
+    # Sanitize-before-validate is this writer's convention, so an ``np.float32``
+    # cos is already a ``float`` when the model reads it.
+    version = SolverProbeRow.model_validate(row).schema_version
     path = os.environ.get(SOLVER_PROBE_PATH_ENV) or SOLVER_PROBE_DEFAULT_PATH
     try:
         with open(path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row) + "\n")
+            fh.write(json.dumps({"schema_version": version, **row}) + "\n")
     except OSError as exc:
         # The numbers ARE the deliverable of a probe run: a probe that cannot
         # write them has measured nothing, so fail loudly rather than return.

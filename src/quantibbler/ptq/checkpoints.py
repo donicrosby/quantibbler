@@ -52,11 +52,13 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from pydantic import ValidationError
 from torch import nn
 
 import quantibbler
 
 from ..qk_report import json_safe, stage_journal_record
+from ..serialization import ArtifactSchemaError, StageJournalEntry
 
 _FINGERPRINT_NAME = "fingerprint.json"
 
@@ -383,7 +385,16 @@ def append_stage_event(ckpt_dir: Path, event: str, info: dict) -> None:
     # JSON parsers, and a resume that must read its own journal would fail on
     # its own legitimate degenerate metric. Anything the sanitizer misses
     # raises here rather than writing a line no strict reader can parse.
-    line = json.dumps(json_safe({"event": event, "info": info}), sort_keys=True, allow_nan=False)
+    #
+    # The line is emitted THROUGH the model, so the writer cannot append a line
+    # the reader would refuse: the event must be one the recorder can emit and
+    # the payload must carry what that event always sends, refused here at the
+    # append rather than poisoning this run's own resume. This entry declares no
+    # optional field, so its dump IS the writer's object -- the null-padding and
+    # key-reordering that force the probe/report writers to serialize their own
+    # dict cannot arise here.
+    entry = StageJournalEntry(event=event, info=json_safe(info))
+    line = json.dumps(entry.model_dump(), sort_keys=True, allow_nan=False)
     with open(stage_log_path(ckpt_dir), "a", encoding="utf-8") as fh:
         fh.write(line + "\n")
 
@@ -445,6 +456,12 @@ def read_stage_log(ckpt_dir: Path, cfg, model) -> list[tuple[str, dict]]:
     A missing journal returns ``[]``: that is the behavior before this journal
     existed (the run's record is then only what this launch emitted), and nothing
     is synthesized to stand in for events that were never recorded.
+
+    Every line is also validated through ``StageJournalEntry``, which is where the
+    line's ``schema_version`` is checked: a version this build does not read
+    refuses with ``ArtifactSchemaError`` rather than being parsed as the current
+    shape. Reading it as the current shape is the failure that matters here —
+    the events would be seeded into a resume nobody can vouch for.
     """
     check_fingerprint(ckpt_dir, cfg, model)
     path = stage_log_path(ckpt_dir)
@@ -461,9 +478,21 @@ def read_stage_log(ckpt_dir: Path, cfg, model) -> list[tuple[str, dict]]:
         except json.JSONDecodeError as exc:
             raise RuntimeError(f"{path}:{lineno}: stage journal line is not JSON ({exc})") from exc
         try:
-            records.append(stage_journal_record(record))
+            event, info = stage_journal_record(record)
         except ValueError as exc:
             raise RuntimeError(f"{path}:{lineno}: {exc}") from exc
+        # The shape gate above decides with readable prose; the model adds the
+        # two things it cannot check -- the line's ``schema_version``, and a
+        # payload that grew a key no version of this journal declared. A version
+        # this build does not read refuses by NAME (``ArtifactSchemaError``),
+        # never parsed as the current shape.
+        try:
+            StageJournalEntry.model_validate(record)
+        except ArtifactSchemaError as exc:
+            raise ArtifactSchemaError(f"{path}:{lineno}: {exc}") from exc
+        except ValidationError as exc:
+            raise RuntimeError(f"{path}:{lineno}: {exc}") from exc
+        records.append((event, info))
     return records
 
 

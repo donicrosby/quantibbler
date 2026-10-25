@@ -129,6 +129,7 @@ from quantibbler.qk_report import (
 from quantibbler.qk_report import (
     exit_code as verdict_exit_code,
 )
+from quantibbler.serialization import LaunchAttributionRecord
 
 
 def _wikitext_cache_root() -> Path:
@@ -794,6 +795,28 @@ def _launch_owner() -> tuple[str, str]:
     return owner, first(_LAUNCH_CARD_VARS) or "unset"
 
 
+def _launch_record(owner: str, card: str, out_dir: Path) -> LaunchAttributionRecord:
+    """The trail's first line, as the record that owns its field set.
+
+    One construction site, so the launch line and the record cannot describe
+    different runs: the process (pid), the exact argv, the code (the revision of
+    the tree this file belongs to, ``unknown`` when unresolvable), the resolved
+    output target, and the owner pair. ``at`` is the epoch the crumb line leads
+    with — the stall watchdog keys liveness off the line's first field, so the
+    record carries the timestamp the line opens with rather than a second clock
+    reading that could disagree with it.
+    """
+    return LaunchAttributionRecord(
+        at=time.time(),
+        pid=os.getpid(),
+        argv=" ".join(sys.argv[1:]),
+        rev=_resolve_rev(),
+        out=str(out_dir),
+        owner=owner,
+        card=card,
+    )
+
+
 def _resolve_device(requested: str) -> str:
     """Where the torch stages run -- or a refusal, before anything is loaded.
 
@@ -860,7 +883,10 @@ def main() -> int:
         )
     )
 
-    def _bread(note: str) -> None:
+    def _bread(note: str, *, at: float | None = None) -> None:
+        # ``at`` lets the launch record supply the epoch its own ``at`` field
+        # already holds, so the line's leading field and the record cannot drift
+        # apart across two clock readings. Every other crumb stamps itself.
         try:
             mem = 0
             try:
@@ -868,8 +894,9 @@ def main() -> int:
                     mem = int(fh.read())
             except OSError:
                 pass
+            stamp = time.time() if at is None else at
             with open(breadcrumb_path, "a") as fh:
-                fh.write(f"{time.time():.0f} cgroup={mem / 2**30:.2f}G :: {note}\n")
+                fh.write(f"{stamp:.0f} cgroup={mem / 2**30:.2f}G :: {note}\n")
         except OSError:
             pass
 
@@ -1051,11 +1078,17 @@ def main() -> int:
     # parse, and nothing may reach the file before this line — the watchdog
     # thread therefore starts HERE, below it, rather than above it, and the
     # memory.events crumb follows it.
+    #
+    # Every identity field is read off the launch record, so the line and the
+    # record cannot describe different runs, and `at` is the record's own epoch:
+    # the line's leading field is the timestamp the record attests.
     out_dir: Path = args.out.resolve()
     threading.Thread(target=_watchdog, daemon=True).start()
+    launch = _launch_record(owner, card, out_dir)
     _bread(
-        f"start pid={os.getpid()} argv={' '.join(sys.argv[1:])} rev={_resolve_rev()} "
-        f"out={out_dir} owner={owner} card={card}"
+        f"start pid={launch.pid} argv={launch.argv} rev={launch.rev} "
+        f"out={launch.out} owner={launch.owner} card={launch.card}",
+        at=launch.at,
     )
     try:
         with open("/sys/fs/cgroup/memory.events") as fh:

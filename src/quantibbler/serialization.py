@@ -353,15 +353,18 @@ class SolverProbeRow(ArtifactModel):
     fingerprint, and every solver-probe row record backend and dtype", and
     "every probe row SHALL carry row-time so the measured win replaces the
     estimate" — plus the ``qk-nanoquant-alignment-lane3`` regime-field delta
-    (``rho_start``/``admm_reg`` value AND source). Writer:
-    ``quantibbler.ptq.block_recon._record_solver_probe``.
+    (``rho_start``/``admm_reg`` value AND source). Writers:
+    ``quantibbler.ptq._probe._record_solver_probe`` and
+    ``tools/lane3_reg_sweep.py``.
 
-    The required fields are the ones BOTH writers always emit; the rest are
-    optional because the two writers disagree today (the ``t_2522c684`` finding:
-    ``block_recon`` does not carry ``min_eigs`` while ``tools/lane3_reg_sweep.py``
-    does). Resolving that divergence belongs to the adoption card, so this model
-    refuses neither row — see ``design.md`` OQ-2. ``extra="allow"`` preserves any
-    key a writer adds before the model catches up.
+    ``min_eigs`` is REQUIRED. The spec names the floor among the quantities every
+    probed row carries, and the two writers disagreed on it: ``block_recon``
+    omitted what ``tools/lane3_reg_sweep.py`` recorded (the ``t_2522c684``
+    finding). Both record it now, and requiring the field here is what stops them
+    drifting apart again — a row that omits the floor is refused rather than read
+    as the other writer's shape. The remaining optional fields are the ones only
+    one writer emits today; ``extra="allow"`` preserves any key a writer adds
+    before the model catches up.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -369,13 +372,18 @@ class SolverProbeRow(ArtifactModel):
     # Both writers.
     name: str
     ts: float
+    #: The floor over the solve's system matrices. A degenerate/absent trace
+    #: reads as ``nan`` in both writers, never a fabricated 0.0 — the SPD floor
+    #: is a measurement, and ``0.0`` would be a claim that the system was
+    #: singular.
+    min_eigs: float
     rho_end: float | None = None
     n_iter: int | None = None
     converged: bool | None = None
     cos_raw: float | None = None
     rel_raw: float | None = None
     w_fro: float | None = None
-    # block_recon._record_solver_probe.
+    # ptq._probe._record_solver_probe.
     solver: str | None = None
     compute_dtype: str | None = None
     image_digest: str | None = None
@@ -393,11 +401,10 @@ class SolverProbeRow(ArtifactModel):
     cos_pack: float | None = None
     rel_pack: float | None = None
     rank: int | None = None
-    # tools/lane3_reg_sweep.py (the divergent writer — design.md OQ-2).
+    # tools/lane3_reg_sweep.py (the sweep-only regime fields).
     reg: float | None = None
     reg_source: str | None = None
     normalization: str | None = None
-    min_eigs: float | None = None
     residual_final: float | None = None
     residual_stall: float | None = None
     ridge_scale_mean: float | None = None

@@ -52,8 +52,9 @@ test tooling gains one.
   naming the model and the version — never parsed as the current shape. An
   *absent* version reads as the current one, so the corpora already on disk
   (`artifacts/*/*.jsonl`, the stage journals) keep loading; that is the
-  "old artifacts either load or refuse loudly" policy, and this change writes
-  no producer, so no on-disk byte changes.
+  "old artifacts either load or refuse loudly" policy. The FOUNDATION wrote no
+  producer, so it changed no on-disk bytes; the adoption cards do, and their
+  emitted-byte deltas are recorded in "Implementation crystallization" below.
 - **Single source of truth for vocabularies.** The ledger's `targeted_row`
   labels are read from `qk_bar.BAR_ROWS` at validation time (a second hand-kept
   list would be exactly the drift `qk_bar`'s docstring forbids), and the
@@ -98,13 +99,26 @@ they are not rediscovered:
   (`t_b4a1383d` report/driver, `t_f0872f45` journal/probe) wire writers. If
   adoption forces a consumer-visible byte diff it is a spec-delta event for the
   owning change, not a silent fix here.
-- **OQ-2 — the probe-row divergence.** `block_recon._record_solver_probe` does
-  not carry `min_eigs` while `tools/lane3_reg_sweep.py` does (finding from
-  `t_2522c684`). Resolving it is in the *adoption* card's scope; this model
-  therefore makes `min_eigs` optional and models only the fields both writers
-  always emit, so neither row is refused. NOT resolved here on purpose.
+  **AMENDED 2026-10-25 (`t_f0872f45`, journal/probe adoption):** its delta was
+  recorded in THIS change's `specs/qk-serialization/spec.md`, because this change
+  owns the model whose shape moved (`SolverProbeRow.min_eigs`, OQ-2 below) — the
+  probe row's own requirement of record already named the floor, so no
+  `specs/qk-ptq` SHALL changed and there is nothing for the probe-row-owning
+  change to ratify. If the planner wants adoption deltas to live beside the
+  surface they wire, the delta moves without a code change; the reasoning is
+  recorded here so the choice is not re-litigated per card.
+- **OQ-2 — the probe-row divergence. RESOLVED 2026-10-25 (`t_f0872f45`).**
+  `block_recon._record_solver_probe` did not carry `min_eigs` while
+  `tools/lane3_reg_sweep.py` did (finding from `t_2522c684`), and the adoption
+  card owns the resolution. Resolved in the WRITERS, not in a tolerant model:
+  `_probe._record_solver_probe` now records the floor the sibling writer records
+  (the minimum over the solve's SPD probes, `nan` when the trace is degenerate),
+  and `SolverProbeRow.min_eigs` is REQUIRED — a row that omits it is refused,
+  which is what stops the two writers drifting apart again. The "not a silent
+  schema merge" requirement is met by the spec delta (this change) plus the
+  resolution recorded here, not by widening the model until both shapes pass.
 
-## Implementation crystallization
+## Implementation crystallization (2026-10-25, `t_f0872f45` — journal/probe adoption)
 
 ### 2026-10-25 — the report writer validates; it does not dump (adoption A, `t_b4a1383d`)
 
@@ -148,3 +162,58 @@ dumps those fields as explicit `null`s unless the writer passes
 `exclude_none=True`" — it holds for a writer that serializes FROM its model, and
 neither the report writer nor (by the same key-set argument) the probe writer
 may do that. Adoption B inherits this ruling.
+The producers the foundation deferred now emit through the models. Four decisions
+were design-silent and are recorded here rather than left to the next reader.
+
+**Emitted-byte deltas — the spec-visible part.** Three surfaces move; two of them
+move bytes, and neither moves a key a consumer reads:
+
+- `solver_probe.jsonl` rows gain `schema_version` (stamped IN FRONT) and
+  `min_eigs`, and nothing else moves: same keys, same relative order, same value
+  shapes, same `nan` for a degenerate measurement. The writer takes adoption A's
+  ruled mechanism (its entry above, which this card inherits) — it VALIDATES
+  through `SolverProbeRow` and emits its OWN object. Serializing the model
+  instead would reorder the keys into field-definition order and, because the row
+  model declares the sweep writer's fields too, drop whichever optional field a
+  solve left unset — a partial row, which the owning requirement forbids
+  ("a missing or truncated quantity SHALL fail the run").
+- `stage-events.jsonl` lines gain `schema_version`. Every existing line still
+  reads (an absent version reads as the current one). This entry declares no
+  optional field, so its model dump IS the writer's own object — the
+  null-padding and reordering the probe writer has to work around cannot arise
+  here, which is why only that writer serializes its own dict.
+- The crumb trail's launch line is BYTE-IDENTICAL. It cannot become a JSON line:
+  `qk-progress-instrumentation`'s `progress_sink_routing` requires every crumb to
+  lead with the epoch, because `qkb-stall-watchdog.sh` keys liveness off
+  `$1 ~ /^[0-9]+$/` and a line opening with `{` raises its own `probe_fault` on a
+  healthy run. So the record supplies the VALUES — `at` included, which is why
+  `_bread` gained an `at` — and the line's pinned text stays at the call site
+  where the driver tripwire reads it.
+
+**The stage-journal reader keeps two gates, on purpose.** `stage_journal_record`
+decides the SHAPE and owns the refusal prose the forensics read; the model adds
+the two things that gate cannot check — the line's `schema_version`, and a
+payload that grew a key no version of this journal declared (`extra="forbid"`).
+Collapsing them into the model alone would replace "carries no payload object"
+with pydantic's "Field required", i.e. trade a diagnostic for a redundant parse.
+The version refusal is raised as `ArtifactSchemaError` (not wrapped into a plain
+`RuntimeError`), so a caller can catch the shape-version failure by name.
+
+**The writer refuses at the append too.** `append_stage_event` now builds the
+entry model before it opens the file: a line the reader would refuse is a run
+poisoning its own resume, and the append is where that is still cheap to detect.
+
+**Not adopted here (gap, not an oversight).** `tools/lane3_reg_sweep.py` still
+hand-assembles its row dict. The card scoped the producers to the `block_recon`
+probe path, and the sweep writer's rows validate against `SolverProbeRow`
+unchanged (its shape is the model's `SWEEP_ROW` sample), so nothing is unguarded
+today — but the sweep writer is the one probe-row producer whose emission is not
+model-checked. Worth its own card if the program wants every producer wired.
+
+**Consumers of the probe corpora.** Nothing in the tree reads
+`solver_probe.jsonl` / `lane3_reg_sweep.jsonl` programmatically (they are read by
+hand during forensics and by `artifacts/lane0-fire-r3-20261024/rows.jsonl`-style
+inspection). A pre-change row that lacks `min_eigs` therefore refuses under the
+model rather than loading — the "load or refuse loudly" policy, and the reason
+the divergence was resolved in the writer rather than by an optional field.
+>>>>>>> 48d192a (feat(qk-serialization): emit the journal/probe surfaces through their models)

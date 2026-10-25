@@ -55,6 +55,48 @@ pass as a good one.
 - **WHEN** a payload gives a declared field a value of the wrong type,
 - **THEN** validation raises `pydantic.ValidationError` for every model
 
+### Requirement: Producers SHALL emit every surface through its model
+
+The solver-probe writer, the stage-journal writer, and the driver's launch line
+SHALL serialize through the model that owns their surface, and the stage-journal
+reader SHALL validate every line through `StageJournalEntry`: a line naming a
+`schema_version` this build does not read SHALL raise `ArtifactSchemaError`
+before any event is seeded into a resume.
+
+#### Scenario: producers_emit_through_their_model
+
+- **WHEN** a producer writes its surface
+- **THEN** the bytes written are the model's own, and re-reading them through
+  that model yields the values the producer was given, for the probe row, the
+  journal line, and the launch record alike
+
+#### Scenario: launch_line_is_rendered_from_its_record
+
+- **WHEN** the driver starts and writes the trail's first line
+- **THEN** every identity field on that line is the `LaunchAttributionRecord`'s
+  own value, and the line's leading epoch is the record's `at`
+
+#### Scenario: journal_reader_refuses_an_unread_version
+
+- **WHEN** the journal is re-read for a resume and a line names a
+  `schema_version` this build does not read
+- **THEN** the read raises `ArtifactSchemaError` naming the model and the
+  version, and no event is seeded into the resume
+
+### Requirement: Every probe row SHALL carry the min_eigs floor
+
+Both solver-probe writers — `quantibbler.ptq._probe._record_solver_probe` and
+`tools/lane3_reg_sweep.py` — SHALL emit the `min_eigs` floor, and
+`SolverProbeRow` SHALL require it, so no row can silently omit the quantity
+`specs/qk-ptq` names for every probed row. An unmeasured floor SHALL read as
+`nan`, never `0.0`, which would claim a singular system.
+
+#### Scenario: every_probe_row_carries_the_min_eigs_floor
+
+- **WHEN** either probe writer appends a row whose solve left no measured floor
+- **THEN** the row carries `min_eigs` (`nan` rather than `0.0`), and a row that
+  omits the field fails `SolverProbeRow` validation
+
 ### Requirement: The ledger row model SHALL take its row vocabulary from qk_bar
 
 The acceptance-ledger row model SHALL derive its accepted `targeted_row`

@@ -3,7 +3,9 @@ post-fire row).
 
 Scenario: ``required_stage_execution_reads_the_same_record``, with the delta's
 ``teacher_target_is_persisted_and_recovered_on_resume`` for the persistence
-discipline the journal rides (fingerprint-bound, refused on mismatch).
+discipline the journal rides (fingerprint-bound, refused on mismatch). The
+adoption of the journal's own model (`qk-serialization`) adds
+``producers_emit_through_their_model`` and ``journal_reader_refuses_an_unread_version``.
 
 The gap, stated as the record it produces: a run that solved a block, died in
 the pipeline tail, and resumes has a stage record holding only the stages THE
@@ -30,11 +32,13 @@ from pathlib import Path
 
 import pytest
 import torch
+from pydantic import ValidationError
 from test_api import _calib, _TinyApiModel
 from test_checkpoints import _cfg
 
 import quantibbler.ptq.block_recon as block_recon
 import quantibbler.ptq.scale_calib as scale_calib
+from quantibbler import serialization as ser
 from quantibbler.ptq.api import quantize_model
 from quantibbler.ptq.checkpoints import (
     append_stage_event,
@@ -42,6 +46,7 @@ from quantibbler.ptq.checkpoints import (
     stage_log_path,
 )
 from quantibbler.qk_report import fidelity_conditions, stage_journal_record
+from quantibbler.serialization import ArtifactSchemaError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -325,3 +330,61 @@ def test_a_fresh_start_drops_the_journal_of_the_fingerprint_it_replaces(tmp_path
     )
     assert _names(journal), "the fresh launch's own events are journaled"
     assert "lb_admm" in _names(sink)
+
+
+def test_scn_producers_emit_through_their_model_journal_line(tmp_path):
+    """The writer emits the entry MODEL, so every line is self-describing.
+
+    A journal that cannot say which shape it was written in is one a later
+    reader has to guess at; the model supplies the version, and the line it
+    writes is one the model accepts on the way back in.
+    """
+    ckpt_dir = tmp_path / "ckpts"
+    append_stage_event(ckpt_dir, "lb_admm", {"polish_rounds": 3})
+
+    line = json.loads(stage_log_path(ckpt_dir).read_text(encoding="utf-8").strip())
+    assert line["schema_version"] == ser.SCHEMA_VERSION
+    entry = ser.StageJournalEntry.model_validate(line)
+    assert (entry.event, entry.info) == ("lb_admm", {"polish_rounds": 3})
+    # One vocabulary: the report module's shape gate reads the same line.
+    assert stage_journal_record(line) == ("lb_admm", {"polish_rounds": 3})
+
+
+def test_the_writer_refuses_a_line_the_reader_would_refuse(tmp_path):
+    """The gate runs at the APPEND, not only at the read.
+
+    A refused line is a run poisoning its own resume: the next launch inherits a
+    journal that raises on the way in. The model refuses it where it is written
+    — a payload-blind event name and an unregistered one alike.
+    """
+    ckpt_dir = tmp_path / "ckpts"
+    with pytest.raises(ValidationError):
+        append_stage_event(ckpt_dir, "lb_admm", {})
+    with pytest.raises(ValidationError):
+        append_stage_event(ckpt_dir, "lb_adm", {"polish_rounds": 0})
+    assert not stage_log_path(ckpt_dir).exists(), (
+        "a refused event wrote a journal line the reader would then refuse"
+    )
+
+
+@pytest.mark.parametrize("version", [0, 2, "1"])
+def test_scn_journal_reader_refuses_an_unread_version(tmp_path, driver_module, version):
+    """An unread journal version refuses by NAME, behind the fingerprint guard.
+
+    These lines seed a resumed run's stage record, so a shape this build cannot
+    vouch for must refuse with ``ArtifactSchemaError`` rather than being parsed
+    as the current one — including a version that is not an exact integer, which
+    must not coerce into a match.
+    """
+    torch.manual_seed(0)
+    cfg = _cfg()
+    batches = _calib(seed=7)
+    ckpt_dir = tmp_path / "ckpts"
+    _launch(cfg, batches, ckpt_dir, driver_module)
+
+    record = json.loads(stage_log_path(ckpt_dir).read_text(encoding="utf-8").splitlines()[0])
+    record["schema_version"] = version
+    stage_log_path(ckpt_dir).write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    with pytest.raises(ArtifactSchemaError, match="schema_version"):
+        read_stage_log(ckpt_dir, cfg, _identity_model())

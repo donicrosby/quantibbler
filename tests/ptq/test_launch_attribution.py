@@ -11,6 +11,11 @@ Scenarios covered (IDs verbatim from the spec delta):
 - ``default_path_disambiguates_concurrent_launches``
 - ``configured_path_honored_exactly``
 
+and, from the model that now owns the line's field set (``qk-serialization``):
+
+- ``producers_emit_through_their_model``
+- ``launch_line_is_rendered_from_its_record``
+
 and the launch-ownership scenarios:
 
 - ``driver_refuses_unattributed_launch``
@@ -58,11 +63,15 @@ exactly the attribution the requirement adds.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import pathlib
 import shutil
 import subprocess
 import sys
+import time
+
+from quantibbler import serialization as ser
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 DRIVER = REPO_ROOT / "tools" / "quantize_hf_model.py"
@@ -153,6 +162,19 @@ def _launch_line(trail: pathlib.Path) -> str:
     lines = trail.read_text().splitlines()
     assert lines, f"crumb trail {trail} is empty"
     return lines[0]
+
+
+def _driver_module():
+    """The driver, loaded from source: it is a script, not an importable module.
+
+    Same load ``tests/ptq/test_stage_journal.py`` uses for the REAL stage
+    recorder — the launch record must be the shipped one, not a test double of
+    the shape the test happens to expect.
+    """
+    spec = importlib.util.spec_from_file_location("qk_launch_attribution_driver", DRIVER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _assert_launch_identity(
@@ -366,6 +388,76 @@ def test_scn_configured_path_honored_exactly(tmp_path):
     assert not list(tmp_path.glob("**/breadcrumbs-*.log")), (
         "a pid-suffixed trail was written beside an explicitly configured path"
     )
+
+
+# --- the launch line IS the launch-attribution record -------------------------
+# qk-serialization's adoption of the model on this surface: the driver builds
+# the record and renders the line's identity off it, so a field the contract
+# carries cannot be re-derived (or dropped) at the f-string.
+
+
+def test_scn_producers_emit_through_their_model_launch_record(tmp_path):
+    """``_launch_record`` builds the model — the line's field set, in one place.
+
+    The incident's owner field went missing because the line's fields were
+    spelled inline at the f-string; a model that refuses a payload without
+    ``owner`` is what makes that spelling checkable at all.
+    """
+    driver = _driver_module()
+    out_dir = (tmp_path / "out-A").resolve()
+
+    record = driver._launch_record("owner-x", "t_card", out_dir)
+
+    assert isinstance(record, ser.LaunchAttributionRecord)
+    assert record.pid == os.getpid()
+    assert record.argv == " ".join(sys.argv[1:])
+    assert record.out == str(out_dir)
+    assert (record.owner, record.card) == ("owner-x", "t_card")
+    assert record.rev == _git_head(REPO_ROOT), "the record names the code it belongs to"
+    assert time.time() - record.at < 60, "`at` is the run's own epoch"
+
+
+def test_scn_launch_line_is_rendered_from_its_record(tmp_path):
+    """Scenario ``launch_line_is_rendered_from_its_record``.
+
+    The trail's first line carries the record's own values, field for field: the
+    epoch it leads with, and the identity the launch was started with. Asserted
+    against a record built from the launch's actual arguments, so a line that
+    dropped or re-derived a field fails here rather than at the next corpse.
+    """
+    scratch = tmp_path / "rendered-from-record"
+    scratch.mkdir()
+    kd_tmp = scratch / "kd"
+    kd_tmp.mkdir()
+    trail = scratch / "breadcrumbs.log"
+    out_dir = (scratch / "out-A").resolve()
+    cmd = _start_cmd(DRIVER, scratch, "A")
+
+    proc = _spawn(cmd, _env(kd_tmp, trail), cwd=REPO_ROOT)
+    pid = proc.pid
+    _, stderr = proc.communicate(timeout=DRIVER_TIMEOUT)
+    assert proc.returncode != 0, (
+        f"the launch under test was meant to abort at model load\n{stderr[-2000:]}"
+    )
+
+    line = _launch_line(trail)
+    record = ser.LaunchAttributionRecord(
+        at=float(line.split()[0]),
+        pid=pid,
+        # The child's own view: its argv[0] is the script, so its argv[1:] is
+        # everything after the interpreter and the script path.
+        argv=" ".join(cmd[2:]),
+        rev=_git_head(REPO_ROOT),
+        out=str(out_dir),
+        owner=OWNER,
+        card=CARD,
+    )
+    assert f"start pid={record.pid}" in line, line
+    assert f" argv={record.argv} " in line, line
+    assert f" rev={record.rev} " in line, line
+    assert f" out={record.out} " in line, line
+    assert f" owner={record.owner} card={record.card}" in line, line
+    assert time.time() - record.at < 60, "the line leads with the record's own epoch"
 
 
 # --- launch ownership: no owner, no run ---------------------------------------

@@ -92,7 +92,7 @@ LEDGER = {
     "notes": "format illustration only; not a measurement",
 }
 
-# quantibbler.ptq.block_recon._record_solver_probe's row.
+# quantibbler.ptq._probe._record_solver_probe's row.
 PROBE_ROW = {
     "name": "model.layers.0.self_attn.q_proj",
     "solver": "admm",
@@ -118,11 +118,13 @@ PROBE_ROW = {
     "rel_raw": 0.54,
     "rel_pack": 0.89,
     "rank": 8,
+    "min_eigs": 0.001,
     "ts": 1761412345.5,
 }
 
-# tools/lane3_reg_sweep.py's row: the divergent shape the model must also accept
-# (design.md OQ-2 — resolving the divergence belongs to the adoption card).
+# tools/lane3_reg_sweep.py's row. The t_2522c684 divergence (that writer's floor
+# against block_recon's absence of it) is resolved in the writers, so this shape
+# and PROBE_ROW now agree on `min_eigs`; the sweep-only fields stay extras.
 SWEEP_ROW = {
     "name": "layers.0.mlp.down_proj",
     "reg": 0.03,
@@ -299,6 +301,27 @@ def test_scn_ledger_row_labels_track_the_bar_on_the_cross_field_rules():
                 "protocol_deviation": {"deviation": "seq_len 512", "equivalence_argument": ""},
             }
         )
+
+
+# --------------------------------------------------------------------------
+# Scenario: every_probe_row_carries_the_min_eigs_floor
+# --------------------------------------------------------------------------
+
+
+def test_scn_every_probe_row_carries_the_min_eigs_floor():
+    """The writers agree on the floor, so the model requires it.
+
+    The `t_2522c684` divergence: ``specs/qk-ptq`` names ``min_eigs`` among the
+    quantities every probed row carries, ``block_recon``'s writer omitted it and
+    ``tools/lane3_reg_sweep.py`` recorded it. The adoption card resolved the
+    disagreement in the WRITERS; this pins the model half of that resolution —
+    a row omitting the floor is refused, emphatically not read as the other
+    writer's shape.
+    """
+    assert ser.SolverProbeRow.model_validate(PROBE_ROW).min_eigs == 0.001
+    assert ser.SolverProbeRow.model_validate(SWEEP_ROW).min_eigs == 0.001
+    with pytest.raises(ValidationError):
+        ser.SolverProbeRow.model_validate({k: v for k, v in PROBE_ROW.items() if k != "min_eigs"})
 
 
 # --------------------------------------------------------------------------

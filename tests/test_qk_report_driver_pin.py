@@ -733,15 +733,15 @@ _ABORT_ANCHOR = "    except PrefixProbeAbort as exc:\n"
 _ABORT_BUILT_ANCHOR = "            probe_history,\n        )\n"
 #: The fail-closed stage-gate handler's first line: unique in the driver.
 _VACUOUS_ANCHOR = "    except VacuousTeacherError as exc:\n"
-#: The launch line's two f-string HOLES. Anchoring
-#: on the holes rather than on a whole line keeps these poisons valid under
-#: `ruff format`: a reformat may split the implicit concatenation BETWEEN the two
-#: holes, but never inside one.
-_LAUNCH_REV_HOLE = "rev={_resolve_rev()}"
-_LAUNCH_OUT_HOLE = "out={out_dir}"
+#: The launch line's f-string HOLES — every one of them a field read off the
+#: launch record. Anchoring on the holes rather than on a whole line keeps these
+#: poisons valid under `ruff format`: a reformat may split the implicit
+#: concatenation BETWEEN two holes, but never inside one.
+_LAUNCH_REV_HOLE = "rev={launch.rev}"
+_LAUNCH_OUT_HOLE = "out={launch.out}"
 #: The launch-ownership hole: a driver that starts fires naming no owner is the
 #: defect these legs pin.
-_LAUNCH_OWNER_HOLE = "owner={owner}"
+_LAUNCH_OWNER_HOLE = "owner={launch.owner}"
 
 
 def _poison(kind: str) -> str:

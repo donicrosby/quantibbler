@@ -4,16 +4,23 @@ It must be inert when unset (a default run is unchanged), must record BOTH
 cosines (they answer different questions; one number hid the pack bottleneck
 on the SVD arm), and must fail loudly if it is enabled but cannot write --
 a probe that cannot write its numbers has measured nothing.
+
+Scenarios covered (IDs verbatim from `qk-serialization`'s delta, the change that
+owns the row model): `producers_emit_through_their_model` and
+`every_probe_row_carries_the_min_eigs_floor`.
 """
 
 from __future__ import annotations
 
 import json
+import math
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from pydantic import ValidationError
 
+from quantibbler import serialization as ser
 from quantibbler.ptq import block_recon
 from quantibbler.ptq.config import PTQConfig
 
@@ -94,6 +101,64 @@ def test_probe_row_carries_the_compute_dtype(tmp_path, monkeypatch):
     )
     rows = [json.loads(x) for x in path.read_text().strip().splitlines()]
     assert [r["compute_dtype"] for r in rows] == ["float64", "float32"]
+
+
+def test_scn_producers_emit_through_their_model_probe_row(tmp_path, monkeypatch):
+    """The writer emits the row MODEL, floor included.
+
+    Spec: ``openspec/specs/qk-ptq/spec.md`` names the ``min_eigs`` floor among
+    the quantities every probed row carries, and the two writers disagreed on it
+    (``t_2522c684``: this writer omitted the floor the sibling sweep writer
+    recorded). The row model therefore requires it, and this writer reads it off
+    the solve's trace exactly as the sweep writer does — the minimum over both
+    sides' SPD probes.
+    """
+    w, bal, _ = _planted()
+    res = SimpleNamespace(
+        n_iter=7, converged=False, trace=SimpleNamespace(min_eigs=[0.5, 0.25, 0.125])
+    )
+    path = tmp_path / "probe.jsonl"
+    monkeypatch.setenv("QK_SOLVER_PROBE", "1")
+    monkeypatch.setenv("QK_SOLVER_PROBE_PATH", str(path))
+    monkeypatch.delenv("QK_RHO_END", raising=False)
+    monkeypatch.delenv("_fp_w", raising=False)
+
+    block_recon._record_solver_probe(
+        "planted", w, bal, res, PTQConfig(solver_backend="numpy", rank=4)
+    )
+    row = json.loads(path.read_text().strip())
+
+    assert row["min_eigs"] == pytest.approx(0.125)
+    # The emitted line is the model's contract on the WRITER's own object: the
+    # version leads it, no sweep-only key is padded in as a null, and a row that
+    # dropped the floor is not accepted at all.
+    assert next(iter(row)) == "schema_version"
+    assert "reg" not in row and "normalization" not in row and "residual_stall" not in row
+    assert ser.SolverProbeRow.model_validate(row).min_eigs == pytest.approx(0.125)
+    with pytest.raises(ValidationError):
+        ser.SolverProbeRow.model_validate({k: v for k, v in row.items() if k != "min_eigs"})
+
+
+def test_scn_every_probe_row_carries_the_min_eigs_floor_nan_never_zero(tmp_path, monkeypatch):
+    """A degenerate/absent trace leaves the floor unmeasured, not singular.
+
+    ``0.0`` is a positive claim (the solve's matrix was singular); ``nan`` is
+    "this row did not measure one". The sibling sweep writer emits the same
+    reading for the same case, which is what makes the two rows comparable.
+    """
+    w, bal, res = _planted()  # no `trace`: the pre-probe ADMMResult shape
+    path = tmp_path / "probe.jsonl"
+    monkeypatch.setenv("QK_SOLVER_PROBE", "1")
+    monkeypatch.setenv("QK_SOLVER_PROBE_PATH", str(path))
+    monkeypatch.delenv("QK_RHO_END", raising=False)
+    monkeypatch.delenv("_fp_w", raising=False)
+
+    block_recon._record_solver_probe(
+        "planted", w, bal, res, PTQConfig(solver_backend="numpy", rank=4)
+    )
+    row = json.loads(path.read_text().strip())
+    assert math.isnan(row["min_eigs"])
+    assert math.isnan(ser.SolverProbeRow.model_validate(row).min_eigs)
 
 
 def test_probe_raises_rather_than_measuring_nothing(tmp_path, monkeypatch):
