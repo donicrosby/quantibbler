@@ -344,19 +344,21 @@ def test_dry_run_announces_nothing_it_need_not_and_the_advisories_it_must():
     assert "rank=512 solver=svd seq_len=2048" in oom.stderr
 
 
-def test_held_name_refuses_by_the_stub_not_by_host_state(monkeypatch):
-    """A held shared name REFUSES — but the answer must come from the double.
+def test_scn_seam_oracle_is_dry_run_rc(monkeypatch):
+    """`seam_oracle_is_dry_run_rc`: the guard chain, with the double as the daemon.
 
-    `guards_shall_be_tri_state` (openspec/changes/qk-wrapper-contract): held
-    SHALL refuse, free SHALL proceed, unverifiable SHALL refuse. The refusal is
+    `openspec/specs/qk-wrapper/spec.md`, `guards_shall_be_tri_state`: held SHALL
+    refuse, free SHALL proceed, unverifiable SHALL refuse. The refusal is
     correct and this test does not relax it. What was wrong is that the whole
     file's verdict depended on what a live fire happened to be doing on the
     host: with qk-pertarget-v4 holding `quantibbler-ptq-run`, every DRY_RUN
     `rc == 0` assertion here read as this refusal (8 reds at rc 2) with no code
     defect behind them.
 
-    Here the held payload is the double's answer, so the branch is covered by
-    construction on any host — daemon or no daemon, fire or no fire.
+    The scenario: the name-inspect answers with a held payload, so `rc == 2`
+    means the interception is alive AND the guard refused through the full
+    chain — the held payload is the double's answer, so the branch is covered
+    by construction on any host, daemon or no daemon, fire or no fire.
     """
     monkeypatch.setenv("QKB_TEST_DOCKER_DIGEST", "sha256:" + "0" * 64)
     monkeypatch.setenv(
