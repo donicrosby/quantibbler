@@ -26,7 +26,7 @@ __all__ = ["LayerStatsBook", "LayerStatsEntry", "collect_stats", "robust_diag"]
 # preconditioners stay finite and positive for zero-variance inputs.
 _TINY = float(np.finfo(np.float64).tiny) * 16.0
 
-# Tail gate for the tau=None default policy (qk-divergence-guards D1): the
+# Tail gate for the tau=None default policy: the
 # derived q95 ceiling engages only when the raw vector is genuinely
 # heavy-tailed (max exceeds 10x the q95 entry). Block-0-style embedding
 # statistics exceed this by orders of magnitude; healthy concentrated
@@ -308,7 +308,7 @@ def collect_stats(
     saved_grads = [None if p.grad is None else p.grad.detach().clone() for p in params]
     for p in params:
         p.grad = None
-    # Three cases, per Lane 1 task 4 ([NQ] App. C :3011) and the design ruling:
+    # Three cases ([NQ] App. C :3011):
     #   1. whole-model collection -- cotangent is None and the module carries a
     #      head (``.head`` on the driver wrapper, ``.lm_head`` on a raw HF model),
     #      so the loss is next-token CE and the cotangent falls out of its

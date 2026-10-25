@@ -39,7 +39,7 @@ CONFIG = {
     "d_model": 4,
     "eos_token_id": 3,
     "bos_token_id": 1,
-    # Attention geometry (qk-attention N-2): n_kv*head_dim == d_model,
+    # Attention geometry: n_kv*head_dim == d_model,
     # n_heads % n_kv == 0 — the loader rejects anything else fail-closed.
     "n_layers": 1,
     "n_heads": 2,
@@ -49,7 +49,7 @@ CONFIG = {
     "rope_theta": 10_000.0,
 }
 
-# Per-block norm inventory (qk-attention N-1.0): the fixture exercises the
+# Per-block norm inventory: the fixture exercises the
 # Qwen3-class inventory (q/k norms present). Layout arithmetic below derives
 # from THIS list, mirroring the loader's inventory-derived count.
 NORM_SLOTS = ["input", "post_attention", "q_norm", "k_norm"]
@@ -261,7 +261,7 @@ def expected_size(dout: int, din: int, r: int, w: int) -> int:
     return 24 + (dout + din) * w + (dout * r + 7) // 8 + (din * r + 7) // 8
 
 
-# One real transformer block's projections (qk-attention E-2.x): the
+# One real transformer block's projections: the
 # engine resolves blocks by these manifest names, so the fixture exercises
 # the same resolution + forward path as a driver-exported model. Geometry
 # (d_model 4, intermediate 4) makes every projection a 4x4 r4 stream.
@@ -494,7 +494,7 @@ def build_bad_variants(base: Path) -> dict[str, str]:
 
     derived("eos_out_of_range", _eos_out_of_range)
 
-    # --- qk-attention N-1: norm sidecar fail-closed paths ---
+    # --- norm sidecar fail-closed paths ----------------------
 
     # 17. no [sidecar] block at all
     def _missing_sidecar_block(d: Path) -> None:
@@ -528,7 +528,7 @@ def build_bad_variants(base: Path) -> dict[str, str]:
 
     derived("norms_wrong_size", _norms_wrong_size)
 
-    # --- qk-attention N-2: attention geometry validation paths ---
+    # --- attention geometry validation paths ---------------------
 
     # 21. a geometry field missing entirely: the TOML parse itself fails
     def _missing_geometry(d: Path) -> None:

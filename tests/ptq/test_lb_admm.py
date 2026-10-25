@@ -226,7 +226,7 @@ def test_rho_end_override_is_explicit_and_fail_closed(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Lane 3 (qk-nanoquant-alignment-lane3): ADMM normalized regime.
+# ADMM normalized regime.
 #
 # Each test names the scenario ID it pins. A red here fails on an assertion
 # about the regime's behavior, never on an import or a missing attribute.

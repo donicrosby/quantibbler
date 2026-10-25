@@ -29,10 +29,9 @@ _SCRIPT = _REPO / "tools" / "run-ptq-container.sh"
 # The double is a real file on an exec-able filesystem, reached by SYMLINK from
 # the (noexec) tmpdir; see `_hermetic_docker`.
 _DOCKER_STUB = _REPO / "tests" / "stubs" / "docker"
-#: The launch-ownership contract (change qk-launch-attribution; the 2026-10-25
-#: ownerless fire). Every leg declares its owner exactly as a real fire must, so
-#: `rc == 0` keeps meaning "the whole gate chain passed" -- a leg that wants the
-#: refusal passes the empty string explicitly.
+#: The launch-ownership contract. Every leg declares its owner exactly as a real
+#: fire must, so `rc == 0` keeps meaning "the whole gate chain passed" -- a leg
+#: that wants the refusal passes the empty string explicitly.
 _OWNER_ENV = {"QKB_LAUNCH_OWNER": "wrapper-test", "QKB_LAUNCH_CARD": "t_29f52eb6"}
 _KNOBS = (
     "MODEL",
@@ -577,13 +576,11 @@ def test_fence_hook_install_resolves_the_hooks_dir_in_a_linked_worktree(tmp_path
     assert mode == 0o755, f"installed hook mode is {oct(mode)}, not 0o755"
 
 
-# --- launch ownership: an unattributable fire is refused (change
-# --- qk-launch-attribution; the 2026-10-25 qk-pertarget-v4 incident) ---------
-# Spec: `openspec/changes/qk-launch-attribution/specs/qk-wrapper/spec.md`.
-# The incident fire ran with no owner stamp, no announcement and no GO, and the
-# launch path could not say whose run it was. These legs pin the refusal and the
-# attribution the incident lacked, through the same DRY_RUN seam every other
-# gate in this file is proved through.
+# --- launch ownership: an unattributable fire is refused ----------------------
+# A fire that names no owner leaves the launch path unable to say whose run it
+# was. These
+# legs pin the refusal and the attribution it lacked, through the same DRY_RUN
+# seam every other gate in this file is proved through.
 
 _TRAIL = pathlib.Path("/opt/data/tmp/quantibbler-breadcrumbs.log")
 

@@ -342,7 +342,7 @@ def test_smoke_contract_flags_every_broken_shape(payload, rc, expected):  # noqa
 @pytest.mark.parametrize(
     ("poison", "expected"),
     [
-        # The rehearsal's own shape: a full budget that moved nothing.
+        # A no-work run's shape: a full budget that moved nothing.
         ({"residual_before": 1.9e-04, "residual_after": 1.9e-04}, "shows no measurable effect"),
         ({"residual_after": 0.9}, "shows no measurable effect"),
         ({"residual_after": None}, "cannot show its own work"),
@@ -567,7 +567,7 @@ def test_workflow_smoke_is_plumbing_only_and_the_abort_leg_is_offline_and_fail_c
 
 
 # ---------------------------------------------------------------------------
-# The self-seeding weights job (qk-ci-referee delta, 2026-10-20)
+# The self-seeding weights job
 #
 # The seed job used to be `workflow_dispatch`-only: the no-PR-content property
 # was bought with a job-level `if`, and the price was that nobody ever ran it —

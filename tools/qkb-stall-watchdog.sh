@@ -1,23 +1,22 @@
 #!/bin/sh
 # qkb-stall-watchdog — host-side liveness watchdog for a quantibbler PTQ run.
 #
-# Why host-side: both failure modes on record (the 17:16 attempt that hung
-# 4.8 h at the memory ceiling mid-TuneFP, and the 23:10Z fatal run) silenced
-# the in-process breadcrumb writer when the process wedged — an in-process
+# Why host-side: a process that wedges at the memory ceiling silences its own
+# in-process breadcrumb writer — an in-process
 # watchdog shares fate with the thing it watches. This runs OUTSIDE the
 # container: it reads the breadcrumbs file the driver appends to and asks
 # the docker daemon whether the container is still alive.
 #
 # Stall predicate: no new line of ANY species (stage marker or ~5 s memory
 # heartbeat) in --stall-min minutes. Stage markers alone legitimately gap
-# ~21 min (measured 1294 s in the fatal run); heartbeats do not, so total
+# ~21 min (measured 1294 s); heartbeats do not, so total
 # line-silence is the honest signal. Default 15 min = ~180 heartbeat
 # intervals of margin, and still converts a 4.8 h silent hang into a
 # 15-minute alarm.
 #
 # ALERT-ONLY by default. Killing a 20 h run is an operator decision, not a
 # heuristic's; alerts land in the breadcrumbs file itself (the forensic tail
-# a post-mortem reads) and in --log. --kill-after-min N opts into
+# a forensic tail reads) and in --log. --kill-after-min N opts into
 # `docker stop` after N minutes of sustained post-alert silence.
 #
 # Self-identifies at start (argv, pid, thresholds) per the crash-trail rule:

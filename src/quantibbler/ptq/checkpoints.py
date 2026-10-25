@@ -60,8 +60,8 @@ from ..qk_report import json_safe, stage_journal_record
 
 _FINGERPRINT_NAME = "fingerprint.json"
 
-#: The stage journal beside the checkpoints (qk-fix-tunefp-teacher post-fire
-#: row): one JSON line per stage event, appended as the event fires, so a run
+#: The stage journal beside the checkpoints: one JSON line per stage event,
+#: appended as the event fires, so a run
 #: that dies in the pipeline tail can still be resumed with a record that
 #: attests the stages it actually executed. See :func:`read_stage_log` for the
 #: fingerprint guard and the per-line shape check that keep a re-read record
@@ -71,7 +71,7 @@ _STAGE_LOG_NAME = "stage-events.jsonl"
 # Observer-only config fields, excluded from the fingerprint: a probe observes
 # the solver, it does not steer it, so a resume created without a probe may be
 # relaunched WITH one without tripping stale-state protection (and vice
-# versa). Recorded as an explicit consequence in qk-fail-fast-loop's design.md.
+# versa).
 _FINGERPRINT_EXCLUDED = ("progress_probe",)
 
 # Fields whose EFFECTIVE value can be overridden at solve time by an env var.
@@ -142,7 +142,7 @@ def config_fingerprint(cfg) -> str:
     return hashlib.sha256(blob).hexdigest()
 
 
-#: The model-identity component's key in fingerprint.json (qk-fp-model-identity).
+#: The model-identity component's key in fingerprint.json.
 #: Unlike the fields in ``_FINGERPRINT_PROVENANCE`` below, this one is FOLDED, not
 #: merely recorded: a divergence refuses the resume. It carries the digest (what
 #: refuses) and the inventory it was built from (what NAMES the divergence) --
@@ -227,7 +227,7 @@ _FINGERPRINT_PROVENANCE = (
     "solver",
     "rank",
     "factor_mode",
-    # Lane 3: regime state, recorded so the artifact names the regime that
+    # Regime state, recorded so the artifact names the regime that
     # produced the stored blocks. A diff against a relaunch is visible to a
     # human reader; it does not refuse the resume.
     "admm_reg",
@@ -489,7 +489,7 @@ def save_block_checkpoint(ckpt_dir: Path, index: int, layers: list, *, y_b=None)
             "nothing restored. Fix the solve, not the checkpoint."
         )
     arrays: dict[str, np.ndarray] = {}
-    # Lane 2: the fp-stream teacher target rides along with the block. The resume
+    # The fp-stream teacher target rides along with the block. The resume
     # path then recovers ``x_fp`` as exactly the activation the solve path
     # advanced to, so both branches are ``x_fp = y_b`` and there is no conditional
     # pristine forward whose placement can desync the streams. Stored float64

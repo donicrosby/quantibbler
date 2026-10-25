@@ -90,9 +90,9 @@ def test_scn_block_loop_order():
     assert captured["inputs"][1].shape == x.shape
 
     # Stage order per block: capture -> tune_fp -> lb_admm -> ste. Additional
-    # record events (the sign-extraction stage map entry added by
-    # qk-fix-tunefp-teacher) are filtered out here: the assertion is about
-    # the Algorithm 1 stage ORDER, not about the record's exact event count.
+    # record events (the sign-extraction stage map entry) are filtered out
+    # here: the assertion is about the Algorithm 1 stage ORDER, not about the
+    # record's exact event count.
     alg1 = [e for e in events if e in ("capture", "tune_fp", "lb_admm", "ste")]
     assert alg1[:4] == ["capture", "tune_fp", "lb_admm", "ste"]
     assert alg1[4:8] == ["capture", "tune_fp", "lb_admm", "ste"]

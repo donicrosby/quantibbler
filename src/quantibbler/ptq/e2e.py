@@ -94,7 +94,7 @@ class TinyGateModel(nn.Module):
                 # perfect solver), so no honest gate could pass on it; the
                 # class-exact seed keeps the gate a PIPELINE check (packing,
                 # scales, round trip) rather than an approximation-capacity
-                # lottery. Documented in design.md implementation notes.
+                # lottery.
                 ub1 = torch.randint(0, 2, (wide, rank), generator=g).double() * 2 - 1
                 vb1 = torch.randint(0, 2, (rank, d), generator=g).double() * 2 - 1
                 s1v = 0.5 + torch.rand(wide, generator=g).double()

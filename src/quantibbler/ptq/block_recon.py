@@ -74,14 +74,13 @@ from .solver_backend import solver_backend_provenance, to_host_np
 # FORM ("weighted MSE", [NQ] App. C :3012) but writes no weight formula. This stage
 # weights the block-output squared residual against the cached teacher by the terminal
 # linear's robust-diagonalized Phase-1 output statistic; WHICH statistic does the
-# weighting is the design's informed assumption IA-1, not a paper pin. The marker
+# weighting is the design's informed assumption, not a paper pin. The marker
 # therefore declares the anchor (nq_3012) and the assumption together, so a reader of
 # a run record cannot mistake one for the other.
 # ``STE_RESCOPE_MARKER`` — a scoped linear whose refinement produced zero
 # accepted sign flips is declared scale-only in the run record under this
-# marker (qk-fix-ste-sign-adaptation, scenario
-# ``sign_adaptation_is_effective_or_declared``); a zero-flip completion
-# without the declaration is impossible by construction.
+# marker; a zero-flip completion without the declaration is impossible by
+# construction.
 TUNE_FP_LOSS_MARKER = "tune_fp_loss: weighted_mse_nq_3012 (weight source: informed_assumption)"
 STE_RESCOPE_MARKER = "ste_scale_only_declared"
 
@@ -167,8 +166,8 @@ def _record_solver_probe(name, w, bal, res, cfg) -> None:
     So ``rel_raw > 1`` is EXPECTED on the ADMM arm and is not a defect signal.
     It reads as magnitude drift of the continuous latents, which is the
     consensus shaping that makes the packed product good in the first place
-    (Bug Hunter's ALS-ceiling audit: ADMM packs at -0.133, SVD at -0.389 on the
-    same real weight). Driving that drift toward 1.0 would trade away the pack
+    (measured: ADMM packs at -0.133, SVD at -0.389 on the same real weight).
+    Driving that drift toward 1.0 would trade away the pack
     fidelity the solver is chosen for. Do not close it as a balance-stage bug;
     the useful reading is that raw fit is a weak predictor of the served
     artifact, which is the same lesson the SVD arm taught from the other side.
@@ -198,7 +197,7 @@ def _record_solver_probe(name, w, bal, res, cfg) -> None:
         return float(np.linalg.norm(wf - recon)) / nw if nw > 0.0 else float("nan")
 
     value, source = rho_end_provenance(cfg.rho_end)
-    # Lane 3 regime identity, resolved exactly as the solver resolves it. A row
+    # Regime identity, resolved exactly as the solver resolves it. A row
     # without these cannot say which regime produced its cos, which is the whole
     # point of the regime label (old-regime rows are inadmissible for the claim).
     reg_value, reg_source = admm_reg_provenance(cfg.admm_reg)
@@ -840,22 +839,21 @@ def _tune_fp(
         # vacuous-teacher early return carries it too.
         "loss_weight": "uniform" if loss_weight is None else "terminal_grad",
         "loss_weight_source": loss_weight_source,
-        # The scale applied to the weighted MSE (qk-tune-loss-scale): the raw
-        # resolved weight's mean and the mean actually handed to the loss. Both
-        # `None` when the uniform/fallback path ran (there is no scale to audit).
+        # The scale applied to the weighted MSE: the raw resolved weight's mean
+        # and the mean actually handed to the loss. Both `None` when the
+        # uniform/fallback path ran (there is no scale to audit).
         "loss_weight_mean_before": loss_weight_mean_before,
         "loss_weight_mean_after": loss_weight_mean_after,
         "loss_weight_normalization": (
             LOSS_WEIGHT_MEAN_NORMALIZATION if loss_weight_mean_after is not None else None
         ),
-        # The resolution-derived vacuous floor and its derivation inputs
-        # (qk-tune-loss-scale, requirement 2). Filled once the optimizer exists.
+        # The resolution-derived vacuous floor and its derivation inputs.
+        # Filled once the optimizer exists.
         "gradient_floor": None,
         "floor_optimizer_eps": None,
         "floor_dtype_rel_resolution": None,
         "floor_param_dtype": None,
-        # The device the stage's tensors ran on, and the stage's own row time
-        # (qk-ptq-speedups: scenario `ste_tunefp_gpu_zero_algorithm_change`).
+        # The device the stage's tensors ran on, and the stage's own row time.
         # Both are read off the ACTIVATION, the authority for where this stage
         # executes: an unlabelled device cannot say which numerics produced the
         # row, and a row without its own time cannot replace the proposal's
@@ -1073,9 +1071,9 @@ def _tune_latent_ste(
         "linears": sorted(facs),
         "steps": 0,
         "per_linear": {},
-        # qk-tune-loss-scale: the weighted-MSE scale actually applied, the
-        # resolution-derived floor, and the declared inertness. Same contract as
-        # the TuneFP row -- `None` means "not measured", never "fine".
+        # The weighted-MSE scale actually applied, the resolution-derived floor,
+        # and the declared inertness. Same contract as the TuneFP row -- `None`
+        # means "not measured", never "fine".
         "loss_weight_mean_before": loss_weight_mean_before,
         "loss_weight_mean_after": loss_weight_mean_after,
         "loss_weight_normalization": (
@@ -1087,8 +1085,7 @@ def _tune_latent_ste(
         "floor_param_dtype": None,
         "vacuous": False,
         "inert": None,
-        # The device the stage's tensors ran on, and its own row time
-        # (qk-ptq-speedups: scenario `ste_tunefp_gpu_zero_algorithm_change`).
+        # The device the stage's tensors ran on, and its own row time.
         # Read off the activation — the authority for where this stage executes.
         "device": str(x_b.device),
         "elapsed_s": None,
@@ -1601,7 +1598,7 @@ def reconstruct_block(
             if params and params[0].dtype.is_floating_point:
                 x_b = x_b.to(params[0].dtype)
     if y_b is None:
-        # Teacher capture (Algorithm 1 lines 9-10; qk-fix-tunefp-teacher A1):
+        # Teacher capture (Algorithm 1 lines 9-10):
         # ``Y_b = B^FP_b(X_b)`` — the PRISTINE fp block applied to the
         # compressed-prefix stream. The weights come from a frozen reference
         # copy, never the live module: by block N the live model carries
@@ -1645,16 +1642,16 @@ def reconstruct_block(
             "capture",
             x_b=x_b.detach().clone(),
             y_b=y_b.detach().clone(),
-            # Lane 2: the fp-stream activation at this block. Recorded so the
-            # lockstep advance is verifiable from the artifact -- a capture that
+            # The fp-stream activation at this block. Recorded so the lockstep
+            # advance is verifiable from the artifact -- a capture that
             # carries only the compressed reading cannot distinguish "both streams
             # advanced together" from "only the student's did".
             x_fp=x_fp.detach().clone() if x_fp is not None else None,
             # Stream provenance, by construction rather than by inspection: x_b is
             # the compressed prefix's reading (the student's input) and y_b is the
-            # fp reference's (the teacher target). Lane 2 exists precisely to make
-            # y_b come from the fp stream, so these labels are what the verdict's
-            # provenance condition reads.
+            # fp reference's (the teacher target). The dual-stream construction
+            # exists precisely to make y_b come from the fp stream, so these labels
+            # are what the verdict's provenance condition reads.
             x_b_stream="compressed",
             y_b_stream="fp",
             teacher_source=teacher_source,
@@ -1681,9 +1678,9 @@ def reconstruct_block(
     # they are the statistics source; the embedding-adapter path is the
     # fallback for direct reconstruct_block calls with token-id batches.
     if stats_book is None:
-        # Fail-closed (qk-nanoquant-alignment-lane1: caller_supplied_head_for_bare_block):
+        # Fail-closed:
         # a bare block carries no scalar loss, so collection refuses rather
-        # than invent one. Measured 2026-10-24: the natural candidate — the
+        # than invent one. Measured: the natural candidate — the
         # teacher reconstruction loss ``2*(block(x_b) - y_b)/N`` — is
         # IDENTICALLY ZERO here, because at collection time the live block is
         # still pristine and the teacher is its frozen deepcopy (same
@@ -1727,26 +1724,24 @@ def reconstruct_block(
     refine = cfg.ablation != "untuned-signs"
     facs: dict[str, FactorizedLinear] = {}
     linears_by_name = dict(quantizable_linears)
-    # --- Figure 3 placement, re-ruled (qk-fix-tunefp-teacher): the figure
-    # depicts a PER-TARGET-LINEAR cycle — tune the still-FP remainder,
-    # factorize the target, refine the target — not one pass per block. The
-    # old pre-group/remainder `split` machinery existed only to serve the
-    # falsified once-per-block reading and is gone.
+    # --- Figure 3 placement: the figure depicts a PER-TARGET-LINEAR cycle —
+    # tune the still-FP remainder, factorize the target, refine the target —
+    # not one pass per block. The old pre-group/remainder `split` machinery
+    # existed only to serve the falsified once-per-block reading and is gone.
     #
-    # Ruling (a): target 1 is factorized first, WITHOUT a preceding TuneFP.
-    # A pass before the first factorization has nothing factorized, so the
-    # student block IS the pristine teacher block on the same ``x_b``: the
-    # objective is identically zero and so is its gradient — precisely the
-    # vacuous shape this change exists to remove. Every later target gets
-    # TuneFP(still-FP remainder) -> factorize -> STE, so TuneFP fires N-1
-    # times per block and STE fires N times (target 1 included).
-    # --- TuneLatentSTE budget (qk-fix-ste-sign-adaptation, pre-fire
-    # re-ruling): the refinement unit is the LINEAR — Step-3 prose names "the
-    # current target linear layer" (singular), Eq. 10's optimization variables
-    # are ONE linear's (U, V, s1, s2), and App. C attaches the factorized
-    # stage's 8 epochs to that per-linear refinement. Every scoped linear
-    # therefore consumes the FULL per-linear budget `epochs x (n // batch)` on
-    # the just-factorized linear per Figure 3's right panel; there is no
+    # Target 1 is factorized first, WITHOUT a preceding TuneFP. A pass before
+    # the first factorization has nothing factorized, so the student block IS
+    # the pristine teacher block on the same ``x_b``: the objective is
+    # identically zero and so is its gradient — exactly the vacuous shape this
+    # placement removes. Every later target gets TuneFP(still-FP remainder) ->
+    # factorize -> STE, so TuneFP fires N-1 times per block and STE fires N
+    # times (target 1 included).
+    # --- TuneLatentSTE budget: the refinement unit is the LINEAR — Step-3 prose
+    # names "the current target linear layer" (singular), Eq. 10's optimization
+    # variables are ONE linear's (U, V, s1, s2), and App. C attaches the
+    # factorized stage's 8 epochs to that per-linear refinement. Every scoped
+    # linear therefore consumes the FULL per-linear budget `epochs x (n // batch)`
+    # on the just-factorized linear per Figure 3's right panel; there is no
     # block-pooled split. The schedule record carries each linear's full
     # scheduled steps.
     n_rows = int(x_b.shape[0])
@@ -1783,8 +1778,8 @@ def reconstruct_block(
             reason="absent_canonical_layer",
         )
     # --- Solver arm for THIS block's balance stage. ``magnitude_balance`` is
-    # part of the algorithm on EITHER backend (qk-solver-backend, scenario
-    # ``admm_algorithm_unchanged``), and it refits the solve that just ran, so
+    # part of the algorithm on EITHER backend, and it refits the solve that
+    # just ran, so
     # it must resolve the arm exactly as ``lb_admm`` resolves its own solve:
     # SOLVER_BACKEND over cfg.solver_backend, an explicit QUANTIBBLER_DEVICE
     # honoured, implicit torch on a box with no accelerator refused. Resolving
@@ -1832,9 +1827,9 @@ def reconstruct_block(
         # [NQ] B.1 Eq. 26 folds the preconditioner as a square root on each side:
         #   W~ = sqrt(D~_out) W sqrt(D~_in)
         # Folding the raw diagonals charges the scales' magnitude twice across the
-        # factor pair. Lane 0 measured the sqrt fold (Arm B) beating the raw fold on
-        # every probed layer (mean delta +0.0825), which is why this ships and the
-        # shipped raw fold is retired. Both the factorization and the balance below
+        # factor pair. The sqrt fold (Arm B) beats the raw fold on every probed
+        # layer (mean delta +0.0825), which is why this ships and the shipped raw
+        # fold is retired. Both the factorization and the balance below
         # consume these values, so the fold and its un-fold stay consistent by
         # construction rather than by two matching edits.
         d_in_t = np.sqrt(d_in_t)
@@ -1856,7 +1851,7 @@ def reconstruct_block(
             res = lb_admm(w_tilde, cfg)
             p_u, p_v = res.P_u, res.P_v
         bal = magnitude_balance(p_u, p_v, d_out_t, d_in_t, target=w, backend=balance_backend)
-        # Post-balance divergence gate (qk-divergence-guards): a diverged
+        # Post-balance divergence gate: a diverged
         # layer must abort here, before it poisons this block's refinement
         # and every later block's calibration inputs.
         check_layer_magnitude(
@@ -2241,9 +2236,9 @@ def reconstruct_model(
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         done = ckpt.completed_blocks(ckpt_dir)
         if done:
-            # The LIVE model is the identity these checkpoints must belong to
-            # (qk-fp-model-identity): a config-only fingerprint accepts another
-            # model's block archives under the same PTQConfig. (The stage-journal
+            # The LIVE model is the identity these checkpoints must belong to:
+            # a config-only fingerprint accepts another model's block archives
+            # under the same PTQConfig. (The stage-journal
             # seeding that used to live here is api.quantize_model's now —
             # resume_stage_events — so the model is threaded there too.)
             ckpt.check_fingerprint(ckpt_dir, cfg, model)
@@ -2280,8 +2275,8 @@ def reconstruct_model(
     if _stem_param is not None:
         _batches = _batches.to(_stem_param.device)
     x_running = _forward_chunked(stem, _batches).detach()
-    # Lane 2: the fp reference stream. Identical at the stem (so block 1's skip
-    # stays the documented identity case), then advanced through the PRISTINE
+    # The fp reference stream. Identical at the stem (so block 1's skip stays
+    # the documented identity case), then advanced through the PRISTINE
     # children while ``x_running`` advances through the quantized ones. The
     # divergence between the two IS the lane.
     x_fp = x_running.clone()
@@ -2303,8 +2298,8 @@ def reconstruct_model(
         if not has_quant:
             continue
         # Expected names for THIS block, from the LIVE model and through the
-        # SAME predicate the solver scopes with (qk-fix-fp-resume-guard): the
-        # checkpoint write and the checkpoint restore are both driven by what
+        # SAME predicate the solver scopes with: the checkpoint write and the
+        # checkpoint restore are both driven by what
         # the block is OWED, never by what an archive contains.
         expected_names = _scope_filter(_quantizable_names(block), cfg.layer_scope)
         _note_block_progress(len(results) + 1, name, x_running)
@@ -2344,10 +2339,10 @@ def reconstruct_model(
             # silently turn the teacher into a quantized-prefix teacher.
             teacher_block = teacher_children.get(name)
             with torch.no_grad():
-                # Lane 2: the teacher target is the fp-stream reading
+                # The teacher target is the fp-stream reading
                 # Y_b = B^FP_b(x_fp), NOT the compressed stream. Feeding x_running
-                # here made the teacher a function of the quantized prefix, which
-                # is the defect tasks 1 and 3 pin.
+                # here made the teacher a function of the quantized prefix — the
+                # defect this construction removes.
                 y_b = _forward_chunked(teacher_block if teacher_block is not None else block, x_fp)
             result = reconstruct_block(
                 block,
@@ -2380,8 +2375,8 @@ def reconstruct_model(
         # (frozen binaries already written back by reconstruct_block).
         with torch.no_grad():
             x_running = _forward_chunked(block, x_running)
-        # Observer hook (qk-fail-fast-loop): the live host model is now exactly
-        # the quantized prefix of ``len(results)`` blocks — the same object the
+        # Observer hook: the live host model is now exactly the quantized
+        # prefix of ``len(results)`` blocks — the same object the
         # driver measures at the end. ``depth`` counts quantized blocks 1-based.
         # An unset probe is a single ``is not None`` test: no overhead, no
         # control-flow change. A raising probe propagates unchanged, so no

@@ -88,9 +88,9 @@ os.environ.setdefault("MALLOC_ARENA_MAX", "2")
 os.environ.setdefault("OMP_NUM_THREADS", "4")
 os.environ.setdefault("MKL_NUM_THREADS", "4")
 # numpy's scipy-openblas is PTHREADS-backed: OMP/MKL pins do NOT size its
-# pool, which defaults to visible-CPU count. Measured 2026-10-18 (r64
-# slab): unpinned 235.5s vs pinned-to-optimum 3.98s — a 59x thread-thrash
-# artifact, not algorithm scaling. Pin it with the others.
+# pool, which defaults to visible-CPU count. Measured: unpinned 235.5s vs
+# pinned-to-optimum 3.98s — a 59x thread-thrash artifact, not algorithm
+# scaling. Pin it with the others.
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -444,14 +444,12 @@ def quantized_config(
         stage_global=stage_global,
         verbose=True,
         progress_probe=progress_probe,
-        # Root-cause ablation knobs (qk-root-cause-ablation): solver state, so
-        # they ride the checkpoint fingerprint and a resumed fp run can never
-        # resume as a binary run.
+        # Root-cause ablation knobs: solver state, so they ride the checkpoint
+        # fingerprint and a resumed fp run can never resume as a binary run.
         factor_mode=args.factor_mode,
         ablation=args.ablation,
         layer_scope=args.layer_scope,
-        # Paper-faithful claim + the bounded discrete flip pass
-        # (qk-fix-tunefp-teacher / qk-fix-ste-sign-adaptation): both are
+        # Paper-faithful claim + the bounded discrete flip pass: both are
         # solver state and both are recorded in the run report.
         paper_faithful=bool(getattr(args, "paper_faithful", False)),
         ste_flip_pass_budget=int(getattr(args, "ste_flip_pass_budget", 0)),
@@ -609,7 +607,7 @@ def export_model_directory(
 
     # Norm sidecar: fp32 LE — per block, each declared inventory slot's
     # vector in order, then the model-final norm. The loader requires the
-    # inventory-derived count (qk-attention N-1); asserted below so a
+    # inventory-derived count; asserted below so a
     # miscount fails here, not at server load.
     norms = np.ascontiguousarray(norm_weights, dtype=np.float32)
     (out_dir / "norms.bin").write_bytes(norms.tobytes(order="C"))
@@ -635,7 +633,7 @@ def export_model_directory(
     # Self-check the loader-facing contract (cheap, byte-level — this is the
     # tripwire that catches a half-updated export before 30 GPU-minutes are
     # spent): layer stream header parses, and the norm sidecar carries
-    # exactly the inventory-derived float count (qk-attention N-1.0).
+    # exactly the inventory-derived float count.
     first = sorted(layer_files.values())[0]
     header = struct.unpack("<4sIIIII", (out_dir / first).read_bytes()[:24])
     assert header[0] == b"QPK1" and header[1] == 1, header
@@ -749,16 +747,10 @@ def _resolve_rev() -> str:
 
 
 #: Environment variables that can carry the launch-owner stamp, in precedence
-#: order (change qk-launch-attribution; the 2026-10-25 qk-pertarget-v4 incident,
-#: where an ownerless paper-faithful fire ran and nothing in the launch path
-#: could say whose it was). The label-named spellings are accepted deliberately
-#: and are the SAME evidence under another spelling, never a second contract:
-#: the incident ruling named the CONTAINER LABELS
-#: (`qkb_launch_owner` / `qkb_launch_card`), and docker never shows a container
-#: its own labels -- so a launcher that read the ruling rather than this
-#: contract can only hand that vocabulary to the process as env. A direct
-#: `docker run` therefore has to carry the owner as an environment variable;
-#: the labels alone are not visible from inside the container.
+#: order. The label-named spellings are the SAME evidence under another
+#: spelling, never a second contract: docker never shows a container its own
+#: labels, so a direct `docker run` can only carry the owner as an environment
+#: variable -- the labels alone are not visible from inside the container.
 _LAUNCH_OWNER_VARS = ("QKB_LAUNCH_OWNER", "QKB_LAUNCH_LABEL_OWNER", "qkb_launch_owner")
 _LAUNCH_CARD_VARS = ("QKB_LAUNCH_CARD", "QKB_LAUNCH_LABEL_CARD", "qkb_launch_card")
 
@@ -858,8 +850,8 @@ def main() -> int:
     # The DEFAULTED trail is per-launch (`breadcrumbs-<pid>.log`) so two
     # concurrent sandbox runs write two files instead of interleaving into one;
     # an explicit QUANTIBBLER_BREADCRUMBS is honored EXACTLY, because the
-    # container is single-run and that path is a contract (the wrapper's dated
-    # run headers and the forensics read path point at that one file).
+    # container is single-run and that path is a contract (the wrapper's run
+    # headers and the forensics read path point at that one file).
     breadcrumb_path = Path(
         os.getenv(
             "QUANTIBBLER_BREADCRUMBS",
@@ -1047,15 +1039,14 @@ def main() -> int:
     args = parser.parse_args()
 
     # Ownership BEFORE anything is written: a run that cannot name its owner is
-    # refused, and a refused run leaves no trail line claiming to be a launch
-    # (change qk-launch-attribution; the 2026-10-25 ownerless fire).
+    # refused, and a refused run leaves no trail line claiming to be a launch.
     owner, card = _launch_owner()
 
     # The launch line is the trail's FIRST line and the only record a corpse is
     # guaranteed to have written: it names the process (pid), the exact argv, the
     # code (rev), the output target (out) and who owns the run (owner, card), so
     # a surviving trail self-attributes without kernel records or container
-    # metadata (change qk-launch-attribution). `out` is only known after the
+    # metadata. `out` is only known after the
     # parse, and nothing may reach the file before this line — the watchdog
     # thread therefore starts HERE, below it, rather than above it, and the
     # memory.events crumb follows it.
@@ -1117,8 +1108,8 @@ def main() -> int:
         args.seed + 1,
     )
     print(f"      calib {len(calib)} batches, eval {len(held_out)} batches")
-    # The evaluation verdict (qk-fix-tunefp-teacher: "the eval pedestal is the
-    # one geometry the label can't see"). `eval_rows` records the numerator;
+    # The evaluation verdict ("the eval pedestal is the one geometry the label
+    # can't see"). `eval_rows` records the numerator;
     # this record states what it is a numerator OF, so the artifact can prove
     # its own coverage and the evaluator is named rather than inferred. It is
     # recorded beside the method verdict, never folded into it: comparability
@@ -1165,7 +1156,7 @@ def main() -> int:
             "faithful claim may not."
         )
 
-    # --- independent tune geometry (qk-nq-recreation-bar) ----------------
+    # --- independent tune geometry ---------------------------------------
     # `--seq-len` is the EVALUATION protocol (WT2 at 2048 for the bar) and
     # `--tune-seq-len` bounds the per-block reconstruction windows. The
     # windows are SLICED from the same calibration rows rather than
@@ -1190,7 +1181,7 @@ def main() -> int:
     ppl_base = perplexity_from_logits(lambda b: model(b.to(_device)), held_out)
     print(f"      ppl_baseline = {ppl_base:.4f}", flush=True)
 
-    # --- per-block progress probe (qk-fail-fast-loop) -------------------
+    # --- per-block progress probe ----------------------------------------
     # The run dies in minutes instead of after the full block sweep. The fp
     # baseline is measured ONCE, here, before quantization: the head slice of
     # the SAME held-out batches the end-of-run gate uses, in the same order,
@@ -1269,10 +1260,10 @@ def main() -> int:
 
     _cfg_defaults = _PTQConfig()
     _rho_end_value, _rho_end_source = _rho_prov(_cfg_defaults.rho_end)
-    # Lane 3: the stabilizer floor is solve-time env-overridable, resolved from
+    # The stabilizer floor is solve-time env-overridable, resolved from
     # the same helper the solver calls so the report cannot disagree with the run.
     _reg_value, _reg_source = _reg_prov(_cfg_defaults.admm_reg)
-    # qk-solver-backend: the arm and the device it actually ran on, resolved the
+    # The arm and the device it actually ran on, resolved the
     # same way the solver resolves them (SOLVER_BACKEND knob, explicit device env).
     _backend_value, _backend_source = _backend_prov(_cfg_defaults.solver_backend)
     _solver_device = _solver_resolve_device(
@@ -1293,7 +1284,7 @@ def main() -> int:
         solver_device=_solver_device,
     )
 
-    # --- stage record (qk-fix-tunefp-teacher / qk-fix-ste-sign-adaptation) --
+    # --- stage record ------------------------------------------------------
     # The pipeline reports every stage through this recorder; the JSON-safe
     # part of each record lands in the run report as `stages`, and
     # `stage_map` resolves it against [NQ] Algorithm 1 lines 0-28. Tensors are
@@ -1371,8 +1362,8 @@ def main() -> int:
             )
             # Attention geometry + norm inventory + norm weights straight from the
             # live model (never hardcoded): the exported artifact must be
-            # self-describing for the server's transformer forward (qk-attention
-            # N-1/N-2/E-2.0). The inventory IS the layout contract — sidecar order
+            # self-describing for the server's transformer forward. The inventory
+            # IS the layout contract — sidecar order
             # here must match the engine's slot semantics exactly. Head tying is
             # the MODEL's property, not an export choice (Qwen3 ships untied).
             tied = bool(getattr(causal.config, "tie_word_embeddings", False))
@@ -1417,11 +1408,10 @@ def main() -> int:
             factor_mode=args.factor_mode,
             artifact=measured_artifact,
         )
-        # The fidelity label is a COMPUTED verdict over the run's own record
-        # (qk-fix-tunefp-teacher, scenario `label_flips_on_runtime_deviations` /
-        # `label_flips_on_mechanism_deviations`): the flag AND an empty
-        # deviation list AND no mechanism-class deviation. Every condition is
-        # recorded beside it, so a reader can see which one denied the claim.
+        # The fidelity label is a COMPUTED verdict over the run's own record:
+        # the flag AND an empty deviation list AND no mechanism-class deviation.
+        # Every condition is recorded beside it, so a reader can see which one
+        # denied the claim.
         faithful_label, fidelity_conditions = fidelity_verdict(
             prov["solver"],
             identity["runtime_deviations"],
@@ -1467,7 +1457,7 @@ def main() -> int:
             },
             "probe_abort": None,  # no abort: the key exists on both paths
             "artifact_exported": artifact_exported,
-            # Stage record + Algorithm 1 map (qk-fix-tunefp-teacher): every
+            # Stage record + Algorithm 1 map: every
             # executed stage resolved against lines 0-28 with its deviations
             # named, so "paper-faithful" is auditable from the report alone.
             # `paper_faithful` is the COMPUTED verdict (flag AND no deviation),
@@ -1517,7 +1507,7 @@ def main() -> int:
             probe_history,
         )
     except VacuousTeacherError as exc:
-        # Fail-closed stage gate (qk-fix-tunefp-teacher A3): a run that
+        # Fail-closed stage gate: a run that
         # CLAIMS paper fidelity must not continue on a TuneFP pass that
         # executed nothing. The report is written through the same
         # dump_report path as every other shape, with `paper_faithful: false`

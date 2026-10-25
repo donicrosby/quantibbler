@@ -41,10 +41,10 @@ from quantibbler.ptq import block_recon as br
 from quantibbler.ptq.config import PTQConfig, StageHyper
 
 #: The campaign tolerance class: relative movement of a stage metric between the
-#: fp32 accelerator run and the fp64 CPU reference must stay within this. It is
-#: the class the owning design.md names (±0.002 on production layers) and
-#: qk-solver-backend's spec restates — quoted, never read off this fixture's
-#: measurement (a bound fitted to the run it judges is not an acceptance gate).
+#: fp32 accelerator run and the fp64 CPU reference must stay within this. The
+#: bound is quoted from the campaign's agreement (±0.002 on production layers),
+#: never read off this fixture's measurement (a bound fitted to the run it judges
+#: is not an acceptance gate).
 TOLERANCE = 2e-3
 
 _SRC = (

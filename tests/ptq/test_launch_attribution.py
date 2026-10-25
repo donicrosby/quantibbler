@@ -66,10 +66,9 @@ import sys
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 DRIVER = REPO_ROOT / "tools" / "quantize_hf_model.py"
 
-#: The launch-ownership contract (2026-10-25 incident, `qk-pertarget-v4`): a
-#: fire names its owner or does not start. The three owner spellings are the SAME
-#: evidence -- the incident ruling named the container labels, which a container
-#: can only receive as env (docker never shows a container its own labels).
+#: The launch-ownership contract: a fire names its owner or does not start. The
+#: three owner spellings are the SAME evidence -- the container labels can only
+#: reach the process as env (docker never shows a container its own labels).
 _OWNER_VARS = ("QKB_LAUNCH_OWNER", "QKB_LAUNCH_LABEL_OWNER", "qkb_launch_owner")
 _CARD_VARS = ("QKB_LAUNCH_CARD", "QKB_LAUNCH_LABEL_CARD", "qkb_launch_card")
 OWNER = "launch-attribution-test"
@@ -368,12 +367,10 @@ def test_scn_configured_path_honored_exactly(tmp_path):
     )
 
 
-# --- launch ownership: no owner, no run (2026-10-25 incident) ----------------
-# Spec delta: `openspec/changes/qk-launch-attribution/specs/qk-ptq/spec.md`.
-# On 2026-10-25T18:10:32Z an ownerless paper-faithful fire ran on this box
-# (container `quantibbler-ptq-run`, launch id `qk-pertarget-v4-20261025T1815Z`)
-# and nothing in the launch path could say whose run it was. A run that cannot
-# name its owner is now refused before it writes anything.
+# --- launch ownership: no owner, no run ---------------------------------------
+# A fire that names no owner leaves nothing in the launch path that could
+# say whose run it was. A run that cannot name its owner is refused before it
+# writes anything.
 #
 # RED-FIRST RECORD -- observed before this cut, against the pre-change driver
 # bytes at `HEAD` (`git show HEAD:tools/quantize_hf_model.py`, copied outside the

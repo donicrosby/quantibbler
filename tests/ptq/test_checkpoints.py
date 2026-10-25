@@ -192,7 +192,7 @@ def test_scn_prefix_probe_and_checkpoint_fingerprints_unchanged_in_shape(tmp_pat
         "solver",
         "rank",
         "factor_mode",
-        # Lane 3 regime state: recalibrated rho endpoints (plural) and the
+        # Regime state: recalibrated rho endpoints (plural) and the
         # scale-relative stabilizer floor.
         "admm_reg",
         "rho_start",
@@ -208,7 +208,7 @@ def test_scn_prefix_probe_and_checkpoint_fingerprints_unchanged_in_shape(tmp_pat
     expected = {
         "fingerprint",
         *_FINGERPRINT_PROVENANCE,
-        # The model-identity component (qk-fp-model-identity): the one payload key
+        # The model-identity component: the one payload key
         # whose value is a nested record, and the one that is FOLDED rather than
         # record-only — a digest mismatch refuses the resume, so a resume can no
         # longer accept another model's archives under the same PTQConfig. Its

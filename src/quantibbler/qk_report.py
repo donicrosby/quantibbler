@@ -82,11 +82,11 @@ OK_LINE: float = float(math.ceil(_LITTLEBIT2_FUNCTIONAL_PPL / _FP16_REFERENCE_PP
 # second threshold anywhere would be a hand-tuned re-pin (the same rule
 # ``COLLAPSE_LINE`` already carries).
 #
-# The measured pair this exists to reject: the rehearsal recorded
+# The measured pair this exists to reject: a recorded pair
 # ``1.9e-04 -> 1.9e-04`` on a full TuneFP budget — display-identical, i.e. no
 # measurable work — and every gate in the pipeline passed it. Real runs clear
-# it by two orders of magnitude (the fatal fire's TuneFP moved
-# ``0.3184 -> 0.1973``, 38%).
+# it by two orders of magnitude (a run's TuneFP moved ``0.3184 -> 0.1973``,
+# 38%).
 STEPS_EFFECT_EPS: float = 1e-3
 
 FAILED = "failed"
@@ -190,7 +190,7 @@ def _as_finite_float(value: Any) -> float | None:
 
 #: Prefix probes begin no earlier than this depth. Block-0-alone prefixes are
 #: the noisiest, and block-0 damage surfaces amplified at depth >= 2 anyway
-#: (the forensics' compounding pattern).
+#: (damage compounds along the depth chain).
 MIN_PROBE_DEPTH = 2
 
 
@@ -388,7 +388,7 @@ def geometry_deviations(seq_len: Any, tune_seq_len: Any, calibration_rows: Any =
                 ),
             }
         )
-    # Sequence-counted by contract (qk-geometry-conformance): the driver's
+    # Sequence-counted by contract: the driver's
     # ``--calibration-seqs`` knob counts sequences ([NQ] Sec 3.4/App. C) and its
     # counter reports the same unit, so this comparison is sequences against the
     # protocol's 128 — no batch factor belongs here.
@@ -502,7 +502,7 @@ def fidelity_conditions(
         "no_discrete_flip_pass": not flip_pass,
         "no_scale_only_rescope": not rescope,
         "no_vacuous_teacher": not vacuous,
-        # Lane 2: a paper_faithful claim owes evidence that the TEACHER TARGET came
+        # A paper_faithful claim owes evidence that the TEACHER TARGET came
         # from the fp-stream capture. Before this condition every capture event was
         # accepted as a teacher source, so a run whose teacher read the compressed
         # stream was labelled faithful -- the fidelity hole the lane closes.
@@ -857,7 +857,7 @@ def provenance(
         # it cannot be audited. Value AND source, or the field lies by omission.
         "rho_end": rho_end,
         "rho_end_source": rho_end_source,
-        # Lane 3 regime identity: the schedule start and the stabilizer floor
+        # Regime identity: the schedule start and the stabilizer floor
         # are both run-defining, and the floor is env-overridable. Same rule as
         # rho_end -- value AND source, or the row cannot be audited.
         "rho_start": rho_start,

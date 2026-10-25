@@ -127,10 +127,9 @@ def _run_driver(
 ) -> subprocess.CompletedProcess:
     """Invoke the real driver the way the user's command line invokes it."""
     env = dict(os.environ)
-    # The launch-ownership contract (change qk-launch-attribution; the 2026-10-25
-    # ownerless fire): a driver run names its owner or refuses to start. This
-    # suite owns the runs it spawns, so it says so -- the refused half of that
-    # contract is pinned in tests/ptq/test_launch_attribution.py.
+    # The launch-ownership contract: a driver run names its owner or refuses to
+    # start. This suite owns the runs it spawns, so it says so -- the refused
+    # half of that contract is pinned in tests/ptq/test_launch_attribution.py.
     env["QKB_LAUNCH_OWNER"] = "pytest"
     env["HF_HUB_CACHE"] = str(corpus_root)
     env["QUANTIBBLER_BREADCRUMBS"] = str(out_dir / "breadcrumbs.log")

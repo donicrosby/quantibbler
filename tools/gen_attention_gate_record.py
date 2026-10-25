@@ -96,7 +96,7 @@ RECORD_NAME = "attention_gate.json"
 SCHEMA = "quantibbler.attention_gate/1"
 DEFAULT_ACTIVATIONS = "crates/quantibbler-kernels/tests/fixtures/attention_sage.json"
 
-# The gate's clauses ([SA] §4.3 class; spec delta `qk-server`). These are the
+# The gate's clauses ([SA] §4.3 class). These are the
 # SERVER's constants (`crates/quantibbler-server/src/model/mod.rs`) recorded
 # here so the record states the gate it was generated under; the server refuses
 # a record that declares anything else.

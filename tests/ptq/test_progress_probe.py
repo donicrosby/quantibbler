@@ -139,6 +139,6 @@ def test_probe_can_be_added_on_resume_without_refusing(tmp_path, monkeypatch):
 
     # Both boundaries are probed: a restored block is still written back into
     # the host and the prefix still advances through it, so the probe observes
-    # the same live-prefix boundary a fresh run's would. (design.md's "remaining
-    # blocks only" sentence is about *solve* work, not about probe coverage.)
+    # the same live-prefix boundary a fresh run's would. (The "remaining blocks
+    # only" rule is about *solve* work, not about probe coverage.)
     assert fired == [(1, "lin1"), (2, "lin2")]

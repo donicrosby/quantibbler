@@ -551,7 +551,7 @@ def test_scn_resumed_run_fp_stream_bitwise_identical(tmp_path) -> None:
         path.unlink()
         np.savez(path, **kept)
     # `clean` is the model the legacy-resume below runs (deep-copied), and the
-    # fingerprint binds model identity as well as config (qk-fp-model-identity).
+    # fingerprint binds model identity as well as config.
     write_fingerprint(legacy_dir, cfg, clean)
     lkeep = done[0]
     lexp = [b for b in done if b != lkeep]

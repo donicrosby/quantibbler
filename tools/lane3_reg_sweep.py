@@ -43,7 +43,7 @@ import numpy as np
 from quantibbler.ptq.config import PTQConfig
 from quantibbler.ptq.lb_admm import SOLVER_PROBE_ENV, _admm_reg, lb_admm, rho_end_provenance
 
-# The ruling's endpoints. A geometric mid is added so the default decision sees
+# The endpoints. A geometric mid is added so the default decision sees
 # the CURVE between ~4 orders of reg, not two dots.
 DEFAULT_REGS = (1e-5, 3e-2)
 NORMALIZATION = "column"

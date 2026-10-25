@@ -34,7 +34,7 @@ def test_scn_divergence_gate_diverged_aborts():
     """Out-of-band inflation: dedicated error names layer, ratio, and band."""
     U, V, s1, s2 = _factors(1)
     W = (s1[:, None] * (np.sign(U) @ np.sign(V).T)) * s2[None, :]
-    W_small = W / 1e5  # reconstructed >> fp target: the incident species
+    W_small = W / 1e5  # reconstructed >> fp target: the divergence species
     cfg = PTQConfig(solver_backend="numpy", rank=8)  # default band [1e-3, 1e3]
     with pytest.raises(Exception) as ei:
         check_layer_magnitude("layers.0.inner.mlp.down_proj", U, V, s1, s2, W_small, cfg)

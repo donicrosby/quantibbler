@@ -45,8 +45,7 @@ from quantibbler.ptq.config import PTQConfig, StageHyper  # noqa: E402
 
 #: The proposal's own row counts at paper geometry ([NQ] 28 blocks, 7 scoped
 #: linears per block → TuneFP fires N-1 = 6 times per block, STE once per
-#: linear). Cited from ``openspec/changes/qk-ptq-speedups/proposal.md``'s cost
-#: table and labelled as an EXTRAPOLATION here: this fixture's block carries two
+#: linear). Labelled as an EXTRAPOLATION here: this fixture's block carries two
 #: linears, so its own row count would be 28 fires / 56 linears, not these.
 PROPOSAL_ROWS = {"tune_fp": 168, "ste": 196}
 

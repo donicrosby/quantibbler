@@ -129,7 +129,7 @@ def recorded_command(out_dir: Path) -> list[str]:
         "1",
         "--seq-len",
         "64",
-        # The data knobs count SEQUENCES (qk-geometry-conformance). The recorded
+        # The data knobs count SEQUENCES. The recorded
         # run's 1 calibration / 2 eval PACKED BATCHES are 8 / 16 sequences in the
         # knob's own unit -- and under the sequence unit the old literals are not
         # even legal: the driver refuses a count that is not a whole number of
@@ -158,9 +158,8 @@ def _offline_env(cache: Path, out_dir: Path) -> dict:
     env = dict(os.environ)
     env.update(
         {
-            # The launch-ownership contract (change qk-launch-attribution; the
-            # 2026-10-25 ownerless fire): a driver run names its owner or refuses
-            # to start. CI owns this run, and says so.
+            # The launch-ownership contract: a driver run names its owner or
+            # refuses to start. CI owns this run, and says so.
             "QKB_LAUNCH_OWNER": "ci-harness",
             "HF_HUB_CACHE": str(cache),
             "HF_HUB_OFFLINE": "1",

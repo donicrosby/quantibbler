@@ -88,7 +88,7 @@ class ProgressReporter:
         self.phase = phase
         self.total = total
         self.target = target
-        # The measured per-phase rates the ETA is derived from (`spec.md:98-102`).
+        # The measured per-phase rates the ETA is derived from.
         # Injectable so a test can pin the derivation against a known rate instead
         # of whatever this machine has measured.
         self._rate_constants = RATE_CONSTANTS if rate_constants is None else rate_constants
@@ -134,9 +134,9 @@ class ProgressReporter:
         # has completed. The third must not be rendered as a number -- `eta_s` is
         # None there and formatting it raises, which is the crash this branch
         # exists to prevent. `unsafe` is the fence's word and only the fence's: a
-        # prediction that is numerically clean but untrusted (stale constants,
-        # `spec.md:144-148`) renders as its number with `eta_sane=false`, so the
-        # reader can tell "unreasonable" from "fine, but not trustworthy today".
+        # prediction that is numerically clean but untrusted (stale constants)
+        # renders as its number with `eta_sane=false`, so the reader can tell
+        # "unreasonable" from "fine, but not trustworthy today".
         if record["eta_s"] is None:
             eta = "unknown"
         elif record["eta_s"] > record["max_sane_eta"]:
@@ -149,10 +149,10 @@ class ProgressReporter:
             f"eta_sane={str(record['eta_sane']).lower()}"
             + (" complete" if record.get("complete") else "")
         )
-        # `spec.md:144-148`: the first line carries the staleness warning itself,
-        # not just a telemetry field -- a reader on stdout must see that the
-        # constants may not describe this machine. The breadcrumb line keeps its
-        # format untouched: the watchdog parses it (task 5.2).
+        # The first line carries the staleness warning itself, not just a
+        # telemetry field -- a reader on stdout must see that the constants may
+        # not describe this machine. The breadcrumb line keeps its format
+        # untouched: the watchdog parses it.
         if record.get("constants_stale"):
             keys = ",".join(record.get("constants_stale_keys", []))
             line += f" constants_stale=true keys={keys}"
@@ -226,8 +226,8 @@ class ProgressReporter:
         rate = done / elapsed if elapsed > 0 and done > 0 else 0.0
 
         eta_s: float | None = None
-        # `spec.md:98-102`: the predicted completion is derived from the measured
-        # per-phase rate constants, not from this run's observed pace -- an
+        # The predicted completion is derived from the measured per-phase rate
+        # constants, not from this run's observed pace -- an
         # instrument that extrapolates from whatever pace it has seen is exactly
         # the bar that reads "20 minutes" for a 21-hour stage. A phase or target
         # with no measured entry has no prediction, and nothing completed yet has
@@ -262,8 +262,8 @@ class ProgressReporter:
         if self._pending_warning:
             record["constants_stale"] = True
             record["constants_stale_keys"] = list(self._stale_keys)
-            # `spec.md:144-148`: a constant mismatch is itself a reason the
-            # prediction cannot be trusted, so the same line that carries the
+            # A constant mismatch is itself a reason the prediction cannot be
+            # trusted, so the same line that carries the
             # warning reports `eta_sane=false`. The run still proceeds.
             record["eta_sane"] = False
             self._pending_warning = False

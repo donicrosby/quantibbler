@@ -69,7 +69,7 @@ def test_sf1_3_known_layer_exact_bytes():
     stream = qpk1.serialize(UB_3X7, VB_5X7, S1_F16, S2_F16, dtype=np.float16)
     assert len(stream) == 48
     assert stream == EXPECTED_3_5_7_F16
-    # Field-for-field at the documented offsets (design.md D1).
+    # Field-for-field at the documented offsets.
     assert stream[:4] == b"QPK1"
     assert struct.unpack("<5I", stream[4:24]) == (1, 1, 3, 5, 7)
     assert stream[24:30] == S1_F16.astype("<f2").tobytes()
@@ -334,7 +334,7 @@ def test_sf4_3_sub1bpw_at_target_rank():
         measured = qpk1.bpw_from_bytes(len(stream), dout, din)
         assert measured < 1.0, f"BPW {measured} at r={r} is not sub-1-bit"
 
-    # design.md D7 pins this exact shape: 219032 bytes -> BPW ~ 0.0389.
+    # The documented shape: 219032 bytes -> BPW ~ 0.0389.
     ub, vb = _random_factors(rng, dout, din, 100)
     stream = qpk1.serialize(
         ub, vb, np.zeros(dout, np.float16), np.zeros(din, np.float16), dtype=np.float16

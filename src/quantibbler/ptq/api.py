@@ -101,8 +101,8 @@ def quantize_model(
     # checkpoint is a fresh start and inherits nothing.
     if stage_sink is not None and checkpoint_dir is not None:
         # ``model`` is required by the fingerprint guard this read sits behind:
-        # the resume fingerprint binds the model identity, not only the config
-        # (qk-fp-model-identity), so the reader names the model it reads for.
+        # the resume fingerprint binds the model identity, not only the config,
+        # so the reader names the model it reads for.
         stage_sink[:0] = ckpt.resume_stage_events(Path(checkpoint_dir), config, model)
 
     quant_names = _quantizable_names(model)
@@ -148,7 +148,7 @@ def quantize_model(
         for st in result.layers:
             layers[st.name] = st
 
-    # fp mode is a MEASUREMENT (qk-root-cause-ablation D-5): it makes no bits at
+    # fp mode is a MEASUREMENT: it makes no bits at
     # all, so there are no layer states to account for and nothing to calibrate.
     # Scale calibration serves a packed artifact, while the fp rung measures
     # HOST-WEIGHT reconstruction fidelity — that skip is the ablation boundary

@@ -140,9 +140,9 @@ def stage_evidence_findings(payload_text: str) -> list[str]:
     # Keyed on the CLAIM (``--paper-faithful`` was on the argv), NOT the rolled-up
     # verdict ``paper_faithful``: the verdict is False on ANY failed run (an
     # unrelated probe abort flips it), which would silently disable this detector
-    # on exactly the full-budget runs it exists to audit. Measured: the v5
-    # re-fire claimed fidelity, ran 12 TuneFP cycles + 14 STE rows that netted
-    # 0.0, and the verdict-keyed gate returned 0 findings.
+    # on exactly the full-budget runs it exists to audit. Measured: one run
+    # claimed fidelity, ran 12 TuneFP cycles + 14 STE rows that netted 0.0, and
+    # the verdict-keyed gate returned 0 findings.
     faithful = report.get("fidelity_conditions", {}).get("paper_faithful_flag") is True
     cycles: dict[tuple[str, Any], list[tuple[float, float]]] = {}
 

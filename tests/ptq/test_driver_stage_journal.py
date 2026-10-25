@@ -41,7 +41,7 @@ from quantibbler.ptq.checkpoints import stage_log_path
 from quantibbler.qk_report import stage_journal_record
 
 #: The required stages that only the interrupted launch executes — the five the
-#: card names as the false-deny this journal fixes.
+#: journal exists to recover so a resumed run is not falsely denied.
 _SOLVE_CONDITIONS = (
     "required_capture_executed",
     "required_tune_fp_executed",

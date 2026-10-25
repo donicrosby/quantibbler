@@ -21,7 +21,7 @@ def test_scn_e2e_gate_detects_divergence_before_export(monkeypatch):
     def inflated_balance(p_u, p_v, d_out_tilde, d_in_tilde, **kw):
         bal = real_balance(p_u, p_v, d_out_tilde, d_in_tilde, **kw)
         # Inflate the FIRST balanced layer the pipeline solves (a
-        # block-0 stand-in): 1e6x the scales — the incident signature.
+        # block-0 stand-in): 1e6x the scales — the divergence signature.
         if not inflated_balance.done:
             inflated_balance.done = True
             bal.s1 = bal.s1 * 1e6

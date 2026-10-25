@@ -24,7 +24,7 @@ __all__ = ["PTQConfig", "StageHyper", "PrefixProbeAbort"]
 _COMPUTE_DTYPES = ("float64", "float32")
 _SOLVER_BACKENDS = ("torch", "numpy")
 _SCALE_DTYPES = ("float16", "float32")
-# Root-cause ablation knobs (change qk-root-cause-ablation): each isolates ONE
+# Root-cause ablation knobs: each isolates ONE
 # constraint so a failing run says which stage lies. Unknown values are
 # validation errors, never silent defaults (D-6).
 _FACTOR_MODES = ("binary", "fp")
@@ -169,10 +169,10 @@ class PTQConfig:
     # 400-iteration LB-ADMM (measured on production layers) while ADMM
     # spends 66-83 s/layer at rank 512. Off = SVD init, balance, polish.
     solver: Literal["admm", "svd"] = "admm"
-    # Lane 3: endpoints recalibrated for the NORMALIZED regime. The old
+    # Endpoints recalibrated for the NORMALIZED regime. The old
     # 1e-2 -> 1e-1 pair was characterised against the absolute-ridge solver
     # and does not carry over.
-    # Lane 3: scale-relative stabilizer offset. Anchored to the normalized
+    # Scale-relative stabilizer offset. Anchored to the normalized
     # design's own scale, so the ridge magnitude is relative to the data rather
     # than absolute -- which is what makes the solve invariant to a target
     # rescale. QK_ADMM_REG overrides it at solve time (admm_reg_provenance).
@@ -185,28 +185,28 @@ class PTQConfig:
     stage_latent: StageHyper = field(default_factory=lambda: StageHyper(1e-5, 1, 8))
     stage_global: StageHyper = field(default_factory=lambda: StageHyper(1e-6, 1, 8))
     cosine_schedule: bool = True
-    # --- root-cause ablation knobs (change qk-root-cause-ablation) ---------
+    # --- root-cause ablation knobs -----------------------------------------
     # MEASUREMENT knobs, never landing knobs: a run carrying a non-default
     # value is an ablation, and its verdict is data, not a release candidate.
     # All three are solver state — they join the checkpoint fingerprint, so a
-    # resumed fp run can never resume as a binary run (D-6).
+    # resumed fp run can never resume as a binary run.
     factor_mode: Literal["binary", "fp"] = "binary"
     ablation: Literal["none", "untuned-signs"] = "none"
     layer_scope: Literal["all", "self_attn", "mlp"] = "all"
-    # --- paper-faithful run flag (change qk-fix-tunefp-teacher) ------------
+    # --- paper-faithful run flag ------------------------------------------
     # A run that CLAIMS paper fidelity fails closed on any
     # ``tune_fp_vacuous_teacher`` event instead of continuing with pristine
     # weights: under the [NQ] Figure 3 placement the operative TuneFP call
     # always has factorized in-block layers, so a zero first-step gradient is
     # a construction defect, never legitimate nothing-to-compensate. The
     # per-target loop's first-target skip is distinct and remains correct:
-    # under Lane 2's dual streams its justification is "nothing to compensate
+    # under the dual streams its justification is "nothing to compensate
     # yet" -- the block is still entirely FP and the teacher is its deepcopy,
     # so no factorization has degraded anything for TuneFP to repair. Default
     # False keeps the diagnostic semantics (event recorded, stage skipped).
     # Solver state: it joins the checkpoint fingerprint.
     paper_faithful: bool = False
-    # --- bounded discrete flip pass (change qk-fix-ste-sign-adaptation) ----
+    # --- bounded discrete flip pass ----------------------------------------
     # Fallback 3 of the mechanism ladder: proposals per factor per linear,
     # accepted only on a decrease of the block-reconstruction objective. The
     # paper has no discrete flip pass, so any nonzero value is an EXPLICIT
@@ -215,7 +215,7 @@ class PTQConfig:
     # sign crossing is declared scale-only under the greppable re-scope
     # marker — never a silent zero-flip completion.
     ste_flip_pass_budget: int = 0
-    # Observer hook (change qk-fail-fast-loop): called by the sequential
+    # Observer hook: called by the sequential
     # block reconstruction after each block is written back into the host
     # model, as ``probe(model, depth, name)`` with the live host, the 1-based
     # count of quantized blocks now live, and the block's module name. May
@@ -223,11 +223,11 @@ class PTQConfig:
     # probe changes nothing. Excluded from the checkpoint fingerprint — an
     # observer is not solver state (compare=False keeps it out of equality
     # too).
-    # --- weighted-MSE loss mode (change qk-nanoquant-alignment-lane4) -----
+    # --- weighted-MSE loss mode --------------------------------------------
     # Paper-anchored loss form ([NQ] App. C :3012, weighted MSE): the TuneFP and
     # TuneLatentSTE losses weight each output feature by the robust diagonal of
     # the block's terminal linear's Phase-1 output statistic (d_out_raw). The
-    # WEIGHT SOURCE is an informed assumption (design.md IA-1) -- the paper
+    # WEIGHT SOURCE is an informed assumption -- the paper
     # states the statistic construction (Algorithm 1 lines 2-5, Step 2-1 Eq. 2)
     # but not that this is where it is consumed, so the stage records name the
     # mode and the source rather than implying the paper dictated them.

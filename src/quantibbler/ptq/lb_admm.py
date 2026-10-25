@@ -77,7 +77,7 @@ class ADMMTrace:
     n_cholesky: int = 0
     n_jitter: int = 0
     svid_sign_preserved: list[bool] = field(default_factory=list)
-    # Lane 3: ``mean(diag(Xn^T Xn))`` of the row/col-normalized design, one entry
+    # ``mean(diag(Xn^T Xn))`` of the row/col-normalized design, one entry
     # per continuous half-update (two per iteration: U-update then V-update).
     # This is the scale the ridge is anchored to: with a unit-diagonal design it
     # is ~1 regardless of layer scale, which is the regime's whole claim. Recorded
@@ -655,7 +655,7 @@ def magnitude_balance(
         # the raw sign matrix Ub Vbᵀ instead would charge the scales'
         # magnitude twice and shrink the product orders of magnitude below
         # W (observed as a ~0.99 relative reconstruction error on an exact
-        # rank-r target; crystallized in design.md implementation notes).
+        # rank-r target).
         b = (s1[:, None] * xp.astype(ub, xp.dtype("float64"))) @ (
             s2[:, None] * xp.astype(vb, xp.dtype("float64"))
         ).T

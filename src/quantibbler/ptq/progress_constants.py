@@ -94,8 +94,8 @@ RATE_CONSTANTS: dict[str, dict[str, dict[str, object]]] = {
 # What the constants above were measured against. Any mismatch means the numbers
 # may no longer describe this machine, so the reporter says so instead of
 # rendering a confident ETA from stale measurements. All three keys are
-# compared -- `spec.md:144-146` names commit, ROCm and PyTorch, and dropping one
-# of them is a constant silently trusted past the point it described.
+# compared -- commit, ROCm and PyTorch -- and dropping one of them is a
+# constant silently trusted past the point it described.
 MEASURED_ENV: dict[str, str] = {
     "target": "gfx1151",
     "commit": "d1a2020",

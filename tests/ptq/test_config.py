@@ -26,7 +26,7 @@ def test_scn_config_defaults():
     assert cfg.tau is None or cfg.tau > 0
     # ADMM: K = 400 with linear penalty schedule ([NQ] App. C), endpoints A-2.
     assert cfg.admm_max_iter == 400
-    # Lane 3 (normalized regime): the endpoints are recalibrated to linear ~0->1.
+    # Normalized regime: the endpoints are recalibrated to linear ~0->1.
     # The old 1e-2 -> 1e-1 pair was characterised against the absolute-ridge
     # solver and does not carry over: with the scale-relative stabilizer
     # rho*mean(diag(X^T X)) + reg the data term is O(1) at the normalized design,

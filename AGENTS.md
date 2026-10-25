@@ -26,6 +26,25 @@ proposing or implementing anything.
 - Specs fold into `openspec/specs/` only via `openspec archive <id>` when
   the change genuinely completes — not by hand, not early.
 
+## Comment law
+
+A comment earns its line only if it explains WHY: a non-obvious constraint, a
+gotcha, or a formula anchored to the pinned paper (paper-section citations
+stay — see `openspec/config.yaml`). It dies if it narrates provenance or
+process (change ids, ticket/card ids, "user stated/wants/requires", ruling
+narration, incident post-mortems), restates the code beside it, or echoes a
+spec file. Strip the citation, keep the substance: the durable rule and its
+measured numbers stay, the run ledger does not. Enforced at review; the suite
+gates behavior, not prose.
+
+## Environment law
+
+uv owns the environment. There is one `.venv`, created and refreshed by
+`uv sync`; bespoke venvs are slop and are deleted on sight. Never `pip` into a
+second environment, never run bare `python`. Disposition: `.venv-bh` (5.6 GB)
+and `.venv-suite` (1.2 GB) were deleted 2026-10-25 — zero references in any
+tracked file, zero live holders.
+
 ## Layout
 
 - `src/quantibbler/` — Python package (compressor/trainer)

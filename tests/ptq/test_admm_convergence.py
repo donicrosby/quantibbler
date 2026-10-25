@@ -119,9 +119,8 @@ def test_consensus_residual_decreases_over_the_first_half(solved):
     # with 67 of the first-half steps rising, because the warm start is pulled
     # onto the SVID proxy before the data term reasserts itself. That is a
     # feature of a non-convex iteration, not noise, and requiring zero rises
-    # would assert a purely convex descent this solver does not have -- the
-    # planner ruling's "monotonically" is refuted by measurement on this fixture
-    # and on all 20 real layers.0 rows in artifacts/lane0-fire-r3-20261024.
+    # would assert a purely convex descent this solver does not have -- refuted
+    # by measurement on this fixture and on all 20 real layers.0 rows.
     assert residuals[-1] <= 1.1 * residuals.min(), (
         f"schedule did not reach its own floor: terminal {residuals[-1]:.6g} vs "
         f"min {residuals.min():.6g} ({residuals[-1] / residuals.min():.4f}x)"

@@ -55,28 +55,28 @@ SEQ_LEN="${SEQ_LEN:-512}"
 # Deliberately NOT defaulted to anything: an empty value must reach the driver
 # as "unset" so the driver's own default (tune == --seq-len) applies.
 TUNE_SEQ_LEN="${TUNE_SEQ_LEN:-}"
-# Root-cause ablation knobs (qk-root-cause-ablation): STRICT PASSTHROUGH, exactly
-# like TUNE_SEQ_LEN — empty means UNSET, so the driver's own default applies. The
-# wrapper never authors a measurement geometry or mode: a launch that claims to
-# be an fp rung must have said so.
+# Root-cause ablation knobs: STRICT PASSTHROUGH, exactly like TUNE_SEQ_LEN —
+# empty means UNSET, so the driver's own default applies. The wrapper never
+# authors a measurement geometry or mode: a launch that claims to be an fp rung
+# must have said so.
 FACTOR_MODE="${FACTOR_MODE:-}"
 ABLATION="${ABLATION:-}"
 LAYER_SCOPE="${LAYER_SCOPE:-}"
-# Paper-faithful claim + the bounded discrete flip pass (qk-fix-tunefp-teacher /
-# qk-fix-ste-sign-adaptation): STRICT PASSTHROUGH like the ablation knobs, and
+# Paper-faithful claim + the bounded discrete flip pass: STRICT PASSTHROUGH
+# like the ablation knobs, and
 # the wrapper never authors either. PAPER_FAITHFUL=1 is the ONLY way a launch
 # claims the paper's method: it switches the stage budgets to [NQ] App. C and
 # makes a TuneFP vacuity event FAIL the run instead of continuing. An empty or
 # 0 value is the gate-shaped pipeline, which is not the paper.
 PAPER_FAITHFUL="${PAPER_FAITHFUL:-}"
 STE_FLIP_PASS_BUDGET="${STE_FLIP_PASS_BUDGET:-}"
-# The data knobs count SEQUENCES (qk-geometry-conformance), so the defaults are
+# The data knobs count SEQUENCES, so the defaults are
 # the [NQ] protocol's own numbers: 128 calibration / 40 eval sequences. The
 # packed-batch size is the driver's business, not the launcher's.
 CALIBRATION_SEQS="${CALIBRATION_SEQS:-128}"
 EVAL_SEQS="${EVAL_SEQS:-40}"
 DRY_RUN="${DRY_RUN:-0}"
-# Lane 0 modes (lane0-rehearsal, lane0-fire) retired at e5c6939 — the harness was deleted.
+# Lane 0 modes (lane0-rehearsal, lane0-fire) are retired: the harness is gone.
 MODE="${MODE:-ptq}"
 
 # Refuse arguments instead of ignoring them. This wrapper pins the eval geometry
@@ -91,22 +91,20 @@ if [ "$#" -ne 0 ]; then
 fi
 
 # --- launch ownership: an unattributable fire is refused, not announced --------
-# Incident 2026-10-25T18:10:32Z: container `quantibbler-ptq-run`, image
-# `quantibbler-ptq:rocm-official`, launch id `qk-pertarget-v4-20261025T1815Z`,
-# paper-faithful, no owner stamp, no announcement, no GO -- and nothing in the
-# launch path could say whose run it was. An ownerless fire is now REFUSED here,
-# on the host, before the name is taken and before 32g is spent; the driver
-# refuses the same launch from inside (tools/quantize_hf_model.py::_launch_owner),
-# which is what closes the direct-`docker run` path this wrapper never sees.
+# A fire with no owner stamp, no announcement and no GO is not
+# attributable after the fact, and nothing in the launch path would say whose it
+# was. It is REFUSED here, on the host, before the name is taken and before 32g
+# is spent; the driver refuses the same launch from inside
+# (tools/quantize_hf_model.py::_launch_owner), which is what closes the
+# direct-`docker run` path this wrapper never sees.
 #
 # The contract is QKB_LAUNCH_OWNER (who is launching) + QKB_LAUNCH_CARD (the
-# kanban card that owns the fire). The label-named spellings are accepted as the
-# SAME evidence, not as a second contract: the incident ruling named the
-# container labels (`qkb_launch_owner` / `qkb_launch_card`), and docker never
-# shows a container its own labels, so the launched process can only carry that
-# vocabulary as env. Read by the wrapper, stamped below as labels AND mirrored
-# into the container env, so the driver's gate sees the same evidence -- this
-# script is the launcher's owner-of-record, never a place to author one.
+# kanban card that owns the fire). The label-named spellings are the SAME
+# evidence, not a second contract: docker never shows a container its own labels,
+# so the launched process can only carry that vocabulary as env. Read by the
+# wrapper, stamped below as labels AND mirrored into the container env, so the
+# driver's gate sees the same evidence -- this script is the launcher's
+# owner-of-record, never a place to author one.
 OWNER="${QKB_LAUNCH_OWNER:-${QKB_LAUNCH_LABEL_OWNER:-${qkb_launch_owner:-}}}"
 CARD="${QKB_LAUNCH_CARD:-${QKB_LAUNCH_LABEL_CARD:-${qkb_launch_card:-}}}"
 if [ -z "$OWNER" ] || [ -z "$CARD" ]; then
@@ -415,26 +413,24 @@ if [ "$DRY_RUN" != "0" ]; then
 fi
 
 mkdir -p /opt/data/tmp "$(dirname "$OUT")"
-# Append a run header instead of truncating. This file is the forensic tail a
-# post-mortem reads after a 137, and the previous run's tail is exactly what a
-# killed run leaves behind: `: >` destroyed it on every launch, including the
-# one that died (`tail` from the *failed* run is the useful line, not the new
-# run's first sample).
+# Append a run header instead of truncating. This file is the forensic tail read
+# after a killed run, and the previous run's tail is exactly what a kill leaves
+# behind: `: >` destroyed it on every launch, including the one that died (`tail`
+# from the *failed* run is the useful line, not the new run's first sample).
 # The owner line rides the SAME header the forensics tail already reads, in the
 # tail's own field syntax, so the announcement of who owns a fire is written by
-# the launcher rather than remembered by the person who fired it (change
-# qk-launch-attribution; the 2026-10-25 ownerless fire had no announcement at
-# all). The leading `=== run <ISO> rank=…` shape is unchanged -- the watchdog's
-# line-silence scan and the header greps read it.
+# the launcher rather than remembered by the person who fired it. The leading
+# `=== run <ISO> rank=…` shape is unchanged -- the watchdog's line-silence scan
+# and the header greps read it.
 printf '=== run %s rank=%s solver=%s seq_len=%s tune_seq_len=%s paper_faithful=%s ste_flip_pass_budget=%s compute_dtype=%s image=%s out=%s owner=%s card=%s ===\n' \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-unset}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "${COMPUTE_DTYPE:-float64}" "$IMAGE" "$OUT" "$OWNER" "$CARD" \
   >> /opt/data/tmp/quantibbler-breadcrumbs.log
 
 
-# Host-side stall watchdog (post-23:10Z hardening): the 17:16 attempt hung
-# 4.8 h at the memory ceiling with the in-process breadcrumb writer silenced
-# along with it, so anything inside the container shares that fate. This one
-# runs OUTSIDE, watches for total line-silence in the breadcrumbs log
+# Host-side stall watchdog: a run hung at the memory ceiling silences the
+# in-process breadcrumb writer along with it, so anything inside the container
+# shares that fate. This one runs OUTSIDE, watches for total line-silence in the
+# breadcrumbs log
 # (heartbeats gap ~5 s; stage markers legitimately gap ~21 min), and injects
 # its alerts into that same forensic tail + $OUT/watchdog.log. Alert-only by
 # default; WATCHDOG_KILL_AFTER_MIN opts into docker stop after sustained

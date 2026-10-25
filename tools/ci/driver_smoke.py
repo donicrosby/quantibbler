@@ -73,9 +73,8 @@ def _offline_env(corpus_root: Path, workdir: Path) -> dict:
     env = dict(os.environ)
     env.update(
         {
-            # The launch-ownership contract (change qk-launch-attribution; the
-            # 2026-10-25 ownerless fire): a driver run names its owner or refuses
-            # to start. CI owns this run, and says so.
+            # The launch-ownership contract: a driver run names its owner or
+            # refuses to start. CI owns this run, and says so.
             "QKB_LAUNCH_OWNER": "ci-harness",
             "HF_HUB_CACHE": str(corpus_root),
             "HF_HUB_OFFLINE": "1",
@@ -188,7 +187,7 @@ def invocation(fixture: Path, out_dir: Path) -> list[str]:
         str(MAX_ADMM_ITER),
         "--seq-len",
         str(SEQ_LEN),
-        # The data knobs count SEQUENCES (qk-geometry-conformance): the driver
+        # The data knobs count SEQUENCES: the driver
         # converts them to packed batches and refuses a count that is not a whole
         # number of them (measured: the pre-existing 1/2 here died with
         # "--calibration-seqs counts sequences: 1 is not divisible by the packed

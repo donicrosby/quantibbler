@@ -206,7 +206,7 @@ def test_empty_archive_never_skips_a_solve_end_to_end(tmp_path):
 
     ckpt_dir = tmp_path / "ckpts"
     ckpt_dir.mkdir()
-    # The fingerprint now binds the model identity too (qk-fp-model-identity), so
+    # The fingerprint now binds the model identity too, so
     # it is written for the model that will resume it.
     write_fingerprint(ckpt_dir, cfg, _TinyApiModel(seed=3))
     with open(ckpt_dir / "block-1.npz", "wb") as fh:
