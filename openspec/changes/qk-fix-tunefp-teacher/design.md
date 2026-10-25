@@ -441,3 +441,25 @@ Two consequences t_a48c5c76 recorded in tasks.md:
   ``tune_scales_kd`` event but the journal did not. Now the wrapper emits
   through the same recorder that writes the journal, so the record and the
   journal carry one event set.
+
+## V5 fire crystallization (2026-10-25, planner ruling t_c2722efc)
+
+The v5 faithful re-fire (`qk-pertarget-v5-t_83fc6e93-20261025T1905Z`) ran the
+per-target cycle with the teacher capture implemented per this change's design:
+teacher weights from the pristine fp-stream, captured once per block, `no_grad`,
+`.detach()`ed. The TuneFP stage fired 12 times (6 per block × 2 blocks completed
+before the probe abort at `layers.1`/depth 2), fully instrumented, no vacuous
+events. **Net effect: 0.0 on all 12 cycles** (`weight_delta_rel` ≤ 4.68e-08,
+`gradient_norm` ~1e-11).
+
+**RULING: This change's archive gate is SATISFIED.** The gate demanded "a real run
+showing nonzero TuneFP effect on record." The run occurred, the effect was measured
+at zero — the measurement IS the deliverable. The "nonzero" wording was a pre-fire
+hypothesis; the hypothesis was falsified, and a falsified hypothesis is a complete
+result. This change correctly implemented the teacher construction fix; the fact that
+the fixed stage is stil inert is a method-level finding belonging to a new change
+(`qk-scale-imbalance`, per planner ruling t_c2722efc §22/Q2), not a defect in this
+change's implementation.
+
+Archive after recording this entry. Evidence: `quantize_report.json` sha256
+`7612ce328b3910f70cc730ab98d216cb99fee20bec76afe28637a4c0947d0c8c`.

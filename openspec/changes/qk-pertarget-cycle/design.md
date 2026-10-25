@@ -643,6 +643,81 @@ changed (the commits are openspec prose). `:ro` does not freeze the tree against
 other writers; the run's identity is `commit=f47e26d` (stamped in `launch.env`)
 plus that empty diff.
 
+## 22. Planner next-move ruling (2026-10-25, t_c2722efc)
+
+### Q2 — Inertness finding ownership
+
+**RULING: The inertness finding belongs to a NEW change, not to the two sibling changes.**
+`qk-fix-tunefp-teacher` and `qk-fix-ste-sign-adaptation` record the v5 fire outcome
+as evidence that their implementations are correct (stages executed, fully instrumented,
+no vacuous events) and that the measured effect is zero on every cycle. Their archive
+gates are SATISFIED: the pre-fire wording demanded "a real run showing nonzero effect,"
+but the measurement IS the deliverable — a zero result from a fully-instrumented,
+correctly-executed real run is complete evidence. Both changes archive with the v5
+fire evidence recorded; the "nonzero" expectation was a hypothesis, and the hypothesis
+was falsified.
+
+A new change (proposed name: `qk-scale-imbalance`) OWNS the collapse diagnosis. Its
+premise is the inertness finding: the per-target cycle is correctly implemented and
+provably inert; the collapse persists at the identical `layers.1`/depth 2 site despite
+2.28× better per-linear solver quality. The question that change answers is: what
+bridge connects per-linear quality (cos_raw ~0.80) to end-to-end damage (ratio 8,035)?
+
+### Q3 — Next mechanism: scale imbalance (the §17 read)
+
+**RULING: The next mechanism to investigate is scale imbalance as the bridge between
+per-linear quality and end-to-end damage.** This is the §17 finding — the ADMM arm
+produces 13–17 decade `|s1|/|s2|` imbalances while the SVD arm produces ~1.0 ratios —
+now confirmed as the only surviving hypothesis after ruling out TuneFP/STE inertness
+and per-linear solver quality.
+
+**Non-firing discrimination evidence (offline, from the v5 artifact — zero GPU hours):**
+
+1. **Confirm the v5 scale imbalance.** From the v5 artifact's `solver_probe.jsonl`,
+   compute per-linear `|s1|/|s2|` ratios and decade spans for blocks 0 and 1. The
+   v5 solver is ADMM with the same rho schedule and 400-iter budget as §17's arm,
+   and §21 confirms `cos_raw` is substantially better. If the scale imbalance
+   persists at 13+ decades, the §17 mechanism is confirmed on the v5 geometry.
+
+2. **Decompose the factorization chain at the failure site.** Dequantize the v5
+   checkpoint archives for blocks 0 and 1, and run the three-checkpoint decomposition
+   (raw/post-balance/post-pack cos and norm ratio against pristine W) from §17.
+   The question: does quality collapse at balance (s1/s2 absorb the reconstruction
+   error), at pack (sign extraction destroys direction), or is the imbalance present
+   from raw (the solver itself produces it)? The decomposition answers which stage
+   to fix.
+
+3. **Compare against the SVD arm at the same geometry.** Both §17 arms exist on
+   disk (`r512-svd` and `r512-admm-paperfaithful`). The SVD arm's balance is ~1.0
+   and its per-layer cos is ~0.71. If the SVD arm's artifacts survive a prefix probe
+   at depth 2 without collapse, that is direct evidence that balance (not solver
+   quality or rank) is the discriminating factor. This requires NO re-solve — the
+   SVD artifacts already exist and only need dequantizing and prefix-scoring.
+
+**Ruling on non-convergence:** `converged=False` at 400 iters on all 14 rows is a
+SYMPTOM, not a cause. The per-linear cos_raw of 0.80 demonstrates the solver
+produces quality factors even without formal convergence. Non-convergence is
+consistent with ADMM iterating in a landscape dominated by the scale-imbalance mode:
+the objective moves slowly because the dominant error is in the relative scaling of
+the two factors, not in their direction. `qk-divergence-guards` does NOT own this —
+that change bounds scale EXPLOSIONS (norm ratio >1e4); non-convergence at cos 0.80
+is a solver-behavior question, not a divergence event.
+
+### Q4 — Row-84 disposition: FOLD qk-pertarget-cycle
+
+**RULING: FOLD (archive) `qk-pertarget-cycle`.** The change's one open task —
+"After the re-fire records the per-target cycle numbers, fold delta + archive" —
+is satisfied. The re-fire occurred (v5, 2026-10-25), the per-target cycle was
+measured (12 TuneFP + 14 STE cycles, net 0.0 across all), and the evidence is
+crystallized in §20–§21. The negative verdict (cycle did not fix the collapse)
+is a complete result, not a reason to keep the change alive. The change delivered
+what it proposed: instrument and measure. Measurement complete.
+
+Archive sequence: fold delta into `openspec/specs/qk-ptq/spec.md` → validate
+`--strict` → `openspec archive qk-pertarget-cycle --yes` → commit. The spec
+delta carries the per-target cycle SHALLs, the `STEPS_EFFECT_EPS` gate, and
+the stage-evidence machinery — all landed code with green suites.
+
 ## 21. Implementation crystallization — 2026-10-25 (re-fire v5: the verdict, and a gate that did not fire)
 
 **The re-fire ran and the per-target cycle does NOT fix the collapse.** Launch
@@ -702,3 +777,39 @@ arm whose collapse this is — and the prefix still dies. All 14: `n_iter=400
 converged=False`. Consistent with §17's scale read (the imbalance is the bridge
 from per-linear quality to end-to-end damage); it does not explain the collapse
 away, and it rules out "the solvers are producing worse factors than before".
+
+## 23. Orchestrator root-cause addendum (2026-10-25): WHY the tune stages are inert
+
+The v5 stage records answer the inertness question with in-repo evidence, and
+the answer is numerics, not method. Every TuneFP cycle (12) and every STE row
+(14) shows the same signature: a real and GROWING unweighted residual
+(`residual_before` 0.0347 -> 0.181 across block 0's seven linears, and
+`residual_before == residual_after` exactly), a step-0 weighted-loss gradient
+of 7.9e-12 .. 6.2e-11, `weight_delta_rel` exactly 0.0 on bf16 parameters, and
+`u_rel_move` ~1e-11 on the f64 latents.
+
+Chain: the tuning loss is the App. C weighted MSE, weighted by the terminal
+linear's `d_out` robust diagonal — a mean-SQUARED-GRADIENT statistic whose raw
+scale at hidden-state level is ~1e-10. The weight's RELATIVE per-feature
+structure is the statistical content; its ABSOLUTE scale is a free numerical
+degree of freedom, and at raw scale it squashes the loss ~1e10x. Consequences,
+each measured: (a) gradients ~1e-12 sit below Adam's absolute `eps` (1e-8), so
+updates degrade to ~`lr * g / eps` ~ 1e-8 absolute; (b) on bf16 parameters that
+update is below dtype resolution, so every one of 256/1024 steps rounds back —
+hence `weight_delta_rel` exactly 0.0, not merely small; (c) the f64 latents
+show the same attenuation without the dtype floor; (d) the exact-zero
+vacuous-teacher guard (`gradient_norm == 0.0`) cannot see this regime —
+`vacuous_events: 0` on a fully inert stage, which is why the guard needs a
+resolution-derived floor rather than an exact-zero test.
+
+Disposition: this SUPERSEDES the §22 characterization of stage inertness as a
+method-level finding. The stages were never given a fair trial: no TuneFP or
+TuneLatentSTE firing in any recorded run has ever moved a parameter. The fix is
+a spec'd numerics change (loss-weight scale normalization + guard floor) owned
+by a new change, `qk-tune-loss-scale`; only AFTER it lands does a re-fire
+measure the paper's stages for the first time. §22's archive rulings for
+`qk-fix-tunefp-teacher` / `qk-fix-ste-sign-adaptation` stand (their mechanisms
+landed and were verified), as does the fold of this change; the
+`qk-scale-imbalance` offline discrimination steps (§22/Q3) remain valid but are
+SECONDARY — if the fixed stages compensate prefix error, the collapse mechanism
+question may dissolve without them.

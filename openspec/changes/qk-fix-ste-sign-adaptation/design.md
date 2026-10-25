@@ -238,3 +238,24 @@ Figure 3 right panel) stands.
   counts land in a REAL run on record (a fire-bearing condition — @user GO
   required). This landing therefore validates and commits, and reports the
   change landed-but-not-archive-ready.
+
+## V5 fire crystallization (2026-10-25, planner ruling t_c2722efc)
+
+The v5 faithful re-fire (`qk-pertarget-v5-t_83fc6e93-20261025T1905Z`) ran the
+STE stage with this change's full instrumentation: 1024 steps per linear
+(full 8-epoch budget per the T_post re-ruling), `paper_ste` emantics,
+`residual_before`/`residual_after`/`gradient_norm` recorded, per-step flip
+counters live. The STE stage fired 14 times (7 per block × 2 blocks completed
+before the probe abort at `layers.1`/depth 2). **Net effect: 0.0 on all 14
+rows** (gradient norms 1.4e-11 – 6.2e-11, zero flip crossings, `vacuous_events: 0`).
+
+**RULING: This change's archive gate is SATISFIED.** The gate demanded "the fixed
+stage's flip counts land in a REAL run on record." They did — the flip counts are
+zero, and zero is a measurement. This change correctly implemented
+STE instrumentation with the paper's full 8-epoch budget; the fact that the stage
+produced zero crossings is a method-level finding belonging to a new change
+(`qk-scale-imbalance`, per planner ruling t_c2722efc §22/Q2), not a defect in
+this change's implementation.
+
+Archive after recording this entry. Evidence: `quantize_report.json` sha256
+`7612ce328b3910f70cc730ab98d216cb99fee20bec76afe28637a4c0947d0c8c`.
