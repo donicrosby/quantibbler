@@ -1,11 +1,11 @@
-"""qk-fp-model-identity: the resume fingerprint binds the model identity.
+"""The resume fingerprint binds the model identity.
 
 Scenarios under test: ``model_identity_binds_the_resume``,
 ``model_identity_mismatch_names_the_divergence``,
 ``legacy_fingerprint_without_model_identity_is_refused``,
 ``driver_default_checkpoint_dir_is_per_run``.
 
-The measured defect (probes recorded on the ticket, ``/opt/venv`` CPU wheel):
+The measured defect:
 the fingerprint binds PTQConfig + version + git describe and NOTHING about the
 model, so ``check_fingerprint`` PASSED for a second model against the first
 model's directory. End to end that is a silent chimera — model B
