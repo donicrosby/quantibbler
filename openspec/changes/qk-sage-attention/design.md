@@ -64,6 +64,15 @@ when this change opens, not guessed now.
   exact face exceeds the recorded bound — the face stays
   opt-in-experimental with the failure recorded, per the same discipline
   as the solver's fp32 discussion: accelerators are opt-in, never silent.
+  **PARTLY FALSIFIED 2026-10-25 (task 4.2, measured on real activations).**
+  The PPL half holds: delta **−0.268724** (ratio 0.991422396) over 8 192
+  wikitext-2 test tokens, i.e. the INT8 face does **not** degrade eval-set PPL.
+  The premise's *other* half — that the gate measured on the fixture battery
+  predicts real-activation quality — is what died: on 84 captured
+  real-activation cases the worst Cosine Sim is **0.987266** (gate ≥ 0.999) and
+  **zero** cases meet Relative L1 ≤ 0.02 (worst **0.148357**, 7.4× the gate),
+  while the fixture battery the shipped record is built from passes both at
+  0.999968778 / 7.2183e-3. See the task-4.2 entry below.
 - **Assumption:** cubek-quant 0.3.0's symmetric quantization primitives
   (per-block / per-tensor, q8) cover or compose into [SA]'s per-token-Q/K,
   static-P̃, per-channel-V axes on device. **Wrong-if:** the task-2.1
@@ -132,7 +141,7 @@ reproduce them within its parity budget; the fifth is a fixture gap.
    capture. Skipping was rejected on purpose: a quiet `pytest.skip` is how a
    quality gate stops running without anyone noticing.
 
-## Implementation crystallization (2026-10-25, task 4.1 — measured; task 4.2 blocked)
+## Implementation crystallization (2026-10-25, task 4.1 — measured; task 4.2 measured in its own entry below)
 
 **OQ-1 is measured, and the ≥ 2× assumption is falsified at the shapes the
 mechanism is claimed for.** Instrument: throwaway crate
@@ -221,19 +230,133 @@ that number rather than being argued around it:
   cache-resident traffic a real KV cache sees). Task 2.3 is where that would
   have to be measured, if at all.
 
-**Task 4.2 — not run, and not runnable yet; OQ-2 stays OPEN with its inputs
-named.** Every input the row names is absent: no captured r137 activation record
-exists (`tests/fixtures/attention_sage_activations.npz` /
-`QUANTIBBLER_SAGE_ACTIVATIONS` resolve to nothing on this box — the hook names
-the absence the 1.1–1.2 entry records); the gate tool (3.3) and the INT8 kernel
-path (2.2/2.3) are unlanded, so there is no quantized attention face to measure
-a PPL delta *against*; and both halves of the row — the activation capture (a
-forward pass of the r137 model) and the eval-set PPL — are real-model runs,
-which the lane rule holds for an explicit @user GO. The Python-face half that
-*is* measurable is already recorded (1.1–1.2 entry: worst Cosine Sim 0.99989,
-worst Relative L1 0.0143 on the fixture battery) and is **not** a substitute for
-the real-activation gate — [SA] Table 3's 56–79% worst case is precisely the
-warning that fixture batteries do not see outlier layers.
+**Task 4.2 — SUPERSEDED 2026-10-25: the row was measured in its own entry
+below, and OQ-2 is thereby RESOLVED (against the face).** The retracted reading
+is kept here only so it cannot be quoted as current: it was true when written —
+no captured-activation record existed, the gate tool (3.3) and the INT8 kernel
+path (2.2/2.3) had not landed, and both halves of the row were real-model runs
+held for an explicit @user GO. All three of those conditions then changed: 2.2/
+2.3 and 3.1–3.3 landed, and the GO was given. Nothing above is a substitute for
+the real-activation gate — which is exactly what the measurement below shows,
+and it shows it the hard way.
+
+## Implementation crystallization (2026-10-25, task 4.2 — the real-activation quality gate, measured; OQ-2 resolved AGAINST the face)
+
+**The gate has been run on REAL activations, and the INT8 face FAILS it.** By
+this change's own task-row rule — *"face ships as opt-in-recommended only if
+both gates pass, else recorded as opt-in-experimental with the failing
+numbers"* — the face is recorded **opt-in-experimental**.
+
+Instrument: `/opt/data/tmp/sage-real-activations/capture_and_ppl.py` — **NOT
+repo code**, the section-4 probe pattern task 4.1 set (measurement, never
+argument) — driven by `uv run --no-sync python` on `/opt/venv/bin/python3` with
+**torch 2.14.1+cpu** (`torch.cuda.is_available() = False`: the CPU wheel, so no
+accelerated path is reachable), numpy 2.5.4, transformers 5.20.1, bfloat16.
+
+**Where the measurement sits — the tensors are the faces' own documented
+operands.** The two faces run *inside the model*, registered as attention
+implementations (`ALL_ATTENTION_FUNCTIONS.register`), so `Qwen3Attention.forward`
+hands them precisely what they document: the post-`q_norm`/`k_norm`, post-RoPE
+`query_states`/`key_states`/`value_states`, GQA **un-repeated**, in the
+`(B, n_heads, S, d)` / `(B, n_kv_heads, S, d)` layout both modules' docstrings
+pin. Everything captured is therefore a REAL activation of the model, not a
+fixture. Eval set is the driver's own held-out one: `wikitext-2-raw-v1` **test**,
+seq 256, block-shuffled windows (the driver's selection rule). Model: the local
+HF snapshot `models--Qwen--Qwen3-0.6B` (bf16, 1 503 300 328 B; 28 layers,
+16 heads / 8 kv heads, head_dim 128) — the model the `qwen3-0.6B-r137*` qpk1
+artifacts quantize.
+
+**Instrument self-validation, measured rather than asserted.** Per captured
+case, the exact face vs HF's own eager attention on the *same* captured q/k/v:
+worst relative **8.52e-7** (run 2) / 6.78e-7 (run 1). Model-level, HF's native
+`sdpa` and our exact face give the same eval PPL to **0.098%** (run 2) / 0.063%
+(run 1). That is the harness's noise floor, and every number below is quoted
+against it.
+
+**Two runs (both RC=0):**
+
+| | run 1 — 4 layers × 2 windows | run 2 — 28 layers × 3 windows | gate |
+|---|---|---|---|
+| cases | 8 | 84 | |
+| worst Cosine Sim | 0.994972772 | **0.987266027** (L5 w2) | ≥ 0.999 → **FAIL** |
+| worst Relative L1 | 0.122862964 | **0.148357076** (L5 w0) | ≤ 0.02 → **FAIL** |
+| best Cosine Sim | 0.998514466 | 0.999674763 | |
+| best Relative L1 | 0.050310011 | 0.024245284 | |
+| cases passing cosine ≥ 0.999 | 0/8 | 14/84 | |
+| cases passing Relative L1 ≤ 0.02 | 0/8 | **0/84** | |
+| cases passing BOTH | 0/8 | **0/84** | |
+| eval tokens | 4 096 | 8 192 | |
+| ppl_exact (`attention_tiled`) | 36.970209 | 31.328512 | |
+| ppl_sage (`attention_sage`) | 36.511942 | 31.059789 | |
+| ppl_native (HF `sdpa`, swap check) | 36.993469 | 31.359278 | |
+| **PPL delta (sage − exact)** | **−0.458267** | **−0.268724** | |
+| ratio | 0.987604423 | 0.991422396 | |
+
+Run 2's per-layer worst Cosine Sim / Relative L1 (28 layers, 3 windows each)
+shows the error is spread across depth rather than confined to a tail:
+L0 0.997620/0.051510, L1 0.999652/0.024897, L2 0.999329/0.028834, L3
+0.994365/0.107359, L4 0.989546/0.126718, **L5 0.987266/0.148357**, L6
+0.997591/0.066592, L7 0.994119/0.093224, L8 0.994353/0.099011, L9
+0.997983/0.063201, L10 0.996687/0.070437, L11 0.999280/0.037095, L12
+0.995327/0.088874, L13 0.998652/0.048257, L14 0.996996/0.077367, L15
+0.997452/0.071684, L16 0.999318/0.039550, L17 0.998800/0.047422, L18
+0.998108/0.058647, L19 0.998269/0.064781, L20 0.997810/0.077427, L21
+0.995660/0.119932, L22 0.996317/0.104208, L23 0.996541/0.107791, L24
+0.996669/0.113647, L25 0.993755/0.139814, L26 0.996749/0.099755, L27
+0.994973/0.122863.
+
+**Verdict.** The [SA] §4.3 metric clause **fails on real activations in both
+runs, in both directions, and not marginally**: the best cosine in 84 cases
+(0.999675) still misses 0.999, and **zero of 84 cases** meet Relative L1 ≤ 0.02
+(best 0.024245, worst 0.148357 — 7.4× the gate). The PPL half passes, and passes
+in the *favouring* direction: `delta = −0.268724` at an eval size of 8 192
+tokens, i.e. the INT8 face measures **lower** PPL than the exact face, by 2.9×
+the harness noise floor (so it is not noise, and it is not a degradation).
+Measured, not argued: the face's quality case cannot be made on the metrics and
+does not need to be made on PPL.
+
+**The consequence that matters more than the verdict.** The shipped record
+passes these *same two clauses* at **0.999968778 / 7.2183e-3** (tasks 2.3/3.3)
+— because it is measured on the committed *fixture battery*, whose inputs are
+i.i.d. Gaussians, while 84 real-activation cases fail Relative L1 by 7.4×. This
+is [SA] Table 3's warning landing on us in its own terms: **a fixture battery
+does not see outlier layers, so the shipped enabling evidence over-states the
+face by orders of magnitude.** The face as shipped would be *enabled* on the
+fixture record while failing the gate on the activations it will actually see.
+Routed to the orchestrator (OQ-2's owner) and to the planner.
+
+**Judgment calls, named rather than buried — and each is a place a reader may
+reasonably disagree.**
+
+1. **The capture is the healthy base Qwen3-0.6B, not a dead `r137` qpk1
+   artifact.** Every `qwen3-0.6B-r137*` artifact is `failed` (v0 PPL 1 156 577,
+   v2 943.49, v3/v4 NaN, v7 5 517.8, v8 463 742; the repo's own records), so a
+   quality gate measured on a dead model's activations measures nothing. The
+   base model *is* the model those artifacts quantize, and the attention inputs
+   a quality gate must be robust to are the healthy distribution's outliers.
+   A capture taken from the served qpk1 artifact would require a capture surface
+   inside the Rust engine (the only qpk1 forward); that is a server-contract
+   change, not a probe, and it is **not** claimed here.
+2. **The PPL clause value recorded by this run** is
+   `{eval_set: "wikitext-2-raw-v1 test (8192 tokens, seq 256)", delta:
+   −0.268724, bound: 0.05}` → PASS. The bound `0.05` is **not minted here**: it
+   is the value this change's own shipped gate tests already use
+   (`sage-ppl-ok.json`, `{delta: 0.011, bound: 0.05}`, task 3.3's row), so the
+   clause is recorded under the convention of record rather than a fresh
+   threshold. **A bound for a real-model eval-set PPL is nonetheless a policy
+   threshold and deserves the planner's ruling**; this entry does not claim
+   otherwise, and the measured delta passes any sane bound in either direction.
+3. **No committed gate record is minted from this capture, and that is a named
+   gap rather than an omission.** `gen_attention_gate_record.py` consumes a JSON
+   numerics battery; a real-shape case (seq 256 × 16 heads × 128 dim, ×3
+   operands) is ~82 KB of JSON *per unit of seq*, so an 84-case real battery is
+   orders past the repo's 500 KB large-file gate — a compact (npz / f32-binary)
+   capture path for the gate tool is a format change to landed code and belongs
+   to its own row. The only real model directory (`artifacts/qwen3-0.6B-r137`)
+   is gitignored, and the committed `tests/fixtures/server-model` record belongs
+   to the *tiny synthetic* `server-model-fixture` — writing a Qwen3-0.6B PPL
+   clause into it would be a provenance lie. The numbers above therefore live in
+   this entry, where the change records its verdict, and not in a record file.
 
 ## Implementation crystallization (2026-10-25, task 2.1 — feasibility probe)
 
@@ -582,6 +705,82 @@ measures it yet, and an unmeasured knob is a way to mislabel a record.
   (`load.rs` did not flake this window). No kernels source moved, so no `uv sync
   --reinstall-package quantibbler-kernels` was owed.
 
+## Planner rulings (2026-10-25 — task 4.2 evidence, four decisions; card t_fccd1ced)
+
+The coder's measurement (task 4.2, 84 real Qwen3-0.6B attention cases) was
+the evidence. The four decisions are:
+
+### Decision 1: Enabling evidence — fixture-battery vs real activations
+
+**Ruled evidence-class distinction.** The spec delta now distinguishes two
+classes by `activations_kind`:
+
+- **Fixture-battery** (`"fixture-battery"`): the committed device-parity
+  battery, i.i.d. Gaussian inputs. SHALL admit the face as
+  `opt-in-experimental` only, with a WARN log naming the unmeasured
+  real-activation quality. The shipped record (`tests/fixtures/server-model/
+  attention_gate.json`, `activations_kind: "fixture-battery"`) is
+  grandfathered for the current experimental status.
+- **Real-activation** (a recognized real-activation source): the class
+  required for any status beyond experimental. The gate SHALL enforce
+  `activations_kind` is a recognized real-activation source before
+  considering promotion.
+
+The requirement's letter already said "on captured real activations"; the
+gap was that the implementation shipped fixture-battery evidence without
+enforcing the source. The ruling closes the gap by distinguishing the
+two evidence classes in the spec rather than silently downgrading the
+requirement. The ratified evidence hierarchy: fixture-battery for
+development and experimental admission; real activations for the enabling
+class. The 7.4× over-statement the coder found (fixture record passing at
+0.999968778 / 7.2183e-3 vs real activations failing at 0.987266 / 0.148357)
+is [SA] Table 3's warning arriving in its own terms, and the ruling makes
+that warning structural: a fixture-battery record CANNOT enable the face
+beyond experimental, by explicit spec requirement.
+
+### Decision 2: Face status — ratify opt-in-experimental
+
+**Ratified.** The task-4.2 row's own rule fired correctly: 0/84 real-activation
+cases pass BOTH [SA] §4.3 metric clauses (worst Cosine Sim 0.987266 vs
+≥ 0.999, worst Relative L1 0.148357 vs ≤ 0.02 → 7.4× the gate).
+`opt-in-experimental` with the failing numbers recorded. No further
+decision needed; the measurement is unambiguous.
+
+### Decision 3: PPL bound — policy threshold 0.05
+
+**Ratified as a policy threshold.** The bound 0.05 was taken from the
+change's own shipped gate tests (`sage-ppl-ok.json`, `{delta: 0.011,
+bound: 0.05}`, task 3.3) rather than a paper or standard. The measured
+real-model delta of −0.268724 (ratio 0.991422396 over 8 192 wikitext-2
+test tokens) passes it in the favouring direction — the INT8 face
+measures lower PPL than the exact face. The bound is recorded in the spec
+delta as a policy threshold with its provenance named. A real-model PPL
+bound is a policy threshold with no source in any paper requirement; the
+ruling makes that explicit rather than letting a convention harden into
+an unexamined constant. The bound may be tightened when a larger eval
+set is run.
+
+### Decision 4: Missing record path — compact capture format
+
+**Ruled: a compact capture path is required, deferred to a follow-up card.**
+The gate tool (`gen_attention_gate_record.py`) consumes JSON; a real-shape
+case (seq 256 × 16 heads × 128 dim × 3 operands) is ~82 KB of JSON per
+unit of seq, and an 84-case real battery would be orders past the repo's
+500 KB large-file gate. The following are routed to coder card
+`t_0ed63061`:
+
+- Add an npz/f32-binary capture path to the gate tool (compact, versioned,
+  checksummed)
+- Commit a capture script `tools/capture_attention_activations.py`
+  producing `tests/fixtures/attention_sage_activations.npz`
+- The capture SHALL be from the healthy base Qwen3-0.6B model (not a dead
+  qpk1 artifact) — consistent with the measurement already taken
+- The large-file gate exemption for the real-activation record is deliberate
+  and SHALL be named in the commit message and the tool's docstring
+- Capture from the served qpk1 artifact (needing a capture surface in the
+  Rust engine) is out of scope for that card and deferred to a separate
+  change
+
 ## Open Questions
 
 - OQ-1 (owner: orchestrator, probe = task 4.1): INT8 dot throughput on
@@ -602,3 +801,24 @@ measures it yet, and an unmeasured knob is a way to mislabel a record.
   captured r137 activation record, no eval-set PPL, both requiring an @user GO.
   The superseded sentence above is kept so the older reading cannot be quoted as
   current.**
+  **RESOLVED 2026-10-25 (task 4.2 measured; @user GO given, real-model run
+  taken): the face's ship-vs-experimental status is decided — `opt-in-experimental`,
+  because the gate FAILS on real activations.** Two runs on captured real
+  Qwen3-0.6B attention inputs (84 cases in the full-depth run): worst Cosine Sim
+  **0.987266** vs the ≥ 0.999 gate and **0/84** cases meeting Relative L1 ≤ 0.02
+  (worst **0.148357**, 7.4× the ≤ 0.02 gate), while the eval-set PPL clause
+  passes in the favouring direction (**delta −0.268724**, ratio 0.991422396,
+  8 192 wikitext-2 test tokens). The task row's own rule therefore fires:
+  "recorded as opt-in-experimental with the failing numbers". The finding that
+  outlives the status is that the shipped record's **fixture-battery** evidence
+  (0.999968778 / 7.2183e-3) is orders of magnitude more favourable than the real
+  activations the face will meet — see the task-4.2 entry. The PPL clause is
+  recorded with bound 0.05 (the change's own shipped-test convention) and
+  flagged for the planner as a policy threshold.
+  **RULED 2026-10-25 (planner card t_fccd1ced): evidence-class distinction
+  ratified.** The gate now distinguishes fixture-battery evidence (admits
+  experimental only) from real-activation evidence (required for any status
+  beyond experimental). The PPL bound 0.05 is ratified as a policy threshold
+  with provenance recorded. See "Planner rulings" section above for all four
+  decisions. OQ-2 is fully resolved — the measurement decided the status, and
+  the ruling closed the spec-implementation gap the measurement uncovered.

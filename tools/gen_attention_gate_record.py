@@ -8,7 +8,7 @@ producer, so the face's enabling evidence is auditable rather than asserted:
     uv run python tools/gen_attention_gate_record.py --model-dir <model dir> \
         --activations crates/quantibbler-kernels/tests/fixtures/attention_sage.json
 
-It re-derives, from the model directory and its activation fixture, exactly the
+It re-derives, from the model directory and its activation battery, exactly the
 numbers the server's startup gate reads:
 
 - per captured attention call (case), the [SA] §4.3 accuracy metrics —
@@ -19,20 +19,49 @@ numbers the server's startup gate reads:
 - the clause set the record was generated under, so the record can never be
   read as having passed a LOOSER gate than the server enforces.
 
-Honest inputs, named rather than papered over. The activation fixture this tool
-consumes today is the committed device-parity battery (fixture inputs, not a
+Two battery formats, two evidence classes
+-----------------------------------------
+`--activations` accepts either, and the record's `activations_kind` names the
+one it read:
+
+- **`.json`** — the committed device-parity *fixture battery*
+  (`crates/quantibbler-kernels/tests/fixtures/attention_sage.json`): f32 q/k/v
+  drawn i.i.d., each record carrying the reference's own metrics. The record
+  says `"activations_kind": "fixture-battery"`, the development class, and every
+  case's recomputed metrics are cross-checked against the metrics
+  `tools/gen_attention_sage_fixtures.py` stored (two independent computations of
+  the same quantity — a mismatch aborts).
+- **`.npz`** — a captured *real-activation* record written by
+  `tools/capture_attention_activations.py` (versioned, checksummed f32; format
+  owned by `tools/attention_activations.py`). The record carries that file's
+  `activations_kind`, which names the evidence class AND the model captured from
+  (`"real-activation:Qwen/Qwen3-0.6B"`). There is no second stored computation
+  to cross-check against here — a capture stores the operands, not a reference's
+  verdict — which is why the file is checksummed: the operands cannot be edited
+  without the reader refusing the file.
+
+**Large-file gate.** The real-activation capture this tool consumes is
+deliberately outside the repo's 500 KB `check-added-large-files` gate — one
+seq-256 case at 16 heads / 128 dim is ~4 MB of f32 operands, so a real battery
+is orders past it, and the exemption is a decision rather than an accident. The
+exemption is named in the commit that lands this capture path; the capture
+itself is minted by a real-model run (`tools/capture_attention_activations.py`)
+and is not committed with the tool.
+
+Honest inputs, named rather than papered over. The activation battery this
+change ships is the committed device-parity battery (fixture inputs, not a
 captured forward pass of a real model): task 4.2's capture is a real-model run
-held for an explicit @user GO, so the record carries
+held for an explicit @user GO, so the shipped record carries
 `"activations_kind": "fixture-battery"` and `"ppl": null` until it exists. The
 server gate names the missing PPL clause in its startup log and admits the face
 on the metrics alone; it never sees a PPL number this tree cannot measure.
 
 `--check` recomputes the metrics and compares them with the record already on
 disk (exit 1 on drift), which is how "the record regenerates" is verified
-without writing: run it after any change to the activation fixture or to the
+without writing: run it after any change to the activation battery or to the
 reference, and regenerate the record with the same command.
 
-Drift guard: every case's recomputed metrics are also compared against the
+Drift guard: every JSON case's recomputed metrics are also compared against the
 metrics STORED in the fixture by `tools/gen_attention_sage_fixtures.py` — two
 independent computations of the same quantity — and a mismatch aborts.
 """
@@ -49,10 +78,20 @@ from pathlib import Path
 
 import numpy as np
 
-from quantibbler.kernels.attention_sage import attention_sage
-from quantibbler.kernels.attention_tiled import attention_tiled
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
+for _path in (REPO_ROOT / "src", REPO_ROOT / "tools"):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
+
+from attention_activations import (  # noqa: E402
+    FIXTURE_BATTERY_KIND,
+    CaptureFormatError,
+    read_capture,
+)
+
+from quantibbler.kernels.attention_sage import attention_sage  # noqa: E402
+from quantibbler.kernels.attention_tiled import attention_tiled  # noqa: E402
+
 RECORD_NAME = "attention_gate.json"
 SCHEMA = "quantibbler.attention_gate/1"
 DEFAULT_ACTIVATIONS = "crates/quantibbler-kernels/tests/fixtures/attention_sage.json"
@@ -111,46 +150,106 @@ def _code_commit() -> str:
     return out.stdout.strip()
 
 
-def _case_metrics(record: dict) -> dict[str, float]:
-    """One fixture case: quantized reference vs the exact tiled face."""
-    shape = record["shape"]
-    inputs = record["inputs"]
-    q = np.asarray(inputs["query"], dtype=np.float64).reshape(
-        shape["batch"], shape["n_heads"], shape["seq"], shape["head_dim"]
-    )
-    k = np.asarray(inputs["key"], dtype=np.float64).reshape(
-        shape["batch"], shape["n_kv_heads"], shape["seq"], shape["head_dim"]
-    )
-    v = np.asarray(inputs["value"], dtype=np.float64).reshape(
-        shape["batch"], shape["n_kv_heads"], shape["seq"], shape["val_dim"]
-    )
-    causal = bool(record["causal"])
+def _case_metrics(case: dict) -> dict[str, float]:
+    """One case: quantized reference vs the exact tiled face."""
+    q = np.asarray(case["q"], dtype=np.float64)
+    k = np.asarray(case["k"], dtype=np.float64)
+    v = np.asarray(case["v"], dtype=np.float64)
+    causal = bool(case["causal"])
     exact = attention_tiled(q, k, v, causal=causal)
-    quantized = attention_sage(q, k, v, causal=causal, block_size=int(record["block_size"]))
+    quantized = attention_sage(q, k, v, causal=causal, block_size=int(case["block_size"]))
     return metrics(exact, quantized)
+
+
+def _json_cases(activations: Path) -> list[dict]:
+    """The committed JSON fixture battery: flat inputs plus a shape record."""
+    records = json.loads(activations.read_text())
+    if not isinstance(records, list) or not records:
+        raise SystemExit(f"{activations}: expected a non-empty battery")
+    cases: list[dict] = []
+    for index, record in enumerate(records):
+        shape = record["shape"]
+        inputs = record["inputs"]
+        cases.append(
+            {
+                "index": index,
+                "q": np.asarray(inputs["query"], dtype=np.float64).reshape(
+                    shape["batch"], shape["n_heads"], shape["seq"], shape["head_dim"]
+                ),
+                "k": np.asarray(inputs["key"], dtype=np.float64).reshape(
+                    shape["batch"], shape["n_kv_heads"], shape["seq"], shape["head_dim"]
+                ),
+                "v": np.asarray(inputs["value"], dtype=np.float64).reshape(
+                    shape["batch"], shape["n_kv_heads"], shape["seq"], shape["val_dim"]
+                ),
+                "causal": bool(record["causal"]),
+                "block_size": int(record["block_size"]),
+                "stored": record.get("reference_metrics", {}),
+            }
+        )
+    return cases
+
+
+def _npz_cases(activations: Path) -> tuple[list[dict], str]:
+    """A captured real-activation record: the versioned, checksummed f32 npz.
+
+    The reader refuses a wrong format version or a checksum mismatch before it
+    hands back any case, so a damaged or edited capture cannot be measured.
+    """
+    capture = read_capture(activations)
+    cases = [
+        {
+            "index": index,
+            "q": np.asarray(case.q, dtype=np.float64),
+            "k": np.asarray(case.k, dtype=np.float64),
+            "v": np.asarray(case.v, dtype=np.float64),
+            "causal": bool(case.causal),
+            "block_size": int(case.block_size),
+            "stored": {},
+        }
+        for index, case in enumerate(capture.cases)
+    ]
+    return cases, capture.activations_kind
+
+
+def load_cases(activations: Path) -> tuple[list[dict], str]:
+    """Load a battery and the evidence class its record must name.
+
+    Returns ``(cases, activations_kind)``: the JSON path's reserved
+    ``fixture-battery`` class, or the capture file's own, which names both the
+    evidence class and the model it was captured from.
+    """
+    if activations.suffix == ".npz":
+        try:
+            return _npz_cases(activations)
+        except CaptureFormatError as exc:
+            raise SystemExit(str(exc)) from exc
+    return _json_cases(activations), FIXTURE_BATTERY_KIND
 
 
 def build_record(
     model_dir: Path, activations: Path, activations_source: str, ppl: dict | None
 ) -> dict:
-    cases = json.loads(activations.read_text())
-    if not isinstance(cases, list) or not cases:
-        raise SystemExit(f"{activations}: expected a non-empty battery")
+    cases, activations_kind = load_cases(activations)
 
     calls: list[dict] = []
-    for index, case in enumerate(cases):
+    for case in cases:
         measured = _case_metrics(case)
-        stored = case.get("reference_metrics", {})
+        # The JSON fixture battery stores the reference's own metrics; an npz
+        # capture stores operands only (its checksum, not a second computation,
+        # is what makes its contents trustworthy). Cross-check where they exist.
+        stored = case["stored"]
         for name in ("cosine", "relative_l1", "rmse"):
             if name in stored and not _close(measured[name], float(stored[name])):
                 raise SystemExit(
-                    f"{activations}: case {index} {name} recomputed as {measured[name]!r} but the "
-                    f"fixture stores {stored[name]!r} — the fixture and this tool disagree; "
-                    "regenerate the fixture or fix the tool before minting a record"
+                    f"{activations}: case {case['index']} {name} recomputed as "
+                    f"{measured[name]!r} but the fixture stores {stored[name]!r} — the fixture "
+                    "and this tool disagree; regenerate the fixture or fix the tool before "
+                    "minting a record"
                 )
         calls.append(
             {
-                "case": index,
+                "case": case["index"],
                 "block_size": int(case["block_size"]),
                 "cosine": measured["cosine"],
                 "relative_l1": measured["relative_l1"],
@@ -167,10 +266,13 @@ def build_record(
         "schema": SCHEMA,
         "model_id": _model_id(model_dir),
         "activations_source": activations_source,
-        # Honest provenance: a committed fixture battery, not a captured forward
-        # pass of a real model (task 4.2). Audit field; the server gate reads the
-        # metrics, not this label.
-        "activations_kind": "fixture-battery",
+        # Honest provenance: the evidence class this record rests on, named
+        # rather than implied — `"fixture-battery"` for the committed synthetic
+        # battery (task 4.2's real-model capture is held for an explicit @user
+        # GO), or the capture file's own `real-activation:<source>`. Audit
+        # field; the gate reads the metrics, and the evidence-class distinction
+        # the planner ratified keys on this value.
+        "activations_kind": activations_kind,
         "generated_at": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "code_commit": _code_commit(),
         "clauses": {"cosine_min": COSINE_MIN, "relative_l1_max": RELATIVE_L1_MAX},
@@ -185,6 +287,7 @@ def _metric_view(record: dict) -> dict:
     return {
         "model_id": record["model_id"],
         "activations_source": record["activations_source"],
+        "activations_kind": record.get("activations_kind"),
         "clauses": record["clauses"],
         "calls": record["calls"],
         "worst": record["worst"],
@@ -197,7 +300,7 @@ def _compare(shipped: dict, recomputed: dict, path: Path) -> list[str]:
     if shipped.get("schema") != SCHEMA:
         drift.append(f"schema is {shipped.get('schema')!r}, expected {SCHEMA!r}")
     shipped_view, fresh_view = _metric_view(shipped), _metric_view(recomputed)
-    for key in ("model_id", "activations_source", "clauses", "ppl"):
+    for key in ("model_id", "activations_source", "activations_kind", "clauses", "ppl"):
         if shipped_view[key] != fresh_view[key]:
             drift.append(f"{key}: shipped {shipped_view[key]!r} != recomputed {fresh_view[key]!r}")
     if len(shipped_view["calls"]) != len(fresh_view["calls"]):
@@ -231,7 +334,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--activations",
         default=DEFAULT_ACTIVATIONS,
-        help=f"activation fixture (repo-relative by default: {DEFAULT_ACTIVATIONS})",
+        help=(
+            "activation battery: the committed JSON fixture battery, or a captured "
+            f"real-activation .npz (repo-relative by default: {DEFAULT_ACTIVATIONS})"
+        ),
     )
     parser.add_argument(
         "--ppl-eval",
@@ -278,6 +384,7 @@ def main(argv: list[str] | None = None) -> int:
 
     path.write_text(json.dumps(record, indent=2) + "\n")
     print(f"wrote {path} ({path.stat().st_size} bytes, {len(record['calls'])} calls)")
+    print(f"  activations_kind {record['activations_kind']}")
     print(
         f"  worst cosine {record['worst']['cosine']:.9f} "
         f"[{_verdict(record['worst']['cosine'], COSINE_MIN, 1.0)} >= {COSINE_MIN}]"

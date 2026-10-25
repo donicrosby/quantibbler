@@ -48,8 +48,10 @@ Lean tier: NumPy only (no torch), like the tiled battery it extends.
 
 from __future__ import annotations
 
+import importlib.util
 import math
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -548,6 +550,26 @@ def test_attention_sage_matches_the_oracle_on_the_lossless_fixture():
 CAPTURED_ACTIVATIONS_ENV = "QUANTIBBLER_SAGE_ACTIVATIONS"
 CAPTURED_ACTIVATIONS_DEFAULT = Path(__file__).parent / "fixtures" / "attention_sage_activations.npz"
 
+_CAPTURE_FORMAT: object | None = None
+
+
+def _capture_format():  # noqa: ANN202
+    """The npz capture format module (``tools/attention_activations.py``).
+
+    Loaded by path: the tools are scripts, not package modules (the same idiom
+    ``tests/test_ci_referee.py`` uses). Cached, and registered in ``sys.modules``
+    so its dataclasses can resolve their annotations.
+    """
+    global _CAPTURE_FORMAT
+    if _CAPTURE_FORMAT is None:
+        path = Path(__file__).resolve().parents[1] / "tools" / "attention_activations.py"
+        spec = importlib.util.spec_from_file_location("attention_activations", path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["attention_activations"] = module
+        spec.loader.exec_module(module)
+        _CAPTURE_FORMAT = module
+    return _CAPTURE_FORMAT
+
 
 @dataclass(eq=False)
 class CapturedCase:
@@ -564,12 +586,21 @@ def load_captured_activations(path: Path | str | None = None) -> tuple[list[Capt
     """Resolve the captured-activation fixture.
 
     Returns ``(cases, source)``; ``source`` always names where the hook looked,
-    so an absence is a recorded gap rather than a silently short battery. The
-    file is a ``.npz`` of ``q``/``k``/``v`` (+ optional scalar ``causal`` and
-    ``block_size``); ``QUANTIBBLER_SAGE_ACTIVATIONS`` overrides the default path.
-    Deliberately NOT a ``pytest.skip``: the CI tiers pin their skip counts, and
-    a quietly shortened battery is exactly the failure mode the scenario's
-    "plus captured real activations" clause exists to prevent.
+    so an absence is a recorded gap rather than a silently short battery. Two
+    on-disk forms are accepted:
+
+    - the versioned capture (``tools/attention_activations.py``'s format, written
+      by ``tools/capture_attention_activations.py``): an ``.npz`` carrying
+      ``format_version`` and a payload ``checksum``, read through that module's
+      own reader so the test and the gate tool cannot drift on the layout;
+    - the legacy one-case ``.npz`` of bare ``q``/``k``/``v`` (+ optional scalar
+      ``causal`` and ``block_size``), which is what a synthesized test capture
+      looks like.
+
+    ``QUANTIBBLER_SAGE_ACTIVATIONS`` overrides the default path. Deliberately
+    NOT a ``pytest.skip``: the CI tiers pin their skip counts, and a quietly
+    shortened battery is exactly the failure mode the scenario's "plus captured
+    real activations" clause exists to prevent.
     """
     resolved = Path(
         path or os.environ.get(CAPTURED_ACTIVATIONS_ENV) or CAPTURED_ACTIVATIONS_DEFAULT
@@ -577,7 +608,25 @@ def load_captured_activations(path: Path | str | None = None) -> tuple[list[Capt
     if not resolved.is_file():
         return [], (
             f"absent: no captured activations at {resolved}; the battery below is the "
-            "fixture battery only (task 4.2 produces the captured records)"
+            "fixture battery only (tools/capture_attention_activations.py produces the "
+            "captured records)"
+        )
+    with np.load(resolved) as data:
+        versioned = "format_version" in data.files
+    if versioned:
+        capture = _capture_format().read_capture(resolved)
+        cases = [
+            CapturedCase(
+                q=np.asarray(case.q, dtype=np.float64),
+                k=np.asarray(case.k, dtype=np.float64),
+                v=np.asarray(case.v, dtype=np.float64),
+                causal=bool(case.causal),
+                block_size=int(case.block_size),
+            )
+            for case in capture.cases
+        ]
+        return cases, (
+            f"loaded {len(cases)} real activations from {resolved} ({capture.activations_kind})"
         )
     with np.load(resolved) as data:
         case = CapturedCase(
@@ -610,6 +659,45 @@ def test_scn_quantized_budget_captured_activations_hook(tmp_path: Path):
     np.savez(path, q=q, k=k, v=v)
     cases, source = load_captured_activations(path)
     assert cases and str(path) in source
+    for case in cases:
+        reference = attention_tiled(
+            case.q, case.k, case.v, causal=case.causal, block_size=case.block_size
+        )
+        out = attention_sage(case.q, case.k, case.v, causal=case.causal, block_size=case.block_size)
+        assert _cos_sim(reference, out) >= COS_SIM_MIN
+        assert _relative_l1(reference, out) <= RELATIVE_L1_MAX
+
+
+def test_scn_quantized_budget_captured_activations_reads_a_versioned_capture(tmp_path: Path):
+    """The hook reads the versioned capture the committed producer writes.
+
+    ``tools/capture_attention_activations.py`` writes the format owned by
+    ``tools/attention_activations.py`` (a version and a payload checksum, one or
+    more cases); a synthesized test capture is the legacy single-case shape. Both
+    must load, or the fixture the change ships would be unreadable by the very
+    scenario clause that consumes it — and every captured case must come back,
+    not only the first.
+    """
+    seq, d, n_heads, n_kv = 8, 4, 2, 1
+    rng = np.random.default_rng(8181)
+    built = [
+        _capture_format().CapturedCase(
+            q=rng.standard_normal((1, n_heads, seq, d)).astype(np.float32),
+            k=rng.standard_normal((1, n_kv, seq, d)).astype(np.float32),
+            v=rng.standard_normal((1, n_kv, seq, d)).astype(np.float32),
+            causal=True,
+            block_size=4,
+            layer=index,
+            window=0,
+        )
+        for index in range(2)
+    ]
+    path = tmp_path / "captured.npz"
+    written = _capture_format().write_capture(path, built, capture_model="unit-test/model")
+
+    cases, source = load_captured_activations(path)
+    assert len(cases) == 2, "every captured case must load, not just the first"
+    assert written.activations_kind in source
     for case in cases:
         reference = attention_tiled(
             case.q, case.k, case.v, causal=case.causal, block_size=case.block_size
