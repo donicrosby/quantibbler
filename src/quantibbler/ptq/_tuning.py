@@ -39,6 +39,13 @@ TUNE_FP_LOSS_MARKER = "tune_fp_loss: weighted_mse_nq_3012 (weight source: inform
 
 
 STE_RESCOPE_MARKER = "ste_scale_only_declared"
+# ``STE_JOINT_SCOPE`` — the refinement's scope. TuneLatentSTE runs ONCE per
+# block over the block's whole factorized set, so a firing's scope has to be
+# readable from the record rather than inferred from the pipeline's shape: the
+# same ``declared`` values mean something different when one joint pass over N
+# linears produced them than when N per-linear passes did, and the rows alone
+# cannot tell a reader which.
+STE_JOINT_SCOPE = "block_joint"
 
 
 class VacuousTeacherError(RuntimeError):

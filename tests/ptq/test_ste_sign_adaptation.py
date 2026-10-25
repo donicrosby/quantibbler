@@ -388,13 +388,16 @@ def test_aborted_step_does_not_skip_the_mechanism_ladder(monkeypatch):
 
 
 def test_scn_refinement_covers_every_factorized_linear_with_full_budget():
-    """Every scoped linear gets the FULL per-linear budget — no pooled split.
+    """Every scoped linear covers the recorded budget — no pooled split.
 
-    The refinement unit is the LINEAR (Step-3 prose "the current target
-    linear layer", Eq. 10's variables, App. C's 8 epochs at batch 1): each
-    scoped linear consumes `epochs x (n // batch)` steps, and the schedule
-    record carries them. The block-pooled equal split this replaced
-    under-budgeted STE 7x against the paper.
+    Scope note (supersedes this test's original reading of `total_steps`): the
+    refinement unit is now the BLOCK, not the linear. One joint pass consumes
+    `epochs x (n // batch)` steps, and every per-linear row books every step of
+    it — which is what these assertions check. What is NOT asserted any more is
+    that each linear receives that budget SEVEN TIMES over; the per-target
+    structure that did that is gone. What still holds, and is the point: the
+    budget is never divided across linears (no pooled split), and no linear is
+    left out of the refinement.
     """
     block = _SevenLinearBlock(seed=41)
     sink: list = []
@@ -431,7 +434,13 @@ def test_scn_refinement_covers_every_factorized_linear_with_full_budget():
 
 
 def test_full_budget_is_per_linear_not_a_pooled_split():
-    """A per-linear budget smaller than the linear count is NOT divided up.
+    """The recorded budget is NOT divided across the block's linears.
+
+    Scope note (supersedes this test's original reading): the budget belongs to
+    the block's single joint pass, not to each linear separately — but the
+    property under test is unchanged, that it is never divided BY the linear
+    count, so a budget smaller than the linear count still runs in full and every
+    linear books it.
 
     Seed note: this fixture family's divergence-gate fires were the ``lb_admm``
     exit double-rescale (both factors scaled by ``||W~||_F``, so the

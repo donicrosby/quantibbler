@@ -189,11 +189,13 @@ _STAGE_LINES: tuple[tuple[str, str, str, str | None, bool], ...] = (
     (
         "ste",
         "19",
-        "TuneLatentSTE: factorized-component refinement",
-        "per-target scheduling follows Figure 3's per-target cycle; each "
-        "scoped linear consumes the full [NQ] App. C budget (epochs x "
-        "(n // batch)) on the just-factorized linear; the bounded discrete "
-        "flip pass is a named deviation when its budget is nonzero",
+        "TuneLatentSTE: joint block-level factorized-component refinement",
+        "one pass per block, jointly over every factorized linear (one "
+        "optimizer, one block-output loss) -- a DECLARED deviation from "
+        'Algorithm 1 line 19\'s "the current target linear layer" prose; the '
+        "[NQ] App. C factorized-stage budget is consumed once for the whole "
+        "block; the bounded discrete flip pass is a named deviation when its "
+        "budget is nonzero",
         True,
     ),
     ("sign_extract_pack", "20-23", "sign extraction and packing", None, True),
@@ -347,9 +349,10 @@ def stage_row_times(stages: list) -> dict[str, dict]:
 
     ONE row per unit the stage's cost is quoted in (qk-ptq-speedups, scenario
     ``ste_tunefp_gpu_zero_algorithm_change``): a ``tune_fp`` row is one fire,
-    a ``ste`` row is one refined linear, every other stage's row is one
-    invocation. The stage's cost was estimated per fire and per linear before
-    the port; this is the measured value that replaces the estimate.
+    a ``ste`` row is one BLOCK fire -- the stage runs one joint pass over every
+    factorized linear, so its wall time belongs to the block and dividing it by
+    linear would report a share no clock observed. Every stage's row is
+    therefore one invocation, with the time the record itself carries.
 
     A recorded ``tune_fp`` skip is NOT a row: it did no work and spent no time,
     and counting it would deflate the stage's per-row cost. Rows without a
@@ -365,11 +368,6 @@ def stage_row_times(stages: list) -> dict[str, dict]:
         fields = info if isinstance(info, dict) else {}
         if event == "tune_fp" and fields.get("skipped"):
             rows.setdefault("tune_fp", [])
-            continue
-        per_linear = fields.get("per_linear")
-        if event == "ste" and isinstance(per_linear, dict) and per_linear:
-            for rec in per_linear.values():
-                rows.setdefault("ste", []).append(_row_seconds(rec))
             continue
         rows.setdefault(event, []).append(_row_seconds(fields))
     out: dict[str, dict] = {}

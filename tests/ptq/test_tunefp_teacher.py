@@ -259,7 +259,12 @@ def test_scn_diagnostic_run_records_the_vacuous_event_and_continues():
 
 
 def test_scn_tunefp_fires_per_target_cycle():
-    """Figure 3's per-target cycle: TuneFP N-1 times, STE N times.
+    """Figure 3's per-target cycle for TuneFP: N-1 passes.
+
+    The refinement is NOT part of that cycle's count: the block's factorized set
+    is refined by ONE joint pass after every factorization, so the STE record
+    covers all N linears while TuneFP still fires once per target after the
+    first.
 
     The falsified once-per-block reading fired TuneFP exactly ONCE on this
     block; the cycle fires it once per target after the first. The count is
@@ -292,11 +297,13 @@ def test_scn_tunefp_fires_per_target_cycle():
     assert all(t["gradient_norm"] is not None and t["gradient_norm"] > 0.0 for t in tune), (
         "with >= 1 in-block linear factorized the objective cannot be identically zero"
     )
-    # STE fires N times: every factorization is refined, target 1 included.
+    # ONE STE record for the block, carrying a row for every factorized linear:
+    # the block's refinement is a single joint pass over all of them, target 1
+    # included.
     ste = [info for event, info in sink if event == "ste"]
     assert len(ste) == 1
     assert len(ste[0]["per_linear"]) == 3, (
-        "every factorized linear gets its refinement, target 1 included"
+        "every factorized linear is in the block's refinement, target 1 included"
     )
     assert names.index("capture") < names.index("tune_fp")
     assert names.index("lb_admm") < names.index("ste")

@@ -260,8 +260,9 @@ def test_paper_faithful_run_records_the_algorithm1_stage_map(
     admm = [stage for stage in report["stages"] if stage["event"] == "lb_admm"]
     assert admm and all(stage["polish_rounds"] == 0 for stage in admm)
 
-    # TuneLatentSTE: FULL per-linear budget (no pooled split), `paper_ste` on
-    # every scoped linear, and the measured crossings still on record.
+    # TuneLatentSTE: ONE joint pass per block over the whole factorized set, with
+    # `paper_ste` on every scoped linear and the measured crossings still on
+    # record. Every row books that one block budget.
     ste = [stage for stage in report["stages"] if stage["event"] == "ste"]
     assert ste
     for stage in ste:

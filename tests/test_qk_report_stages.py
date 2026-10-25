@@ -110,19 +110,21 @@ def test_stage_map_names_missing_stages_as_not_executed_never_omits_them():
 
 def test_stage_map_reports_row_time_per_stage_row():
     """Scenario ``ste_tunefp_gpu_zero_algorithm_change``: per-stage row-time is
-    reported — one TuneFP row per fire, one STE row per refined linear."""
+    reported — one row per fire, and the STE fire is the BLOCK."""
     stages = [
         ("tune_fp", {"elapsed_s": 12.0, "steps": 8}),
         ("tune_fp", {"elapsed_s": 6.0, "steps": 8}),
         ("lb_admm", {"polish_rounds": 0}),
-        ("ste", {"per_linear": {"attn.q": {"elapsed_s": 3.0}, "attn.o": {"elapsed_s": 9.0}}}),
+        ("ste", {"elapsed_s": 3.0, "per_linear": {"attn.q": {}, "attn.o": {}}}),
+        ("ste", {"elapsed_s": 9.0, "per_linear": {"mlp.up_proj": {}}}),
     ]
     mapped = stage_map(stages)
     assert mapped["tune_fp"]["rows"] == 2
     assert mapped["tune_fp"]["elapsed_s"] == 18.0
     assert mapped["tune_fp"]["row_time_s"] == 9.0
-    # The STE rows are the refined LINEARS, which is the unit the stage's cost is
-    # quoted in — not the block's invocations.
+    # The STE rows are the BLOCK fires, not the refined linears: a joint pass's
+    # wall time belongs to the block it refined, and its per-linear rows carry no
+    # share of it.
     assert mapped["ste"]["rows"] == 2
     assert mapped["ste"]["elapsed_s"] == 12.0
     assert mapped["ste"]["row_time_s"] == 6.0
@@ -146,8 +148,10 @@ def test_stage_row_times_do_not_count_a_skipped_fire_or_a_null_reading():
     ]
     times = stage_row_times(stages)
     assert times["tune_fp"] == {"rows": 1, "elapsed_s": 4.0, "row_time_s": 4.0}
-    # The STE record's own time is not substituted for its rows' missing readings.
-    assert times["ste"] == {"rows": 2, "elapsed_s": 2.0, "row_time_s": 2.0}
+    # The STE unit is the block fire, and this record carries no time for it: a
+    # per-linear reading is not its row, and an unreadable record stays null
+    # rather than borrowing one.
+    assert times["ste"] == {"rows": 1, "elapsed_s": None, "row_time_s": None}
     assert times["capture"] == {"rows": 1, "elapsed_s": None, "row_time_s": None}
 
 

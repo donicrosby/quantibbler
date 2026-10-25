@@ -39,13 +39,22 @@ def _tune_latent_ste(
     the straight-through estimator against the block-level objective of
     Eq. 10, T_post steps at the stage lr ([NQ] App. C).
 
-    Per-layer scheduling (qk-fix-ste-sign-adaptation, Figure 3 right panel):
-    the caller invokes this once per just-factorized linear; the refinement
-    unit is that linear and it consumes the FULL per-linear App. C budget
-    ``epochs x (n // batch)`` (Step-3 prose names "the current target linear
-    layer" singular; Eq. 10's variables are one linear's; App. C attaches the
-    factorized stage's 8 epochs there). The block forward is the module as it
-    stands, so every other block parameter is held at its current value.
+    Scope: ``facs`` IS the refinement unit. The caller hands over the block's
+    ENTIRE factorized set once per block, after every factorization completes
+    and before the stream swap, so ONE optimizer holds every ``(U, V, s1, s2)``
+    and ONE loss is taken on the block output against ``y_b``. That is what lets
+    the correction trade across linears — one linear's residual partially
+    cancelled by another — which a per-target pass cannot express, because there
+    the other linears are frozen at their already-degraded values and every
+    linear is optimized as if its neighbours were exact. Algorithm 1 line 19's
+    "the current target linear layer" prose is a DECLARED deviation from this
+    reading, not the other way round.
+
+    Budget: each call consumes the App. C factorized-stage regime
+    ``epochs x (n // batch)`` at the stage lr with the cosine schedule, ONCE.
+    There is no per-linear or block-pooled allocation on top of it. The block
+    forward is the module as it stands, so every block parameter outside
+    ``facs`` is held at its current value.
 
     Instrumentation (same change, scenarios ``flip_counts_are_recorded`` /
     ``sign_adaptation_is_effective_or_declared``): per-step, per-factor sign
@@ -94,9 +103,10 @@ def _tune_latent_ste(
         """Close the stage's row time on EVERY return path.
 
         A row time is attributable to a linear only when the call refined
-        exactly that linear (the shipped per-target call pattern). A joint call
-        over several facs cannot split its wall time by linear, so its rows
-        report null rather than a fabricated share.
+        exactly that linear. A joint call over several facs cannot split its
+        wall time by linear -- the one measurement belongs to the whole set, and
+        dividing it would report a share no clock observed -- so its rows report
+        null and the call's own ``elapsed_s`` carries the stage's time.
         """
         elapsed = time.perf_counter() - t_stage
         stats["elapsed_s"] = elapsed
@@ -152,6 +162,12 @@ def _tune_latent_ste(
             # Declared inertia (qk-tune-loss-scale, requirement 3): set False/True
             # once the row's movement is measured against the dtype resolution.
             "inert": None,
+            # Dead rank components: rank indices whose outer-product column
+            # carries no sign, because one of the two factors' columns is
+            # identically zero. Their sign is arbitrary and the latents they
+            # index cannot move the artifact, so a row that cannot say how many
+            # it carries cannot be read as evidence of an effective refinement.
+            "dead_columns": 0,
             # Every STE row names the device its refinement ran on: the report's
             # per-linear rows are what a reader compares across arms, and a row
             # that cannot say where it ran cannot be compared with one that can.
@@ -179,10 +195,11 @@ def _tune_latent_ste(
 
     residual_before = _residual()
     if total == 0:
-        for rec in per_linear.values():
+        for name, rec in per_linear.items():
             rec["residual_before"] = residual_before
             rec["residual_after"] = residual_before
             rec["gradient_norm"] = 0.0
+            rec["dead_columns"] = _dead_columns(facs[name])
         _stamp()
         return stats
     # Same finiteness armor as TuneFP: a NaN loss or a
@@ -312,6 +329,7 @@ def _tune_latent_ste(
             rec["residual_before"] = residual_before
             rec["residual_after"] = residual_after
             rec["gradient_norm"] = first_grad_norm
+            rec["dead_columns"] = _dead_columns(fac)
             rec["zero_crossings"] = bool(rec["flips_u"] == 0 and rec["flips_v"] == 0)
             # Declared inertia (qk-tune-loss-scale, requirement 3): this row's own
             # movement measured against the coarsest parameter dtype's relative
@@ -342,6 +360,25 @@ def _tune_latent_ste(
 def _fac_params(fac: FactorizedLinear) -> tuple[torch.Tensor, ...]:
     """The paper's joint refinement parameter set for one linear (Eq. 10)."""
     return (fac.u_latent, fac.v_latent, fac.s1, fac.s2)
+
+
+def _dead_columns(fac: FactorizedLinear) -> int:
+    """Rank components of ``fac`` that contribute no sign to the artifact.
+
+    A rank index is dead when either factor's COLUMN is identically zero: the
+    outer-product column ``(s1 ⊙ f(U))[:, r] ⊗ (s2 ⊙ f(V))[:, r]`` is then zero
+    for every (output, input) pair, so that component's sign is arbitrary and
+    the latents indexing it cannot move the stored weight. Same notion as the
+    dead column ``lb_admm`` floors in place of a sign, applied to the refinement
+    record so a reader can tell an effective joint pass from one whose rank
+    budget is partly inert by construction.
+    """
+    with torch.no_grad():
+        u = fac.u_latent.detach()
+        v = fac.v_latent.detach()
+        dead_u = u.abs().sum(dim=0) == 0.0
+        dead_v = v.abs().sum(dim=0) == 0.0
+        return int((dead_u | dead_v).sum())
 
 
 def _rel_move(current: torch.Tensor, start: torch.Tensor) -> float:

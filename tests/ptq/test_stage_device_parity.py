@@ -282,15 +282,19 @@ def test_scn_ste_tunefp_gpu_zero_algorithm_change() -> None:
         assert c["zero_crossings"] == a["zero_crossings"], name
 
     # Per-stage row-time is reported, so the artifact translates the stage's cost
-    # instead of restating the proposal's estimate: one row per TuneFP fire, one
-    # row per refined linear.
+    # instead of restating the proposal's estimate: one row per fire, and the STE
+    # fire is the block.
     for tag, rec in (("cpu", cpu), ("accel", acc)):
         assert rec["tune_fp"]["elapsed_s"] > 0.0, tag
+        # The STE stage's row is the BLOCK it refined: one joint pass cannot
+        # split its wall time by linear, so the per-linear rows carry null and
+        # the record itself carries the stage's time.
+        assert rec["ste"]["elapsed_s"] > 0.0, tag
         for name, per in rec["ste"]["per_linear"].items():
-            assert per["elapsed_s"] > 0.0, (tag, name)
+            assert per["elapsed_s"] is None, (tag, name)
         mapped = qk_report.stage_map([(event, info) for event, info in rec["events"]])
         assert mapped["tune_fp"]["row_time_s"] > 0.0, tag
-        assert mapped["ste"]["rows"] == len(rec["ste"]["per_linear"]), tag
+        assert mapped["ste"]["rows"] == 1, tag
         assert mapped["ste"]["row_time_s"] > 0.0, tag
 
 

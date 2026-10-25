@@ -43,11 +43,12 @@ from torch import nn  # noqa: E402
 from quantibbler.ptq import block_recon as br  # noqa: E402
 from quantibbler.ptq.config import PTQConfig, StageHyper  # noqa: E402
 
-#: The proposal's own row counts at paper geometry ([NQ] 28 blocks, 7 scoped
-#: linears per block → TuneFP fires N-1 = 6 times per block, STE once per
-#: linear). Labelled as an EXTRAPOLATION here: this fixture's block carries two
-#: linears, so its own row count would be 28 fires / 56 linears, not these.
-PROPOSAL_ROWS = {"tune_fp": 168, "ste": 196}
+#: The proposal's own row counts at paper geometry ([NQ] 28 blocks): TuneFP fires
+#: N-1 = 6 times per block, and the refinement is ONE joint pass per block over
+#: all 7 scoped linears, so its row count is the block count. Labelled as an
+#: EXTRAPOLATION here: this fixture's block carries one factorized linear, so its
+#: own row count would be 28 fires / 28 blocks, not these.
+PROPOSAL_ROWS = {"tune_fp": 168, "ste": 28}
 
 #: Which dtype each leg runs. The pair IS the comparison: fp64 host reference
 #: against fp32 on the accelerator.
@@ -114,7 +115,12 @@ def _tune_fp_once(args, dtype, device) -> dict:
 
 
 def _ste_once(args, dtype, device) -> dict:
-    """Refine ONE linear — the unit the STE's cost is quoted in."""
+    """One joint refinement pass — the unit the STE's cost is quoted in.
+
+    The unit is the BLOCK, not the linear: the stage holds every one of the
+    block's factorized linears in one optimizer under one loss, so its wall time
+    cannot be divided by the linear count.
+    """
     block = _Block(args.d_model, args.mlp).to(dtype=dtype, device=device)
     # down_proj is Linear(mlp -> d_model): u_latent is (dout, r), v_latent (din, r).
     u0 = (
@@ -147,7 +153,7 @@ def _ste_once(args, dtype, device) -> dict:
     )
 
 
-STAGES = (("tune_fp", _tune_fp_once, "fire"), ("ste", _ste_once, "linear"))
+STAGES = (("tune_fp", _tune_fp_once, "fire"), ("ste", _ste_once, "block"))
 
 
 def measure(args) -> dict:

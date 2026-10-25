@@ -10,13 +10,14 @@ Per transformer block, sequentially:
 2. factorize the block's attention projections (Q/K/V) in module
    declaration order (Step 2, lines 14-17) on the preconditioned target
    W~ = D~_out W D~_in, freezing each into the module as it is solved;
-3. TuneFP: brief full-precision tuning of the block's STILL-FP remainder
-   (O/G/U/D) against the cached teacher for T_pre steps ([NQ] Step 1,
-   error-propagation mitigation) — fired ONCE per block at the [NQ]
-   Figure 3 placement, after Q/K/V are factorized;
-4. factorize the remaining linears (O/G/U/D), refining each one's
-   factors (U, V, s1, s2) with TuneLatentSTE against the block objective
-   of Eq. 10 (Step 3, line 19) right after its own factorization;
+3. TuneFP: brief full-precision tuning of the block's STILL-FP remainder at
+   the [NQ] Figure 3 per-target placement ([NQ] Step 1, error-propagation
+   mitigation) — fired once per target after the first, so TuneFP tunes the
+   still-FP remainder BEFORE that target is factorized;
+4. factorize every scoped linear (module declaration order), then refine the
+   block's factors (U, V, s1, s2) with ONE TuneLatentSTE pass against the
+   block-output objective of Eq. 10 (Step 3, line 19), jointly over ALL of the
+   block's factorized linears at once;
 5. sign extraction ``sign(U)``/``sign(V)`` (sign(0) = +1) and packing via
    the qk-kernels dispatch (lines 20-23).
 
@@ -40,9 +41,15 @@ Stage changes folded here:
   deepcopy, so there is genuinely nothing to tune until something is
   factorized.
 * ``qk-fix-ste-sign-adaptation`` — per-linear, per-factor flip
-  instrumentation, per-layer refinement on the just-factorized linear with
-  a deterministic split of the line-19 T_post budget, and flip acceptance
-  judged against the block-reconstruction objective.
+  instrumentation and flip acceptance judged against the
+  block-reconstruction objective.
+* ``qk-ste-joint`` — ONE joint TuneLatentSTE pass per block over the block's
+  whole factorized set (one optimizer, one block-output loss), declared under
+  the ``block_joint`` scope marker. A DECLARED deviation from Algorithm 1
+  line 19's "the current target linear layer" prose: the stage's objective is
+  the block's reconstruction error and its free parameters are the block's
+  whole factorized set, so the App. C factorized-stage budget is consumed once
+  for the block rather than once per linear.
 * ``qk-fix-fp-resume-guard`` — the resume guard is driven by the live
   block's expected quantizable names, not by the archive's contents.
 
@@ -162,6 +169,9 @@ from ._stats import (
     _weights_fingerprint as _weights_fingerprint,
 )
 from ._ste import (
+    _dead_columns as _dead_columns,
+)
+from ._ste import (
     _discrete_flip_pass as _discrete_flip_pass,
 )
 from ._ste import (
@@ -174,6 +184,7 @@ from ._ste import (
     _tune_latent_ste as _tune_latent_ste,
 )
 from ._tuning import (
+    STE_JOINT_SCOPE,
     STE_RESCOPE_MARKER,
     TUNE_FP_LOSS_MARKER,
     VacuousTeacherError,
@@ -188,6 +199,7 @@ __all__ = [
     "FactorizedLinear",
     "QuantizedLayerState",
     "STE_RESCOPE_MARKER",
+    "STE_JOINT_SCOPE",
     "TUNE_FP_LOSS_MARKER",
     "VacuousTeacherError",
     "extract_and_pack",
