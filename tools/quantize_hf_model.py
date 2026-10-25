@@ -50,6 +50,7 @@ import hashlib
 import os
 import random
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -67,10 +68,19 @@ from typing import Any
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 _SANDBOX_SCRATCH = Path("/opt/data/tmp")
-os.environ.setdefault(
-    "QUANTIBBLER_KD_TMPDIR",
-    str(_SANDBOX_SCRATCH) if _SANDBOX_SCRATCH.is_dir() else tempfile.gettempdir(),
-)
+
+
+def _scratch_root() -> str:
+    """The host scratch root: real disk where it exists, platform temp otherwise.
+
+    Named once because the KD teacher-logit cache AND the per-run checkpoint
+    directory both need to be off a small tmpfs: two expressions of "the scratch
+    root" is how they drift apart.
+    """
+    return str(_SANDBOX_SCRATCH) if _SANDBOX_SCRATCH.is_dir() else tempfile.gettempdir()
+
+
+os.environ.setdefault("QUANTIBBLER_KD_TMPDIR", _scratch_root())
 # Bounded native allocations (hundreds of MB drift otherwise) and bounded
 # BLAS/torch thread pools (each thread's stacks and scratch count against
 # the cgroup this sandbox shares).
@@ -95,6 +105,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from quantibbler.ptq.api import QuantizedModel, quantize_model
 from quantibbler.ptq.block_recon import VacuousTeacherError
+from quantibbler.ptq.checkpoints import append_stage_event
 from quantibbler.ptq.config import PrefixProbeAbort, PTQConfig, StageHyper
 from quantibbler.qk_report import (
     COLLAPSE_LINE,
@@ -364,6 +375,19 @@ def packed_chunks(sequences: int, knob: str) -> int:
     return sequences // BATCH
 
 
+def eval_window_sequences(evaluation: dict) -> int:
+    """The maximal local eval window in the KNOB's unit (sequences).
+
+    ``--eval-seqs`` counts sequences ({packed_chunks}'s contract), while
+    ``evaluation_record`` keeps ``full_local_window_batches`` — a harness fact
+    of the sizer, pinned in batches by the report's own tests. The
+    paper-faithful gate is where the two units meet, so the conversion lives
+    here in one named place: a gate that compared a sequence count against a
+    batch count would pass a window eight times too small and call it maximal.
+    """
+    return evaluation["full_local_window_batches"] * BATCH
+
+
 def _positive_int(text: str) -> int:
     """argparse type for the probe knobs: a non-positive value is a parse error.
 
@@ -450,11 +474,22 @@ def _reportable_stage_payload(value: Any) -> Any:
     return f"<{type(value).__name__}>"
 
 
-def _stage_recorder(sink: list) -> Any:
-    """The pipeline's stage recorder, appending JSON-safe records to ``sink``."""
+def _stage_recorder(sink: list, log_dir: Path | None = None) -> Any:
+    """The pipeline's stage recorder, appending JSON-safe records to ``sink``.
+
+    When ``log_dir`` is given (checkpointing enabled for this launch) the SAME
+    record is also appended to the stage journal beside the checkpoints,
+    once per event, as the event fires: a run that dies in the pipeline tail
+    after solving every block can then be resumed with a record that still
+    attests the stages it executed. Disabled checkpointing means no journal —
+    the in-process record is the only one, exactly as before it existed.
+    """
 
     def _record(event: str, **info: Any) -> None:
-        sink.append((event, _reportable_stage_payload(info)))
+        payload = _reportable_stage_payload(info)
+        sink.append((event, payload))
+        if log_dir is not None:
+            append_stage_event(log_dir, event, payload)
 
     return _record
 
@@ -691,6 +726,28 @@ def _export_norm_weights(causal, inventory) -> np.ndarray:
     return torch.cat(parts).cpu().numpy()
 
 
+def _resolve_rev() -> str:
+    """The checkout revision this driver file belongs to, or literal 'unknown'.
+
+    The launch line names the run's CODE identity (change qk-launch-attribution),
+    so the revision is read from the driver's OWN location rather than the cwd:
+    a fire launched from elsewhere still belongs to the tree its code came from,
+    and that is what a reader of a surviving trail needs. A copy placed outside
+    any checkout (CI smoke harnesses, bare scripts) has no revision to name and
+    MUST say so literally — never a crash, never a fabricated value.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+    return proc.stdout.strip() or "unknown"
+
+
 def _resolve_device(requested: str) -> str:
     """Where the torch stages run -- or a refusal, before anything is loaded.
 
@@ -719,16 +776,41 @@ def _resolve_device(requested: str) -> str:
     return "cuda" if requested == "auto" else requested
 
 
+def _checkpoint_launcher_dir(checkpoint_dir: Path | None) -> Path:
+    """The solve-checkpoint directory THIS launch will use.
+
+    An explicitly passed directory is the resumable path and is used exactly as
+    given. Without one the launch gets a FRESH per-run directory: a shared,
+    stable, mutable default is the amplifier of a measured defect (two models
+    launched with no flags collided in `artifacts/ptq-checkpoints`, and model B's
+    resume then restored model A's block archives under an identical PTQConfig --
+    qk-fp-model-identity), so the default removes the collision instead of
+    reporting it. Resumption is opt-in: name the directory a launch printed.
+
+    Per-run directories land under `_scratch_root()` for the same reason the KD
+    cache does -- real disk where it exists, so block archives and fp-stream
+    targets are not written into a small tmpfs.
+    """
+    if checkpoint_dir is not None:
+        return Path(checkpoint_dir)
+    return Path(tempfile.mkdtemp(prefix="ptq-checkpoints-", dir=_scratch_root()))
+
+
 def main() -> int:
     # ---- crash-safe breadcrumbs ------------------------------------
     # SIGKILL can't flush our stdout, so a watchdog thread samples the
     # shared cgroup's memory + this process's RSS and appends stage
     # markers to a plain file. Whatever kills us, the tail of this file
     # says WHERE we were and HOW BIG we were.
+    # The DEFAULTED trail is per-launch (`breadcrumbs-<pid>.log`) so two
+    # concurrent sandbox runs write two files instead of interleaving into one;
+    # an explicit QUANTIBBLER_BREADCRUMBS is honored EXACTLY, because the
+    # container is single-run and that path is a contract (the wrapper's dated
+    # run headers and the forensics read path point at that one file).
     breadcrumb_path = Path(
         os.getenv(
             "QUANTIBBLER_BREADCRUMBS",
-            str(Path(os.environ["QUANTIBBLER_KD_TMPDIR"]) / "quantibbler-breadcrumbs.log"),
+            str(Path(os.environ["QUANTIBBLER_KD_TMPDIR"]) / f"breadcrumbs-{os.getpid()}.log"),
         )
     )
 
@@ -761,14 +843,6 @@ def main() -> int:
     def _stage(note: str) -> None:
         print(note, flush=True)
         _bread(note)
-
-    threading.Thread(target=_watchdog, daemon=True).start()
-    _bread(f"start pid={os.getpid()} argv={' '.join(sys.argv[1:])}")
-    try:
-        with open("/sys/fs/cgroup/memory.events") as fh:
-            _bread("memory.events@start: " + " ".join(fh.read().split()))
-    except OSError:
-        pass
 
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--model", default="Qwen/Qwen3-0.6B")
@@ -853,9 +927,12 @@ def main() -> int:
     parser.add_argument(
         "--checkpoint-dir",
         type=Path,
-        default=Path("artifacts") / "ptq-checkpoints",
-        help="per-block solve checkpoints (fingerprint-guarded); enables "
-        "crash resume of the dominant-cost stage",
+        default=None,
+        help="per-block solve checkpoints (fingerprint-guarded) and the ONE way "
+        "to opt into crash resume of the dominant-cost stage: name the directory "
+        "a previous launch printed. Default: a FRESH per-run directory — a shared "
+        "stable default is how one model's block archives get restored into "
+        "another model's solve",
     )
     parser.add_argument(
         "--no-checkpoints",
@@ -916,9 +993,26 @@ def main() -> int:
     parser.add_argument("--out", type=Path, default=Path("artifacts") / "model-qpk1")
     args = parser.parse_args()
 
+    # The launch line is the trail's FIRST line and the only record a corpse is
+    # guaranteed to have written: it names the process (pid), the exact argv, the
+    # code (rev) and the output target (out), so a surviving trail self-attributes
+    # without kernel records or container metadata (change qk-launch-attribution).
+    # `out` is only known after the parse, and nothing may reach the file before
+    # this line — the watchdog thread therefore starts HERE, below it, rather than
+    # above it, and the memory.events crumb follows it.
+    out_dir: Path = args.out.resolve()
+    threading.Thread(target=_watchdog, daemon=True).start()
+    _bread(
+        f"start pid={os.getpid()} argv={' '.join(sys.argv[1:])} rev={_resolve_rev()} out={out_dir}"
+    )
+    try:
+        with open("/sys/fs/cgroup/memory.events") as fh:
+            _bread("memory.events@start: " + " ".join(fh.read().split()))
+    except OSError:
+        pass
+
     _device = _resolve_device(args.device)
     torch.manual_seed(args.seed)
-    out_dir: Path = args.out
     out_dir.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
 
@@ -997,7 +1091,7 @@ def main() -> int:
     # The knob counts sequences; `evaluation` records the window in batches (a
     # harness fact, kept). The comparison is made in the knob's unit, so the
     # gate's demanded value and the recorded one are the same kind of number.
-    full_window_sequences = evaluation["full_local_window_batches"] * BATCH
+    full_window_sequences = eval_window_sequences(evaluation)
     if args.paper_faithful and args.eval_seqs != full_window_sequences:
         raise ValueError(
             f"--paper-faithful requires the maximal local evaluation window: "
@@ -1144,8 +1238,23 @@ def main() -> int:
     # part of each record lands in the run report as `stages`, and
     # `stage_map` resolves it against [NQ] Algorithm 1 lines 0-28. Tensors are
     # dropped (they are not report material; the numbers they carried are).
+    # With checkpointing enabled the same record is appended, per event, to the
+    # stage journal beside the checkpoints, so a run resumed after a crash in
+    # the pipeline tail still carries the stages that actually fired.
     stage_events: list[tuple[str, dict]] = []
-    _record = _stage_recorder(stage_events)
+    if args.no_checkpoints:
+        _ckpt_dir = None
+    else:
+        _ckpt_dir = _checkpoint_launcher_dir(args.checkpoint_dir)
+        if args.checkpoint_dir is None:
+            # Named, not silent: a crash-resume needs this path, and the trail is
+            # the only place a corpse is guaranteed to have written it.
+            print(
+                f"[checkpoint] per-run checkpoint dir: {_ckpt_dir} "
+                "(pass --checkpoint-dir <dir> to make a launch resumable)",
+                flush=True,
+            )
+    _record = _stage_recorder(stage_events, _ckpt_dir)
     # Identity fields shared by every report path, built once (see
     # `_run_identity`: the probe-abort and stage-failure reports must be as
     # self-describing as a completion report).
@@ -1164,8 +1273,9 @@ def main() -> int:
             model,
             calib,
             quantized_config(args, progress_probe=_probe),
-            checkpoint_dir=None if args.no_checkpoints else args.checkpoint_dir,
+            checkpoint_dir=_ckpt_dir,
             recorder=_record,
+            stage_sink=stage_events,
         )
         _bread(f"quantize_model returned: {len(qm.layers)} layers")
         print(f"      solver wall: {time.time() - solver_t:.0f}s", flush=True)
@@ -1240,11 +1350,12 @@ def main() -> int:
         # Phase 3 (Algorithm 1 lines 26-27) runs inside quantize_model; the
         # driver records its execution here so the stage map covers every
         # stage of lines 0-28 without threading a recorder into scale_calib.
-        stage_events.append(
-            (
-                "tune_scales_kd",
-                {"factor_mode": args.factor_mode, "artifact": measured_artifact},
-            )
+        # Through the recorder (not a bare append) so the record and the journal
+        # beside the checkpoints carry the same event set.
+        _record(
+            "tune_scales_kd",
+            factor_mode=args.factor_mode,
+            artifact=measured_artifact,
         )
         # The fidelity label is a COMPUTED verdict over the run's own record
         # (qk-fix-tunefp-teacher, scenario `label_flips_on_runtime_deviations` /

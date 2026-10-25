@@ -2,7 +2,7 @@
 
 ## Why
 
-The 2026-10-27 corpse (kernel-provable kill of a seq-2048-class tune
+The 2026-10-20 corpse (kernel-provable kill of a seq-2048-class tune
 attempt, 33,480,724 kB against the 32g memcg) left a surviving trail
 that still could not name its launcher. The launch protocol in
 AGENTS.md is the discipline layer; the mechanism layer is missing. The

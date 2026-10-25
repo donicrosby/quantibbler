@@ -44,6 +44,7 @@ from quantibbler.qk_report import (
     provenance,
     stage_failure_report,
     stage_map,
+    stage_row_times,
     verdict,
 )
 
@@ -372,6 +373,62 @@ def _binds_report_name(node: ast.AST) -> bool:
     return False
 
 
+#: The launch line's identity fields, in the order design.md decision 1 pins
+#: (change qk-launch-attribution): the epoch crumb field leads the line, then
+#: pid, argv, rev, out.
+_LAUNCH_LINE_FIELDS = (" pid=", " argv=", " rev=", " out=")
+
+
+def _crumb_literal_text(node: ast.AST) -> str:
+    """The literal characters of a crumb argument, with f-string holes dropped.
+
+    ``f"a={x} b={y}"`` is ONE ``ast.JoinedStr`` whose constant parts are ``"a="``
+    and ``" b="``; joining those recovers the field markers a structural pin
+    reads, without evaluating anything.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            part.value
+            for part in node.values
+            if isinstance(part, ast.Constant) and isinstance(part.value, str)
+        )
+    return ""
+
+
+def _launch_line_findings(main: ast.AST) -> list[str]:
+    """The launch line must carry every identity field, in the pinned order.
+
+    The trail's FIRST line is the corpse's self-attribution (change
+    qk-launch-attribution): an edit that drops ``rev``, ``out``, ``pid`` or
+    ``argv`` — or reorders them — leaves the survivor unable to name its own
+    launch, which is exactly the attribution failure that change exists to
+    close. Pinned structurally off the crumb f-string's own field markers, so
+    renaming the locals cannot evade it and a dropped field cannot hide behind a
+    green shape.
+    """
+    crumbs = [
+        _crumb_literal_text(arg)
+        for node in ast.walk(main)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "_bread"
+        for arg in node.args
+    ]
+    launch = [text for text in crumbs if "start pid=" in text]
+    if len(launch) != 1:
+        return [f"expected exactly one launch line (`start pid=…`) in main(), found {len(launch)}"]
+    text = launch[0]
+    order = [text.find(field) for field in _LAUNCH_LINE_FIELDS]
+    if -1 in order:
+        missing = [f for f, at in zip(_LAUNCH_LINE_FIELDS, order, strict=True) if at == -1]
+        return [f"launch line is missing identity field(s){missing}: {text!r}"]
+    if order != sorted(order):
+        return [
+            f"launch identity fields are out of the pinned order {_LAUNCH_LINE_FIELDS}: {text!r}"
+        ]
+    return []
+
+
 def _driver_wiring_findings(src: str) -> list[str]:
     """Every way ``src`` breaks the driver contract. Empty list == clean."""
     findings: list[str] = []
@@ -641,6 +698,11 @@ def _driver_wiring_findings(src: str) -> list[str]:
                 "the FAILED exit-code fallback does not consider the fail-closed stage "
                 "gate — a stage-failed run would exit 0"
             )
+
+    # The launch line IS the corpse's self-attribution (change
+    # qk-launch-attribution): its construction is pinned beside the behavior it
+    # names, so a later edit that drops a field reds HERE rather than shipping.
+    findings.extend(_launch_line_findings(main))
     return findings
 
 
@@ -658,7 +720,48 @@ def test_report_driver_is_wired_to_the_gate():
     assert "provenance(" in src and "rho_end_source=_rho_end_source" in src
 
 
+#: The default expression, anchored where it now lives: the driver names the
+#: scratch root ONCE (`_scratch_root()`, change qk-launch-attribution) so the KD
+#: teacher-logit cache and the per-run checkpoint directory cannot drift apart,
+#: and the `setdefault` call is a bare call to that helper. The mutations below
+#: rewrite THIS expression inside the helper, which is what keeps them applied to
+#: the real driver source instead of to a copy the pin no longer reads.
 _SCRATCH_DEFAULT = "str(_SANDBOX_SCRATCH) if _SANDBOX_SCRATCH.is_dir() else tempfile.gettempdir()"
+
+
+def _resolve_scratch_helper(tree: ast.Module, expression: ast.expr) -> ast.expr:
+    """Follow a module-level helper call to the expression that helper returns.
+
+    The structural checks below are about the DEFAULT's shape, not about the
+    call's: while the default was written inline at `setdefault`, the two were the
+    same node. Once the driver extracted it into a single named helper, a pin that
+    read only the call would judge `_scratch_root()` — a bare Call — and report
+    "no platform-scratch fallback" / "not existence-probed" for the CALL rather
+    than for the default, which is vacuously true of any helper name and would
+    pass three of the mutations below for the wrong reason. So the reference is
+    resolved to the helper's return expression, and the checks run there.
+
+    Bounded and fail-closed: only a module-level FunctionDef with exactly one
+    Return is followed, a chain of at most four links; anything else is returned
+    unchanged so the callers' own checks see (and report) it.
+    """
+    for _ in range(4):
+        if not (isinstance(expression, ast.Call) and isinstance(expression.func, ast.Name)):
+            break
+        funcs = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == expression.func.id
+        ]
+        if len(funcs) != 1:
+            break
+        returns = [
+            node for node in ast.walk(funcs[0]) if isinstance(node, ast.Return) and node.value
+        ]
+        if len(returns) != 1:
+            break
+        expression = returns[0].value
+    return expression
 
 
 def _scratch_dir_findings(src: str) -> list[str]:
@@ -710,7 +813,7 @@ def _scratch_dir_findings(src: str) -> list[str]:
     ]
     if len(defaults) != 1:
         return [f"expected exactly one QUANTIBBLER_KD_TMPDIR default, found {len(defaults)}"]
-    expression = defaults[0].args[1]
+    expression = _resolve_scratch_helper(tree, defaults[0].args[1])
     default = ast.unparse(expression)
     referenced = {node.id for node in ast.walk(expression) if isinstance(node, ast.Name)}
     sandbox = "/opt/data/tmp"
@@ -786,7 +889,7 @@ def _drop_the_fallback(src: str) -> str:
     return src.replace(_SCRATCH_DEFAULT, "tempfile.gettempdir()", 1)
 
 
-_DEFAULT_CALL_HEAD = 'os.environ.setdefault(\n    "QUANTIBBLER_KD_TMPDIR",'
+_DEFAULT_CALL_HEAD = 'os.environ.setdefault("QUANTIBBLER_KD_TMPDIR",'
 
 
 def _a_second_default(src: str) -> str:
@@ -899,6 +1002,12 @@ _ABORT_ANCHOR = "    except PrefixProbeAbort as exc:\n"
 _ABORT_BUILT_ANCHOR = "            probe_history,\n        )\n"
 #: The fail-closed stage-gate handler's first line: unique in the driver.
 _VACUOUS_ANCHOR = "    except VacuousTeacherError as exc:\n"
+#: The launch line's two f-string HOLES (change qk-launch-attribution). Anchoring
+#: on the holes rather than on a whole line keeps these poisons valid under
+#: `ruff format`: a reformat may split the implicit concatenation BETWEEN the two
+#: holes, but never inside one.
+_LAUNCH_REV_HOLE = "rev={_resolve_rev()}"
+_LAUNCH_OUT_HOLE = "out={out_dir}"
 
 
 def _poison(kind: str) -> str:
@@ -985,6 +1094,23 @@ def _poison(kind: str) -> str:
             _VACUOUS_ANCHOR + "        return 1\n",
             1,
         )
+    # The launch line's identity fields: each of these leaves the run starting
+    # fine and the trail looking shaped, while the corpse can no longer name its
+    # own launch (change qk-launch-attribution).
+    if kind == "launch_line_dropped_rev":
+        return src.replace(_LAUNCH_REV_HOLE, "", 1)
+    if kind == "launch_line_dropped_out":
+        return src.replace(_LAUNCH_OUT_HOLE, "", 1)
+    if kind == "launch_line_fields_reordered":
+        # Swap the two holes through sentinels: the fix is to move the fields,
+        # not to respell the literal text around them, so this stays honest if
+        # the f-string is ever re-wrapped.
+        swapped = src.replace(_LAUNCH_REV_HOLE, "@@REV@@", 1).replace(
+            _LAUNCH_OUT_HOLE, "@@OUT@@", 1
+        )
+        return swapped.replace("@@REV@@", _LAUNCH_OUT_HOLE, 1).replace(
+            "@@OUT@@", _LAUNCH_REV_HOLE, 1
+        )
     raise AssertionError(f"unknown poison {kind}")
 
 
@@ -1010,6 +1136,9 @@ def _poison(kind: str) -> str:
         ("abort_ignored_by_exit_code", "does not consider the probe abort"),
         ("stage_gate_ignored_by_exit_code", "does not consider the fail-closed stage gate"),
         ("stage_gate_returned_from", "exactly one return"),
+        ("launch_line_dropped_rev", "missing identity field"),
+        ("launch_line_dropped_out", "missing identity field"),
+        ("launch_line_fields_reordered", "out of the pinned order"),
     ],
 )
 def test_report_driver_tripwire_rejects_poisoned_drivers(kind, expected):
@@ -1538,6 +1667,63 @@ def test_stage_map_names_missing_stages_as_not_executed_never_omits_them():
     assert empty["tune_fp"]["invocations"] == 0
     assert empty["ste"]["discrete_flip_pass"] is False
     assert empty["phase1_statistics"]["executed"] is False
+
+
+# --------------------------------------------------------------------------
+# qk-ptq-speedups: per-stage row-time, carried by the stage inventory
+# --------------------------------------------------------------------------
+
+
+def test_stage_map_reports_row_time_per_stage_row():
+    """Scenario ``ste_tunefp_gpu_zero_algorithm_change``: per-stage row-time is
+    reported — one TuneFP row per fire, one STE row per refined linear."""
+    stages = [
+        ("tune_fp", {"elapsed_s": 12.0, "steps": 8}),
+        ("tune_fp", {"elapsed_s": 6.0, "steps": 8}),
+        ("lb_admm", {"polish_rounds": 0}),
+        ("ste", {"per_linear": {"attn.q": {"elapsed_s": 3.0}, "attn.o": {"elapsed_s": 9.0}}}),
+    ]
+    mapped = stage_map(stages)
+    assert mapped["tune_fp"]["rows"] == 2
+    assert mapped["tune_fp"]["elapsed_s"] == 18.0
+    assert mapped["tune_fp"]["row_time_s"] == 9.0
+    # The STE rows are the refined LINEARS, which is the unit the stage's cost is
+    # quoted in — not the block's invocations.
+    assert mapped["ste"]["rows"] == 2
+    assert mapped["ste"]["elapsed_s"] == 12.0
+    assert mapped["ste"]["row_time_s"] == 6.0
+    # A stage that ran without recording a time reports null, never 0 s: a zero
+    # reads as "this stage was free" where the truth is "nobody measured it".
+    assert mapped["lb_admm"]["rows"] == 1
+    assert mapped["lb_admm"]["elapsed_s"] is None
+    assert mapped["lb_admm"]["row_time_s"] is None
+    # A stage that did not run reports no rows at all.
+    assert mapped["tune_scales_kd"]["rows"] == 0
+    assert mapped["tune_scales_kd"]["row_time_s"] is None
+
+
+def test_stage_row_times_do_not_count_a_skipped_fire_or_a_null_reading():
+    """A skipped fire is not a row, and an unreadable time is not a free stage."""
+    stages = [
+        ("tune_fp", {"skipped": "block_carries_no_second_target", "elapsed_s": 0.5}),
+        ("tune_fp", {"elapsed_s": 4.0}),
+        ("capture", {"elapsed_s": float("inf")}),
+        ("ste", {"per_linear": {"a": {"elapsed_s": 2.0}, "b": {}}}),
+    ]
+    times = stage_row_times(stages)
+    assert times["tune_fp"] == {"rows": 1, "elapsed_s": 4.0, "row_time_s": 4.0}
+    # The STE record's own time is not substituted for its rows' missing readings.
+    assert times["ste"] == {"rows": 2, "elapsed_s": 2.0, "row_time_s": 2.0}
+    assert times["capture"] == {"rows": 1, "elapsed_s": None, "row_time_s": None}
+
+
+def test_stage_row_times_read_both_record_shapes():
+    """The driver carries ``(event, info)`` pairs and the payload spells them as
+    dicts; one reader, both shapes (the ``_stage_pair`` contract)."""
+    pairs = [("tune_fp", {"elapsed_s": 2.0})]
+    dicts = [{"event": "tune_fp", "elapsed_s": 2.0}]
+    assert stage_row_times(pairs) == stage_row_times(dicts)
+    assert stage_row_times([]) == {}
 
 
 # --------------------------------------------------------------------------

@@ -57,9 +57,11 @@ __all__ = [
     "abort_report",
     "stage_failure_report",
     "stage_map",
+    "stage_row_times",
     "geometry_deviations",
     "fidelity_conditions",
     "fidelity_verdict",
+    "stage_journal_record",
     "provenance",
 ]
 
@@ -606,6 +608,180 @@ _STAGE_LINES: tuple[tuple[str, str, str, str | None, bool], ...] = (
 )
 
 
+#: The payload keys each stage event ALWAYS carries, keyed by event name.
+#:
+#: The verdict is payload-BLIND by design: a required stage counts as executed
+#: on its event NAME alone, because the in-process recorder cannot emit a name
+#: without the emitter having run. That is sound only while the record is
+#: in-process. Once a record can be RE-READ from disk — the stage journal beside
+#: the solve checkpoints, which seeds a resumed run's sink — a name-only line is
+#: forgeable by corruption, and a name-only line satisfies every required-stage
+#: condition while attesting nothing.
+#:
+#: This table is the shape such a line must carry: one entry per event the
+#: recorder can emit, listing the payload keys that event's emitter always
+#: sends. It is keyed by the SAME vocabulary ``_STAGE_LINES`` holds (a test pins
+#: the containment in both directions), so a stage cannot join the inventory
+#: without a shape, and a reader cannot be handed a stage record it has no shape
+#: for.
+#:
+#: It is a SHAPE check, not a signature: a hand-written line that copies the keys
+#: still passes it. Binding a journal to the run whose checkpoints it sits beside
+#: is the fingerprint's job (``checkpoints.check_fingerprint``), not this
+#: table's.
+_STAGE_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
+    "phase1_statistics": ("linears", "num_linears"),
+    # The stream provenance labels are the pair the verdict's
+    # `capture_is_fp_stream` condition reads, so a capture with no payload at
+    # all must not be readable as one.
+    "capture": ("capture_index", "teacher_source", "x_b_stream", "y_b_stream"),
+    # The marker is the TuneFP loss formula's informed-assumption note; a
+    # skip-marked record carries it too, so it is required either way.
+    "tune_fp": ("capture_index", "marker", "steps", "tunable"),
+    "lb_admm": ("polish_rounds",),
+    "ste": ("capture_index", "per_linear", "total_steps"),
+    "sign_extract_pack": ("extracted", "factor_mode", "layers"),
+    "tune_scales_kd": ("artifact", "factor_mode"),
+    # Off-inventory events. Neither is a row of the stage inventory (nothing
+    # counts their execution), but the recorder emits both, so a journal that
+    # carries one must still be readable. The two norms ARE the vacuous-teacher
+    # event's evidence (A3), which is why both are required here.
+    "tune_loss_uniform_fallback": ("block", "reason"),
+    "tune_fp_vacuous_teacher": ("block", "gradient_norm", "initial_residual_norm", "reason"),
+}
+
+
+def _non_finite_path(value: Any, path: str = "info") -> str | None:
+    """The path of the first non-finite number inside a payload, or ``None``.
+
+    The MONOTONE-LEVERAGE corruption class (see the repo skill's corruption
+    self-test rule): a measurement that saturates to ``inf``/``NaN`` — or a
+    literal large enough to saturate on parse, e.g. ``1e400`` — dominates any
+    artifact state for a nonzero entry, so it is the class a corruption
+    self-test must use rather than a sign flip or a small-entry tweak. The
+    required-stage conditions are payload-blind, so the journal's gate is the
+    one place such a value could reach a verdict; refusing it here keeps a
+    saturated line from being read as an execution. ``bool`` is not a number
+    here (``isinstance(True, float)`` is False), and JSON has already turned
+    every number into ``int``/``float``, so no numpy scalar can appear.
+    """
+    if isinstance(value, dict):
+        for key, item in value.items():
+            found = _non_finite_path(item, f"{path}.{key}")
+            if found is not None:
+                return found
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            found = _non_finite_path(item, f"{path}[{index}]")
+            if found is not None:
+                return found
+    elif isinstance(value, float) and not math.isfinite(value):
+        return path
+    return None
+
+
+def stage_journal_record(record: Any) -> tuple[str, dict]:
+    """``(event, info)`` for one stage-journal line, or ``ValueError``.
+
+    The journal beside the solve checkpoints is the ONLY path by which a stage
+    record can be re-read from disk and fed back into ``fidelity_conditions``,
+    so it is the only place where the payload-blindness described on
+    ``_STAGE_PAYLOAD_KEYS`` could be reached by a record whose shape nobody
+    vouched for. Every line therefore has to name an event the recorder can
+    emit AND carry the payload that event always sends; a name-only record —
+    the shape a corrupted or hand-written line most easily takes — is refused
+    rather than accepted as an execution. A line whose payload carries a
+    non-finite number is refused for the same reason the shape gate exists: a
+    saturated measurement is the MONOTONE-LEVERAGE corruption class, and it
+    must deny or raise, never bless a verdict on its name alone.
+
+    This is a validator, not a reader: the file/line context and the
+    fingerprint guard belong to the caller (``checkpoints.read_stage_log``).
+    """
+    if not isinstance(record, dict):
+        raise ValueError("a stage journal line must be a JSON object")
+    event = record.get("event")
+    if not isinstance(event, str):
+        raise ValueError("a stage journal line must name its event as a string")
+    shape = _STAGE_PAYLOAD_KEYS.get(event)
+    if shape is None:
+        raise ValueError(
+            f"event {event!r} is not one the stage recorder can emit; refusing to read a "
+            "stage record from an unregistered name"
+        )
+    info = record.get("info")
+    if not isinstance(info, dict):
+        raise ValueError(f"event {event!r} carries no payload object")
+    missing = [key for key in shape if key not in info]
+    if missing:
+        raise ValueError(
+            f"event {event!r} is missing the payload keys {missing}; a name-only record "
+            "would satisfy every required-stage condition while attesting nothing"
+        )
+    saturated = _non_finite_path(info)
+    if saturated is not None:
+        raise ValueError(
+            f"event {event!r} carries a non-finite number at {saturated}; a saturated "
+            "measurement is the monotone-leverage corruption class and must not be read "
+            "as an execution"
+        )
+    return event, info
+
+
+def _row_seconds(fields: Any) -> float | None:
+    """A stage row's own wall time, or ``None`` when the row did not record one.
+
+    Never 0 for a missing reading: a zero row time is a positive claim ("this
+    stage cost nothing"), which is exactly the shape a silently un-instrumented
+    stage would produce (same rule as the null-not-zero unmeasured numerics).
+    """
+    value = fields.get("elapsed_s") if isinstance(fields, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(float(value)) else None
+
+
+def stage_row_times(stages: list) -> dict[str, dict]:
+    """Per-stage wall time and its cost per ROW, read off the stage records.
+
+    ONE row per unit the stage's cost is quoted in (qk-ptq-speedups, scenario
+    ``ste_tunefp_gpu_zero_algorithm_change``): a ``tune_fp`` row is one fire,
+    a ``ste`` row is one refined linear, every other stage's row is one
+    invocation. The stage's cost was estimated per fire and per linear before
+    the port; this is the measured value that replaces the estimate.
+
+    A recorded ``tune_fp`` skip is NOT a row: it did no work and spent no time,
+    and counting it would deflate the stage's per-row cost. Rows without a
+    reading are counted and their time is ``None`` — see :func:`_row_seconds`.
+    ``row_time_s`` is the mean over the rows that DID record a time, so an
+    unmeasured row dilutes nothing.
+    """
+    rows: dict[str, list[float | None]] = {}
+    for entry in stages or []:
+        event, info = _stage_pair(entry)
+        if event is None:
+            continue
+        fields = info if isinstance(info, dict) else {}
+        if event == "tune_fp" and fields.get("skipped"):
+            rows.setdefault("tune_fp", [])
+            continue
+        per_linear = fields.get("per_linear")
+        if event == "ste" and isinstance(per_linear, dict) and per_linear:
+            for rec in per_linear.values():
+                rows.setdefault("ste", []).append(_row_seconds(rec))
+            continue
+        rows.setdefault(event, []).append(_row_seconds(fields))
+    out: dict[str, dict] = {}
+    for event, spent in rows.items():
+        known = [value for value in spent if value is not None]
+        out[event] = {
+            "rows": len(spent),
+            "elapsed_s": sum(known) if known else None,
+            "row_time_s": (sum(known) / len(known)) if known else None,
+        }
+    return out
+
+
 def stage_map(stages: list) -> dict:
     """Map every executable stage to its Algorithm 1 lines, naming deviations.
 
@@ -613,11 +789,18 @@ def stage_map(stages: list) -> dict:
     result answers the faithful-run question directly: which stages of
     Algorithm 1 lines 0-28 actually executed, and which parts of the letter
     the pipeline deviates from.
+
+    Each entry also carries its measured row time (``rows``, ``elapsed_s``,
+    ``row_time_s``) beside its Algorithm 1 lines — see
+    :func:`stage_row_times`. The timing lives in THIS record rather than a
+    parallel one, so a stage's declared lines and its measured cost cannot
+    drift apart.
     """
     executed = [event for event, _ in stages]
     counts: dict[str, int] = {}
     for event in executed:
         counts[event] = counts.get(event, 0) + 1
+    times = stage_row_times(stages)
     out: dict[str, dict] = {}
     for key, lines, description, deviation, _required in _STAGE_LINES:
         fired = counts.get(key, 0)
@@ -627,6 +810,9 @@ def stage_map(stages: list) -> dict:
             "invocations": fired,
             "executed": bool(fired),
             "deviation": deviation,
+            "rows": times.get(key, {}).get("rows", 0),
+            "elapsed_s": times.get(key, {}).get("elapsed_s"),
+            "row_time_s": times.get(key, {}).get("row_time_s"),
         }
     out["tune_fp"]["vacuous_events"] = counts.get("tune_fp_vacuous_teacher", 0)
     out["ste"]["discrete_flip_pass"] = any(

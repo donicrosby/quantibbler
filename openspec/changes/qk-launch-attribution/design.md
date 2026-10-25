@@ -1,6 +1,6 @@
 # qk-launch-attribution — Design
 
-## Facts checked before authoring (2026-10-27)
+## Facts checked before authoring (2026-10-21)
 
 - The crumb start line ALREADY carries pid + argv
   (`tools/quantize_hf_model.py:558`) — sec-eng's read of the trail as
@@ -56,3 +56,95 @@
   pid? No — the identity line plus per-launch files already binds
   every line to its launch; adding pid to each 5 s sample buys
   nothing. Status: CLOSED at authoring.
+
+## Implementation crystallization
+
+### 2026-10-25 — task 1.1: the RED tests read the contract at a doomed start
+
+`tests/ptq/test_launch_attribution.py` takes every reading from a driver
+process that STARTS for real and then aborts at model load (a nonexistent
+`--model` path, resolved offline), with `--device cpu` passed by name. That
+trigger is deliberate: it IS the corpse case this change exists for, and it is
+reachable whether the launch line is written before `argparse` or immediately
+after it. Two consequences for task 1.2, decided here rather than left silent:
+
+- The tests do NOT require a trail from a `--help` / parse-error exit, so moving
+  the launch-line write below `parser.parse_args()` — the natural way to know
+  the resolved `out` dir — is permitted. What is pinned is that the launch line
+  is line 1 of its trail: the `memory.events@start` crumb and the watchdog must
+  not be able to reach the file first. Field order is pinned as decision 1
+  states it (epoch crumb field, then `pid`, `argv`, `rev`, `out`).
+- `rev=unknown` is asserted by running the driver from a COPY placed outside any
+  checkout, with `cwd` outside it too, and the test first asserts that
+  `git -C <dir> rev-parse --show-toplevel` fails there — so the literal cannot
+  be satisfied by whichever directory the resolver happens to consult.
+
+Pre-implementation the whole file was RED (4 failed): the identity line carried
+`pid` and `argv`, as the "facts checked" section above already said, and
+neither `rev` nor `out`; the defaulted trail was still the single shared
+`quantibbler-breadcrumbs.log`.
+
+### 2026-10-25 — tasks 1.2/1.3: which directory `rev` comes from, and why the launch line moved below the parse
+
+Four choices the spec delta and the decisions above left silent, settled here
+rather than left for a reader of the diff:
+
+- **`rev` is read from the DRIVER'S OWN location, never the cwd.** `_resolve_rev()`
+  runs `git -C <driver's own dir> rev-parse HEAD`, because the field is the run's
+  CODE identity: a fire launched from another directory still belongs to the tree
+  its code came from, and that is the tree a post-mortem wants. The outside-a-checkout
+  test above is deliberately blind to this choice — it makes BOTH readings (cwd and
+  the driver's own dir) fail there — so the literal `unknown` is not evidence for
+  either directory, and the choice is recorded here instead of being inferred from a
+  green test.
+- **The launch line is written AFTER `parser.parse_args()`, and the watchdog thread
+  starts BELOW it.** The resolved `out` dir is only known after the parse, and the
+  invariant that matters is "the launch line is line 1 of its trail" — so the
+  watchdog thread start and the `memory.events@start` crumb both moved down with the
+  launch line. Leaving the thread started above it would have made the ordering true
+  only by the watchdog's 5 s first sleep; writing first and starting the sampler
+  afterwards makes it structural. Nothing writes to the trail before the parse, so
+  no crumb can beat the launch line now by any path.
+- **The pin reads the crumb f-string's own field markers, not the local names.**
+  `_launch_line_findings` flattens the `JoinedStr` handed to `_bread` and requires
+  ` pid=`, ` argv=`, ` rev=`, ` out=` in that order, so renaming the locals
+  (`out_dir`, `rev`) cannot evade the pin while dropping or reordering a field reds
+  it. Three poisons ship beside it in
+  `test_report_driver_tripwire_rejects_poisoned_drivers`
+  (`launch_line_dropped_rev`, `launch_line_dropped_out`,
+  `launch_line_fields_reordered`), each asserted against the real driver source.
+- **`out_dir` is bound once, as `args.out.resolve()`.** The launch line needs the
+  value before the export stage does, so the later `out_dir = args.out` rebind was
+  folded into that single binding, and the field records the RESOLVED target the
+  requirement names rather than whatever spelling argv carried.
+
+### 2026-10-25 — task 3.1: which interpreter produced which gate number
+
+Three measurement facts this change's landing rests on, recorded because each one
+is a way to read a false green off the same tree:
+
+- **`uv run pytest` bare is NOT the gate here.** This checkout's project
+  environment is a single shared `/opt/venv` that already carries the extras;
+  `uv sync --dry-run` (measured) shows a switch-like bare sync would UNINSTALL 31
+  packages — torch, transformers, pyarrow, `quantibbler-kernels` — after which the
+  ptq tier is silently ignored and the suite reports a smaller green with no
+  failures. The gate forms used are `uv run --no-sync … --extra torch --extra
+  kernels --extra hf pytest` (full extras) and the CI recipe's fresh
+  `.venv-lean` interpreter (lean), never a sync-shaped bare run.
+- **The lean tier's 16 skips are the contract, not noise.** Lean
+  (`/opt/data/quantibbler/.venv-lean`: fresh `uv venv` + `pip install -e . pytest
+  pyyaml`, torch/transformers/tokenizers proven absent BEFORE any count is
+  believed) → `718 passed, 16 skipped`, rc=0, and
+  `tools/ci/pytest_summary.py --expect-skipped 16` → `skip discipline holds`. The
+  16 are `tests/test_kernels_parity.py`'s Rust leg (extension not importable
+  without the kernels extra).
+- **A full-tier green number cannot exist on the dev interpreter.** With the full
+  extras (`/opt/venv`, torch 2.14.1+cpu, no accelerator) the tier reads `968
+  passed, 14 failed, 3 skipped`; all 14 are the fail-closed `resolve_device`
+  refusal in device-unpinned files, and an A/B on a pristine-HEAD worktree with
+  the same interpreter reproduces exactly those 14 in 4.66 s — an interpreter ×
+  device property, not this change and not this tree's diff. The number that can
+  be green belongs to the accelerator image the fire runs in
+  (`quantibbler-ptq:rocm-official`); it was not launched in this lane (container
+  launches are announced first under AGENTS.md, and the box was co-tenant
+  saturated), and it is left as row 3.2 rather than papered over.
