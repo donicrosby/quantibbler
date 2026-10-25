@@ -5,10 +5,9 @@ imported in a lean env and the wiring is pinned by parsing it instead. What is
 pinned, each contract beside the behavior it names: the gate wiring (one return
 through ``verdict_exit_code``, the export and report write before it, exactly
 one handler per abort/failure type, ``report`` write-only at binding), the KD
-scratch-dir default surviving a host where ``/opt/data/tmp`` is absent
-(qk-launch-attribution), the probe knobs being parser-owned and threshold-free
-(qk-fail-fast-loop), and the launch line's identity fields in the pinned order
-(qk-launch-attribution ownership incident). The tripwire is itself tested
+scratch-dir default surviving a host where ``/opt/data/tmp`` is absent, the
+probe knobs being parser-owned and threshold-free, and the launch line's
+identity fields in the pinned order. The tripwire is itself tested
 against poisoned drivers — a guard nobody has shown rejecting anything is not a
 guard. The runtime half of these contracts lives in ``tests/ptq/test_driver_*``.
 
@@ -104,9 +103,8 @@ def _binds_report_name(node: ast.AST) -> bool:
     return False
 
 
-#: The launch line's identity fields, in the order design.md decision 1 pins
-#: (change qk-launch-attribution): the epoch crumb field leads the line, then
-#: pid, argv, rev, out, and the launch-ownership pair (2026-10-25 incident) --
+#: The launch line's identity fields, in fixed order: the epoch crumb field
+#: leads the line, then pid, argv, rev, out, and the launch-ownership pair --
 #: owner, card. `card` is the literal `unset` when the run has no board card, so
 #: the MARKER is always present; only the value varies.
 _LAUNCH_LINE_FIELDS = (" pid=", " argv=", " rev=", " out=", " owner=", " card=")
@@ -272,8 +270,8 @@ def _driver_wiring_findings(src: str) -> list[str]:
                 f"the single return at line {ret.lineno} precedes {label} (line {max(lines)})"
             )
 
-    # The probe abort path (change qk-fail-fast-loop) and the fail-closed
-    # stage gate (qk-fix-tunefp-teacher) share one discipline. An aborted or
+    # The probe abort path and the fail-closed stage gate share one discipline.
+    # An aborted or
     # stage-failed run must still write a failed report and exit nonzero,
     # through the SAME single verdict return: never returned from (a collapse
     # would exit 0), never re-raised (the report would never be written), and
@@ -454,7 +452,7 @@ def test_report_driver_is_wired_to_the_gate():
 
 
 #: The default expression, anchored where it now lives: the driver names the
-#: scratch root ONCE (`_scratch_root()`, change qk-launch-attribution) so the KD
+#: scratch root ONCE (`_scratch_root()`) so the KD
 #: teacher-logit cache and the per-run checkpoint directory cannot drift apart,
 #: and the `setdefault` call is a bare call to that helper. The mutations below
 #: rewrite THIS expression inside the helper, which is what keeps them applied to
@@ -735,14 +733,14 @@ _ABORT_ANCHOR = "    except PrefixProbeAbort as exc:\n"
 _ABORT_BUILT_ANCHOR = "            probe_history,\n        )\n"
 #: The fail-closed stage-gate handler's first line: unique in the driver.
 _VACUOUS_ANCHOR = "    except VacuousTeacherError as exc:\n"
-#: The launch line's two f-string HOLES (change qk-launch-attribution). Anchoring
+#: The launch line's two f-string HOLES. Anchoring
 #: on the holes rather than on a whole line keeps these poisons valid under
 #: `ruff format`: a reformat may split the implicit concatenation BETWEEN the two
 #: holes, but never inside one.
 _LAUNCH_REV_HOLE = "rev={_resolve_rev()}"
 _LAUNCH_OUT_HOLE = "out={out_dir}"
-#: The launch-ownership hole (2026-10-25 incident): a driver that starts fires
-#: naming no owner is the defect that incident proved.
+#: The launch-ownership hole: a driver that starts fires naming no owner is the
+#: defect these legs pin.
 _LAUNCH_OWNER_HOLE = "owner={owner}"
 
 
@@ -832,7 +830,7 @@ def _poison(kind: str) -> str:
         )
     # The launch line's identity fields: each of these leaves the run starting
     # fine and the trail looking shaped, while the corpse can no longer name its
-    # own launch (change qk-launch-attribution).
+    # own launch.
     if kind == "launch_line_dropped_rev":
         return src.replace(_LAUNCH_REV_HOLE, "", 1)
     if kind == "launch_line_dropped_out":

@@ -1,12 +1,11 @@
 """The Algorithm 1 stage map, per-stage row time, and the ``paper_faithful`` verdict.
 
 Split out of ``tests/test_qk_report.py`` (surface 5 of 6); every test body is
-verbatim, and the docstrings keep their scenario IDs: the stage inventory
-(qk-fix-tunefp-teacher), per-stage row time (qk-ptq-speedups, scenario
-``ste_tunefp_gpu_zero_algorithm_change``), the computed label
+verbatim, and the docstrings keep their scenario IDs: the stage inventory,
+per-stage row time, the computed label
 (`label_flips_on_runtime_deviations` / `label_flips_on_mechanism_deviations`),
 the required-stage evidence (`required_stage_execution_reads_the_same_record`),
-and the calibration geometry deviations (qk-geometry-conformance).
+and the calibration geometry deviations.
 """
 
 from __future__ import annotations
@@ -36,7 +35,7 @@ from quantibbler.qk_report import (
 )
 
 # --------------------------------------------------------------------------
-# qk-fix-tunefp-teacher: the Algorithm 1 stage map and the fail-closed report
+# The Algorithm 1 stage map and the fail-closed report
 # --------------------------------------------------------------------------
 
 
@@ -105,7 +104,7 @@ def test_stage_map_names_missing_stages_as_not_executed_never_omits_them():
 
 
 # --------------------------------------------------------------------------
-# qk-ptq-speedups: per-stage row-time, carried by the stage inventory
+# Per-stage row-time, carried by the stage inventory
 # --------------------------------------------------------------------------
 
 
@@ -162,7 +161,7 @@ def test_stage_row_times_read_both_record_shapes():
 
 
 # --------------------------------------------------------------------------
-# qk-fix-tunefp-teacher: the paper_faithful label is a COMPUTED verdict
+# The paper_faithful label is a COMPUTED verdict
 # --------------------------------------------------------------------------
 
 
@@ -213,7 +212,7 @@ def test_fidelity_label_is_true_only_when_every_condition_holds():
     label, conditions = fidelity_verdict("admm", [], _clean_stages(), requested=True)
     assert label is True
     assert set(conditions) == {
-        # Lane 2's stream-provenance condition: the verdict now denies a faithful
+        # The stream-provenance condition: the verdict now denies a faithful
         # label when a capture lacks fp-stream provenance, so it is part of the
         # exact condition set a clean run carries.
         "capture_is_fp_stream",
@@ -345,7 +344,7 @@ def test_fidelity_conditions_read_the_report_shaped_stage_records():
 
 
 # --------------------------------------------------------------------------
-# qk-fix-tunefp-teacher (planner ruling 2026-10-21): the claim also owes
+# The claim also owes
 # EVIDENCE that every required stage fired. An empty record used to certify
 # nothing while the label read green — a label with no content behind it is
 # the failure class this diff cycle exists to kill.

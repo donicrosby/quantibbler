@@ -26,7 +26,7 @@ from quantibbler.qk_report import (
 )
 
 # ---------------------------------------------------------------------------
-# Evaluation verdict (qk-fix-tunefp-teacher, Bug Hunter should-fix): the
+# Evaluation verdict: the
 # pedestal's COVERAGE is recorded beside the method verdict, never inside it.
 # ---------------------------------------------------------------------------
 
@@ -151,7 +151,7 @@ def test_scn_label_requires_fp_stream_teacher_provenance():
     A ``paper_faithful`` label owes evidence that the teacher target came from the
     FP-stream capture. Today no condition in the verdict can see a capture's stream
     provenance, so a run whose teacher read the COMPRESSED stream is labelled
-    faithful -- the fidelity hole Lane 2 closes.
+    faithful -- the fidelity hole this closes.
 
     Isolated by positive control, not by hand: the baseline record satisfies all
     fifteen conditions, so each sub-case below varies ONLY the capture provenance

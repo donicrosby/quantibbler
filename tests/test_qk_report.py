@@ -1,4 +1,4 @@
-"""Suite coverage for the end-to-end quality gate — change qk-e2e-quality-gate.
+"""Suite coverage for the end-to-end quality gate.
 
 The logic under test lives in ``quantibbler.qk_report``, deliberately OUTSIDE
 the torch-importing driver (``tools/quantize_hf_model.py``), so these tests
@@ -12,8 +12,6 @@ band derived from the pinned paper anchors ([LB2] Sec. 5.2 Table 1), the
 archived production ratio history, ``provenance()`` /
 ``json_safe()`` / ``dump_report()``, and the numpy-scalar and non-finite paths
 the sanitizer exists for.
-
-Scenario IDs from ``openspec/changes/qk-e2e-quality-gate/specs/qk-ptq/spec.md``.
 """
 
 from __future__ import annotations

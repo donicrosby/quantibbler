@@ -121,27 +121,26 @@ _ABORT_IDENTITY_VALUES: dict[str, object] = {
     "eval_rows": 16,
     "max_admm_iter": 1,
     "seed": 0,
-    # Ablation provenance (qk-root-cause-ablation D-5): the recorded abort run
+    # Ablation provenance: the recorded abort run
     # used the defaults, and the knobs must travel on the abort path too so a
     # measurement can never be mistaken for a landing.
     "factor_mode": "binary",
     "ablation": "none",
     "layer_scope": "all",
-    # Paper-faithful claim + the bounded discrete flip pass
-    # (qk-fix-tunefp-teacher / qk-fix-ste-sign-adaptation): both are solver
-    # state and both must travel on every report path.
+    # Paper-faithful claim + the bounded discrete flip pass.
+    # Both are solver state and both must travel on every report path.
     "paper_faithful": False,
     "ste_flip_pass_budget": 0,
     "ppl_baseline_bf16": 75.90947478697456,
     "regime": {"artifact": "qpk1: +-1 bitplanes + float32 scales"},
     "probe": {"interval": 1, "batches": 1, "fp_prefix_ppl": 83.08454639156159},
-    # The stage record + Algorithm 1 map (qk-fix-tunefp-teacher): every report
+    # The stage record + Algorithm 1 map: every report
     # path carries them, so an aborted or stage-failed run is as auditable as
     # a completed one.
     "stages": [],
     "stage_map": {},
     "runtime_deviations": [],
-    # The evaluation verdict (Bug Hunter should-fix): the pedestal's coverage is
+    # Evaluation verdict: the pedestal's coverage is
     # recorded beside the method verdict on every path, so an aborted run still
     # proves what it measured. Built by the production helper so this fixture
     # cannot drift from the record the driver emits.

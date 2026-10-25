@@ -1,4 +1,4 @@
-"""The fail-fast progress probe (change qk-fail-fast-loop).
+"""The fail-fast progress probe.
 
 Split out of ``tests/test_qk_report.py`` (surface 3 of 6); every test body is
 verbatim. Kill-only by construction: a 2-batch prefix supports *death* (every
@@ -24,7 +24,7 @@ from quantibbler.qk_report import (
 )
 
 # --------------------------------------------------------------------------
-# probe_* — the fail-fast progress probe (change qk-fail-fast-loop)
+# probe_* — the fail-fast progress probe
 #
 # Kill-only by construction: a 2-batch prefix supports *death* (every dead
 # run sat 20x+ past the line) and can never support *success*. Only the
