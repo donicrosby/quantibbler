@@ -62,7 +62,7 @@ blinded to which are live — the reporter handles routing internally.
 - **WHEN** the breadcrumbs subsystem is active (any pipeline stage with the
   watchdog armed)
 - **THEN** every progress update appears in the breadcrumbs file as
-  `qkb:progress <phase> iter=<N>/<total> rate=<r> eta=<s>`
+  `{epoch} qkb:progress <phase> iter=<N>/<total> rate=<r> eta=<s> eta_sane=<b>`
 - **AND** the watchdog's existing stall detector parses the breadcrumb lines
   without modification
 

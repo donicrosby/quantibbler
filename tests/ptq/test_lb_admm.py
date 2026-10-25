@@ -210,3 +210,222 @@ def test_rho_end_override_is_explicit_and_fail_closed(monkeypatch):
     monkeypatch.setenv("QK_RHO_END", "not-a-float")
     with pytest.raises(ValueError, match="QK_RHO_END must be a float"):
         _rho_end(cfg)
+
+
+# ---------------------------------------------------------------------------
+# Lane 3 (qk-nanoquant-alignment-lane3): ADMM normalized regime.
+#
+# Each test names the scenario ID it pins. A red here fails on an assertion
+# about the regime's behavior, never on an import or a missing attribute.
+# ---------------------------------------------------------------------------
+
+_LANE3 = (9, 7, 4)
+
+
+def _lane3_matrix(scale: float = 1.0):
+    """A badly-scaled ground-truth matrix: the regime's whole target."""
+    m, n, r = _LANE3
+    a = _ground_truth(m, n, r, seed=3)
+    return a * scale
+
+
+def _rel_fit(res, w) -> float:
+    """Relative Frobenius error of the returned factorization U V^T against w.
+
+    The reconstruction is ``U @ V.T`` -- the product of the two returned factors.
+    ``P_u``/``P_v`` are full (d, r) consensus proxies, NOT per-column scales, so
+    an elementwise ``U * P_u`` is a different object entirely and must never be
+    used as a reconstruction.
+    """
+    approx = np.asarray(res.U) @ np.asarray(res.V).T
+    return float(np.linalg.norm(approx - w) / np.linalg.norm(w))
+
+
+def test_scn_normalized_regressor_design_matrix():
+    """Scenario ``normalized_regressor_design_matrix``.
+
+    THEN the design matrix is built from the row/col-normalized regressor, so
+    the Gram matrix X^T X is O(1)-scale with unit-scale diagonal AND the returned
+    iterate is mapped back to the unnormalized factor basis, so U V^T remains a
+    valid factorization of the target.
+    """
+    cfg = PTQConfig(rank=_LANE3[2])
+    small = lb_admm(_lane3_matrix(1.0), cfg)
+    large = lb_admm(_lane3_matrix(1e3), cfg)
+
+    for res, w in ((small, _lane3_matrix(1.0)), (large, _lane3_matrix(1e3))):
+        assert res.trace.ridge_scale, "trace recorded no ridge scale"
+        # Unit-scale diagonal: mean(diag(Xn^T Xn)) == 1 for a normalized design.
+        assert all(abs(s - 1.0) < 1e-9 for s in res.trace.ridge_scale), (
+            f"normalized-design Gram scale is not unit-scale: {res.trace.ridge_scale[:4]}"
+        )
+        # Map-back validity: the product reconstructs the target. The bar is a
+        # KILL-ONLY bound, set from measurement under this regime (rel 3.34e-2,
+        # cos 0.99988), not a fit target. What sets the 3.3e-2 is the REG FLOOR,
+        # not the consensus proxy: admm_reg=1e-5 gives 1.19e-5 on the same
+        # fixture (converged, iter 168), 3e-2 plateaus at 3.3e-2 even at K=4000,
+        # and the SVD floor is 8.7e-16 on this exactly-rank-4 target. The
+        # residual grows linearly in reg. Do not attribute it to the proxy.
+        assert _rel_fit(res, w) < 5e-2, (
+            f"returned U V^T does not reconstruct the target (rel {_rel_fit(res, w):.3e})"
+        )
+        approx = np.asarray(res.U) @ np.asarray(res.V).T
+        cos = float(np.sum(approx * w) / (np.linalg.norm(approx) * np.linalg.norm(w)))
+        assert cos > 0.999, f"map-back product cos={cos:.6f} is not a valid factorization"
+
+    # The Gram scale is invariant to a 1e3 target rescale -- that IS the
+    # normalization claim, so it is asserted at 1e-12, not a loose tolerance.
+    a = np.asarray(small.trace.ridge_scale)
+    b = np.asarray(large.trace.ridge_scale)
+    assert a.shape == b.shape
+    assert np.allclose(a, b, rtol=1e-12, atol=1e-12), (
+        f"ridge scale moved under a 1e3 target rescale ({a[:3]} vs {b[:3]}): the "
+        "design matrix is not normalized against the target's own scale"
+    )
+
+
+def test_scn_stabilizer_scale_relative_ridge():
+    """Scenario ``stabilizer_scale_relative_ridge``.
+
+    THEN the shift is exactly ``rho * mean(diag(X^T X)) + reg`` with ``reg`` read
+    from a config field (default 3e-2) AND the anchor depends only on the
+    normalized regressor, never on raw layer scale.
+    """
+    from quantibbler.ptq.lb_admm import _ridge_shift
+
+    # Mutation-proof: on a deliberately NON-unit design the formula must track
+    # mean(diag(X^T X)) and not a constant. Column squared norms are 5 and 14.
+    x = np.array([[1.0, 2.0], [2.0, -1.0], [0.0, 3.0]])
+    shift, scale = _ridge_shift(_NP, x, 0.5, 3e-2)
+    assert scale == pytest.approx((5.0 + 14.0) / 2.0)
+    assert shift == pytest.approx(0.5 * (5.0 + 14.0) / 2.0 + 3e-2)
+
+    cfg = PTQConfig(rank=_LANE3[2])
+    assert float(cfg.admm_reg) == pytest.approx(3e-2)
+    res = lb_admm(_lane3_matrix(1.0), cfg)
+    trace = res.trace
+    assert trace.ridge_scale, "the solver trace exposes no ridge scale"
+
+    assert len(trace.ridge_scale) == 2 * len(trace.rhos), (
+        "expected one ridge scale per half-update (2 per iteration)"
+    )
+    for k, _rho in enumerate(trace.rhos):
+        # Unnormalized design in the interior loop is unit-column by
+        # construction, so the anchor is 1 and the shift is rho + reg exactly.
+        for s in (trace.ridge_scale[2 * k], trace.ridge_scale[2 * k + 1]):
+            assert s == pytest.approx(1.0, abs=1e-9)
+
+    # Scale-free anchor: a 1e3 target rescale leaves every recorded scale equal.
+    large = lb_admm(_lane3_matrix(1e3), cfg)
+    assert np.allclose(trace.ridge_scale, large.trace.ridge_scale, rtol=1e-12, atol=1e-12)
+
+
+def test_scn_reg_env_override_explicit_fail_closed(monkeypatch):
+    """Scenario ``reg_env_override_explicit_fail_closed``.
+
+    ``QK_ADMM_REG`` is a SOLVE-TIME override: it must be resolved by the solver
+    (not frozen when ``PTQConfig()`` is constructed), fail closed on garbage, and
+    never silently fall back to the default.
+    """
+    from quantibbler.ptq.lb_admm import _admm_reg, admm_reg_provenance
+
+    # Constructed BEFORE the env var is set -- a construction-time-only override
+    # would never see the change below.
+    cfg = PTQConfig(rank=4)
+
+    monkeypatch.delenv("QK_ADMM_REG", raising=False)
+    assert admm_reg_provenance(cfg.admm_reg) == (3e-2, "config")
+    assert _admm_reg(cfg) == 3e-2
+
+    monkeypatch.setenv("QK_ADMM_REG", "5e-2")
+    value, source = admm_reg_provenance(cfg.admm_reg)
+    assert value == 5e-2 and source == "env", (
+        f"QK_ADMM_REG=5e-2 did not resolve at solve time (got {value!r}, {source!r})"
+    )
+    assert _admm_reg(cfg) == 5e-2
+
+    monkeypatch.setenv("QK_ADMM_REG", "not-a-number")
+    with pytest.raises(ValueError, match="QK_ADMM_REG"):
+        _admm_reg(cfg)
+
+
+def test_scn_new_solver_state_joins_fingerprint(monkeypatch):
+    """Scenario ``new_solver_state_joins_fingerprint``.
+
+    THEN two configs differing only in a new solver-state field produce DIFFERENT
+    fingerprints AND the new fields are absent from ``_FINGERPRINT_EXCLUDED``, so
+    a future exclusion-list edit cannot silently drop solver state.
+    """
+    import dataclasses
+
+    from quantibbler.ptq.checkpoints import (
+        _FINGERPRINT_EXCLUDED,
+        config_fingerprint,
+        effective_solver_state,
+    )
+
+    for name in ("admm_reg", "rho_start", "rho_end"):
+        assert name not in _FINGERPRINT_EXCLUDED, (
+            f"{name!r} sits in _FINGERPRINT_EXCLUDED: solver state would be dropped "
+            "from the digest"
+        )
+
+    monkeypatch.delenv("QK_ADMM_REG", raising=False)
+    monkeypatch.delenv("QK_RHO_END", raising=False)
+    base = PTQConfig(rank=4)
+    base_fp = config_fingerprint(base)
+
+    for kwargs in ({"admm_reg": 4e-2}, {"rho_start": 5e-3}, {"rho_end": 5e-1}):
+        other = dataclasses.replace(base, **kwargs)
+        assert config_fingerprint(other) != base_fp, (
+            f"a config differing only in {next(iter(kwargs))} hashes identically "
+            "to the base config"
+        )
+
+    # Effective (env-resolved) values are RECORDED, not folded. The digest must
+    # NOT move when the env changes: a digest that shifts with an env value is a
+    # resume lock on a code state, which is the tripwire the user ruled out. The
+    # value is still visible in the artifact, which is what a human needs.
+    monkeypatch.setenv("QK_RHO_END", "0.5")
+    assert config_fingerprint(base) == base_fp, (
+        "an env-resolved value moved the fingerprint: that is a resume lock, "
+        "not a record"
+    )
+    assert effective_solver_state(base)["rho_end"] == pytest.approx(0.5)
+    assert effective_solver_state(base)["rho_end_source"] == "env"
+    monkeypatch.delenv("QK_RHO_END")
+    assert config_fingerprint(base) == base_fp
+    assert effective_solver_state(base)["rho_end_source"] == "config"
+
+
+def test_scn_rho_endpoints_recalibrated_normalized_regime():
+    """Scenario ``rho_endpoints_recalibrated_normalized_regime``.
+
+    THEN rho follows the paper's linear schedule over K=400 with endpoints ~0->1
+    AND at schedule end the ridge sits at the data term's own scale AND the reg
+    floor keeps the subproblem SPD near rho ~ 0.
+    """
+    cfg = PTQConfig(rank=_LANE3[2])
+    assert float(cfg.rho_start) == 0.0
+    assert float(cfg.rho_end) == 1.0
+
+    res = lb_admm(_lane3_matrix(1.0), cfg)
+    rhos = np.asarray(res.trace.rhos)
+    full = np.linspace(cfg.rho_start, cfg.rho_end, cfg.admm_max_iter)
+    assert np.allclose(rhos, full[: rhos.size]), (
+        "rho does not follow the linear K=400 schedule from the recalibrated endpoints"
+    )
+
+    # Ridge at the data term's own scale: rho_end * 1 + reg ~ 1.03, not 1e2.
+    reg = float(cfg.admm_reg)
+    ridge_end = float(rhos[-1]) * res.trace.ridge_scale[-1] + reg
+    assert ridge_end == pytest.approx(float(rhos[-1]) + reg, rel=1e-9)
+    assert 0.5 <= ridge_end <= 2.0, (
+        f"terminal ridge {ridge_end:.4g} is not at the data term's scale"
+    )
+
+    # Well-posedness at rho ~ 0: the reg floor keeps the subproblem SPD.
+    assert min(res.trace.min_eigs) >= reg * (1.0 - 1e-9), (
+        f"smallest solved eigenvalue {min(res.trace.min_eigs):.6g} fell below the "
+        f"reg floor {reg}: the continuous subproblem is not SPD near rho ~ 0"
+    )

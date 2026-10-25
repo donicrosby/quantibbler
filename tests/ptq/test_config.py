@@ -23,14 +23,16 @@ def test_scn_config_defaults():
     assert cfg.tau is None or cfg.tau > 0
     # ADMM: K = 400 with linear penalty schedule ([NQ] App. C), endpoints A-2.
     assert cfg.admm_max_iter == 400
-    assert cfg.rho_start == pytest.approx(1e-2)
-    # rho_end is an implementation choice, not a paper-pinned endpoint: [NQ]
-    # App. C :3008 prescribes the linear schedule SHAPE only. Lowered from 1e2
-    # to 1e-1 because the solve runs in the normalized regime (target divided
-    # by its Frobenius norm at entry), where 1e2 let the consensus term
-    # dominate the O(1) data term 100x and destroy the warm start.
-    assert cfg.rho_end == pytest.approx(1e-1)
-    assert cfg.rho_end > cfg.rho_start > 0
+    # Lane 3 (normalized regime): the endpoints are recalibrated to linear ~0->1.
+    # The old 1e-2 -> 1e-1 pair was characterised against the absolute-ridge
+    # solver and does not carry over: with the scale-relative stabilizer
+    # rho*mean(diag(X^T X)) + reg the data term is O(1) at the normalized design,
+    # so rho ~ 1 sits at its own scale. rho_start = 0 is safe because the
+    # stabilizer at rho = 0 is admm_reg alone, which keeps the subproblem SPD.
+    assert cfg.rho_start == pytest.approx(0.0)
+    assert cfg.rho_end == pytest.approx(1.0)
+    assert cfg.rho_end > cfg.rho_start >= 0
+    assert cfg.admm_reg == pytest.approx(3e-2)
     assert cfg.admm_lam == pytest.approx(1e-6)  # A-3
     assert cfg.admm_epsilon == pytest.approx(1e-7)  # A-4
     # Stage lr/batch per [NQ] App. C: 1e-4/bs4 (pre), 1e-5/bs1 (latent),
@@ -81,8 +83,12 @@ def test_scn_config_validation():
         PTQConfig(solver_backend="numpy", gamma=1.5)
     with pytest.raises(ValueError):
         PTQConfig(solver_backend="numpy", admm_max_iter=0)
+    # rho_start = 0.0 is the recalibrated default (the admm_reg floor keeps the
+    # subproblem SPD); a NEGATIVE endpoint is what must fail closed.
     with pytest.raises(ValueError):
-        PTQConfig(solver_backend="numpy", rho_start=0.0)
+        PTQConfig(solver_backend="numpy", rho_start=-1e-3)
+    with pytest.raises(ValueError):
+        PTQConfig(solver_backend="numpy", admm_reg=0.0)
     with pytest.raises(ValueError):
         PTQConfig(solver_backend="numpy", rho_end=1e-4, rho_start=1e-2)
     with pytest.raises(ValueError):

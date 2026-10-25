@@ -56,7 +56,7 @@
       0.02 -> 0.4 (the unit fixture's), all draws generator-explicit. Measured:
       TuneFP capture residual 3.77e-06 -> 2.2-8.9, STE net 45x the floor. Banner
       and docstring rewritten with the measured numbers.
-- [ ] (planner) **[DROPPED — superseded] Give the smoke fixture a live
+- [x] (planner) **[DROPPED — superseded] Give the smoke fixture a live
       objective.** Done as the rebuild above rather than as a perturbation; the
       perturbation reading would have needed a product hook, which the no-knob
       spec point forbids.

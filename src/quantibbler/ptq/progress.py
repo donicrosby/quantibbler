@@ -29,17 +29,37 @@ import json
 import os
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from .progress_constants import (
     DEFAULT_TARGET,
+    RATE_CONSTANTS,
     constants_stale,
+    rate_for,
 )
 
 PROGRESS_INTERVAL_S = 5.0
 PROGRESS_INTERVAL_STEPS = 10
 MAX_SANE_ETA = 4 * 3600.0
+
+
+def _rate_text(rate: float, *, unit_suffix: bool) -> str:
+    """Render the observed pace, flipping to seconds-per-unit when it is slow.
+
+    Below one unit per second the units-per-second number stops being readable:
+    an ADMM solve at 0.011/s is a figure a reader has to invert in their head to
+    compare against anything, and the measured-constants table it is compared
+    against is already in seconds per unit. So a slow phase reports its reciprocal
+    with the unit named, and both sinks print the same value from this one rule.
+    Exactly 1/s and nothing completed (rate 0) stay in units per second -- the flip
+    is strictly for `0 < rate < 1`, which also keeps the reciprocal away from zero.
+    `unit_suffix` preserves each sink's existing convention: stdout names the unit
+    in the fast case too, the breadcrumb line -- pinned as `rate=<r>` -- does not.
+    """
+    if 0.0 < rate < 1.0:
+        return f"{1.0 / rate:.3f}s/unit"
+    return f"{rate:.3f}/s" if unit_suffix else f"{rate:.3f}"
 
 
 class ProgressReporter:
@@ -57,6 +77,7 @@ class ProgressReporter:
         total: int | None = None,
         *,
         target: str = DEFAULT_TARGET,
+        rate_constants: Mapping[str, Any] | None = None,
         clock: Callable[[], float] = time.monotonic,
         stream: Any = None,
         interval_s: float = PROGRESS_INTERVAL_S,
@@ -66,6 +87,10 @@ class ProgressReporter:
         self.phase = phase
         self.total = total
         self.target = target
+        # The measured per-phase rates the ETA is derived from (`spec.md:98-102`).
+        # Injectable so a test can pin the derivation against a known rate instead
+        # of whatever this machine has measured.
+        self._rate_constants = RATE_CONSTANTS if rate_constants is None else rate_constants
         self._clock = clock
         self._stream = sys.stdout if stream is None else stream
         self._interval_s = interval_s
@@ -97,22 +122,34 @@ class ProgressReporter:
         print(self._render(record), file=self._stream, flush=True)
 
     def _render(self, record: dict[str, Any]) -> str:
-        # Three states, not two: a numeric ETA that passed the check, an
-        # unreasonable one that is suppressed, and one that cannot be computed
-        # yet because no unit has completed. The third must not be rendered as a
-        # number -- `eta_s` is None there and formatting it raises, which is the
-        # crash this branch exists to prevent.
+        # Three states, not two: a numeric ETA that passed the fence, one the
+        # fence suppressed, and one that cannot be computed yet because no unit
+        # has completed. The third must not be rendered as a number -- `eta_s` is
+        # None there and formatting it raises, which is the crash this branch
+        # exists to prevent. `unsafe` is the fence's word and only the fence's: a
+        # prediction that is numerically clean but untrusted (stale constants,
+        # `spec.md:144-148`) renders as its number with `eta_sane=false`, so the
+        # reader can tell "unreasonable" from "fine, but not trustworthy today".
         if record["eta_s"] is None:
             eta = "unknown"
-        elif not record["eta_sane"]:
+        elif record["eta_s"] > record["max_sane_eta"]:
             eta = "unsafe"
         else:
             eta = f"{record['eta_s']:.0f}s"
-        return (
+        line = (
             f"progress {record['phase']} iter={record['iter']}/{record['total']} "
-            f"rate={record['rate']:.3f}/s eta={eta} eta_sane={str(record['eta_sane']).lower()}"
+            f"rate={_rate_text(record['rate'], unit_suffix=True)} eta={eta} "
+            f"eta_sane={str(record['eta_sane']).lower()}"
             + (" complete" if record.get("complete") else "")
         )
+        # `spec.md:144-148`: the first line carries the staleness warning itself,
+        # not just a telemetry field -- a reader on stdout must see that the
+        # constants may not describe this machine. The breadcrumb line keeps its
+        # format untouched: the watchdog parses it (task 5.2).
+        if record.get("constants_stale"):
+            keys = ",".join(record.get("constants_stale_keys", []))
+            line += f" constants_stale=true keys={keys}"
+        return line
 
     def _emit(self, record: dict[str, Any]) -> None:
         """Fan out to every live sink, swallowing sink failures individually.
@@ -182,12 +219,17 @@ class ProgressReporter:
         rate = done / elapsed if elapsed > 0 and done > 0 else 0.0
 
         eta_s: float | None = None
+        # `spec.md:98-102`: the predicted completion is derived from the measured
+        # per-phase rate constants, not from this run's observed pace -- an
+        # instrument that extrapolates from whatever pace it has seen is exactly
+        # the bar that reads "20 minutes" for a 21-hour stage. A phase or target
+        # with no measured entry has no prediction, and nothing completed yet has
+        # nothing to predict from; both render `unknown` rather than a number.
         # `eta_sane` means "a numeric ETA was rendered and it passed the check".
-        # An ETA that cannot be computed yet is recorded as not-sane, so the
-        # artifact reader never mistakes silence for a reliable prediction.
         eta_sane = False
-        if self.total is not None and rate > 0:
-            eta_s = (self.total - done) / rate
+        phase_rate = rate_for(self.phase, self.target, self._rate_constants)
+        if self.total is not None and done > 0 and phase_rate is not None:
+            eta_s = (self.total - done) * phase_rate
             eta_sane = eta_s <= self._max_sane_eta
 
         record: dict[str, Any] = {
@@ -197,11 +239,20 @@ class ProgressReporter:
             "rate": rate,
             "eta_s": eta_s,
             "eta_sane": eta_sane,
+            # The fence travels with the record so a reader -- and the breadcrumb
+            # renderer -- can tell a number the fence suppressed from one that is
+            # merely untrusted, instead of reading every false verdict as
+            # "unreasonable".
+            "max_sane_eta": self._max_sane_eta,
             "elapsed_s": elapsed,
         }
         if self._pending_warning:
             record["constants_stale"] = True
             record["constants_stale_keys"] = list(self._stale_keys)
+            # `spec.md:144-148`: a constant mismatch is itself a reason the
+            # prediction cannot be trusted, so the same line that carries the
+            # warning reports `eta_sane=false`. The run still proceeds.
+            record["eta_sane"] = False
             self._pending_warning = False
         return record
 
@@ -218,28 +269,37 @@ class ProgressReporter:
         """
         return self.tick(force=True)  # type: ignore[return-value]
 
-    @property
-    def emitted(self) -> int:
-        return self._emitted
-
 
 def breadcrumb_sink(path: str) -> Callable[[dict[str, Any]], None]:
-    """A sink writing the watchdog's existing breadcrumb format.
+    """A sink writing the watchdog's breadcrumb format.
 
-    The format is fixed by what `tools/qkb-stall-watchdog.sh` already parses, so
-    the watchdog reads lane0 liveness without modification -- which is what makes
-    the heartbeat a signal with a consumer instead of an instrument nobody reads.
+    Every line starts with its epoch, because the watchdog's stall predicate
+    requires a numeric first field (`awk '$1 ~ /^[0-9]+$/'` in
+    `tools/qkb-stall-watchdog.sh`): without it a healthy run trips that script's
+    no-parseable-line probe fault instead of reading as live, and the watchdog's
+    own stall detector goes dark. The verdict travels with the line (`eta_sane=`)
+    so its reader does not have to cross-reference stdout to know whether the ETA
+    was trusted -- which is what makes the heartbeat a signal with a consumer
+    instead of an instrument nobody reads.
     """
 
     def sink(record: dict[str, Any]) -> None:
+        # The same three states as the stdout renderer: `unsafe` means the fence
+        # suppressed the number, not that the verdict was false.
         eta = (
             "unknown"
             if record["eta_s"] is None
-            else ("unsafe" if not record["eta_sane"] else f"{record['eta_s']:.0f}")
+            else (
+                "unsafe"
+                if record["eta_s"] > record["max_sane_eta"]
+                else f"{record['eta_s']:.0f}"
+            )
         )
         line = (
-            f"qkb:progress {record['phase']} iter={record['iter']}/{record['total']} "
-            f"rate={record['rate']:.3f} eta={eta}\n"
+            f"{int(time.time())} qkb:progress {record['phase']} "
+            f"iter={record['iter']}/{record['total']} "
+            f"rate={_rate_text(record['rate'], unit_suffix=False)} "
+            f"eta={eta} eta_sane={str(record['eta_sane']).lower()}\n"
         )
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(line)

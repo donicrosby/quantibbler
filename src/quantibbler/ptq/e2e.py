@@ -203,7 +203,7 @@ def run_e2e_gate(
             payload = bytearray(blobs[name])
             import struct as _struct
 
-            magic, ver, tag, dout_h, din_h, r_h = _struct.unpack_from("<4sIIIII", payload, 0)
+            _magic, _ver, tag, dout_h, din_h, _r_h = _struct.unpack_from("<4sIIIII", payload, 0)
             import numpy as _np
 
             itemsize = 4 if tag == 2 else 2

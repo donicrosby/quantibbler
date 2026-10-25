@@ -213,3 +213,32 @@ def test_empty_archive_never_skips_a_solve_end_to_end(tmp_path):
 
     resumed = quantize_model(_TinyApiModel(seed=3), batches, cfg, checkpoint_dir=ckpt_dir)
     assert resumed.serialize() == fresh
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+def test_yb_low_precision_survives_the_numpy_hop(tmp_path, dtype):
+    """bf16/f16 teacher targets must survive the ``.numpy()`` serialization hop.
+
+    NumPy has no bfloat16 dtype and torch refuses ``.numpy()`` on bf16
+    (``unsupported ScalarType BFloat16``), so a real bf16 run crashed at block 0
+    with default checkpoints -- a subprocess-only failure until a complete env
+    ran the driver tier. The lift to float32 is EXACT (bf16 8-bit and f16 10-bit
+    mantissas are subsets of f32), so the stored array must equal the widened
+    input bit-for-bit; fresh and resumed runs widen identically, which is what
+    keeps the byte-identical resume contract.
+    """
+    y = torch.randn(3, 5, dtype=dtype)
+    save_block_checkpoint(tmp_path, 0, [_state("m.0")], y_b=y)
+
+    with np.load(tmp_path / "block-0.npz") as npz:
+        assert "y_b" in npz.files, "the teacher target did not reach the archive"
+        stored = npz["y_b"]
+
+    assert stored.dtype == np.float32
+    assert np.array_equal(stored, y.float().numpy()), (
+        "the bf16/f16 lift at the .numpy() hop is not exact"
+    )
+
+    # Roundtrip through the resume path must recover the same widened target.
+    with np.load(tmp_path / "block-0.npz") as npz:
+        assert np.array_equal(npz["y_b"], y.float().numpy())

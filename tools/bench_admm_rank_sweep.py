@@ -36,8 +36,6 @@ import numpy as np
 from quantibbler.ptq.config import PTQConfig
 from quantibbler.ptq.lb_admm import lb_admm
 
-RNG = np.random.default_rng(0)
-
 
 def _thread_report() -> str:
     try:

@@ -250,12 +250,12 @@ def _itq_family(pyo3: bool) -> list[dict]:
             pyo3_out,
         )
         if scenario == "itq_deterministic_seed":
-            u2, v2, n2, c2 = k.joint_itq(u_hat, v_hat, backend="numpy-reference", **kwargs)
+            u2, v2, n2, _c2 = k.joint_itq(u_hat, v_hat, backend="numpy-reference", **kwargs)
             rec["faces"]["numpy-reference"]["repeat_u_t"] = np.asarray(u2).tolist()
             rec["faces"]["numpy-reference"]["repeat_v_t"] = np.asarray(v2).tolist()
             rec["faces"]["numpy-reference"]["repeat_n_iter"] = int(n2)
             if pyo3:
-                ur2, vr2, nr2, cr2 = k.joint_itq(u_hat, v_hat, backend="rust", **kwargs)
+                ur2, vr2, nr2, _cr2 = k.joint_itq(u_hat, v_hat, backend="rust", **kwargs)
                 pyo3_out["repeat_u_t"] = np.asarray(ur2).tolist()
                 pyo3_out["repeat_v_t"] = np.asarray(vr2).tolist()
                 pyo3_out["repeat_n_iter"] = int(nr2)

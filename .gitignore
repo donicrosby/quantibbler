@@ -13,3 +13,6 @@ wheelhouse/
 target/
 *.so
 artifacts/
+
+# Agent scratch (per-agent plans/transcripts); never commit.
+.hermes/

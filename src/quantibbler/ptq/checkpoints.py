@@ -11,9 +11,12 @@ rebuild boundary activations bit-identically.
 
 Resume safety is enforced by a FINGERPRINT: sha256 over the full
 PTQConfig (including stage hypers), the quantibbler version, and
-git describe. Resume refuses on mismatch - resuming a rank-137 solve
-into a rank-64 config, or across a code change, would produce
-plausible-looking garbage rather than a crash.
+git describe. Resume refuses on a config mismatch - resuming a rank-137
+solve into a rank-64 config would produce plausible-looking garbage
+rather than a crash. Env-resolved values are RECORDED beside the digest in
+fingerprint.json, for a human to diff when a resume looks wrong. They are
+not locks: a checkpoint that bricks because a file moved or a tree was
+rebased is a tripwire, not provenance.
 
 Bit-identity contract (asserted by test_scn_checkpoint_resume):
 a resumed run's serialized artifact is BYTE-IDENTICAL to a
@@ -44,13 +47,53 @@ _FINGERPRINT_NAME = "fingerprint.json"
 # versa). Recorded as an explicit consequence in qk-fail-fast-loop's design.md.
 _FINGERPRINT_EXCLUDED = ("progress_probe",)
 
+# Fields whose EFFECTIVE value can be overridden at solve time by an env var.
+# The RECORD carries the effective value and its source, so a run whose schedule
+# came from the environment cannot misattribute itself in the artifact. It is
+# recorded, not folded: an env difference is visible in fingerprint.json for a
+# human to read, and does not by itself refuse a resume.
+_ENV_OVERRIDABLE = ("rho_end", "admm_reg", "solver_backend")
+
+
+def effective_solver_state(cfg) -> dict[str, object]:
+    """Effective (env-resolved) solver state and the source of each value.
+
+    Mirrors the solve-time resolution in ``lb_admm`` so the record carries the
+    values the iteration actually used -- not the dataclass defaults it was
+    constructed with. Imported lazily to keep module import order independent.
+    """
+    from .lb_admm import admm_reg_provenance, rho_end_provenance
+    from .solver_backend import resolve_device, solver_backend_provenance
+
+    rho_end_value, rho_end_source = rho_end_provenance(cfg.rho_end)
+    reg_value, reg_source = admm_reg_provenance(cfg.admm_reg)
+    # The backend NAME alone says where nothing: "torch" records identically
+    # whether the run executed cuda or cpu, and the numerics differ. Record the
+    # RESOLVED DEVICE beside it, so a cross-device resume is visible.
+    backend_value, backend_source = solver_backend_provenance(cfg.solver_backend)
+    device = resolve_device(backend_value, device=os.environ.get("QUANTIBBLER_DEVICE"))
+    return {
+        "rho_end": rho_end_value,
+        "rho_end_source": rho_end_source,
+        "admm_reg": reg_value,
+        "admm_reg_source": reg_source,
+        "solver_backend": backend_value,
+        "solver_backend_source": backend_source,
+        "solver_device": device,
+    }
+
 
 def config_fingerprint(cfg) -> str:
-    """Stable sha256 over the complete PTQConfig + code identity.
+    """Stable sha256 over the complete PTQConfig, version, and git describe.
 
     ``progress_probe`` is blanked before hashing (see
     ``_FINGERPRINT_EXCLUDED``): a callable is code-state, not solver-state,
     and ``dataclasses.asdict`` would otherwise try to serialize a function.
+
+    The digest covers the CONFIG. Env-resolved values are recorded beside it in
+    ``fingerprint.json`` instead of being folded in: a digest that moves with an
+    env value locks the config to a run state, and the record is what a human
+    needs to see when a resume looks wrong.
     """
     overrides = {name: None for name in _FINGERPRINT_EXCLUDED if hasattr(cfg, name)}
     payload = {
@@ -77,13 +120,41 @@ def config_fingerprint(cfg) -> str:
 # cannot answer "which backend and dtype produced these checkpoints?" without
 # re-deriving it. The scenario that matters: a run resumed on a different
 # solver backend or dtype must be identifiable from the artifact alone.
-_FINGERPRINT_PROVENANCE = ("solver_backend", "compute_dtype", "solver", "rank", "factor_mode")
+_FINGERPRINT_PROVENANCE = (
+    "solver_backend",
+    "compute_dtype",
+    "solver",
+    "rank",
+    "factor_mode",
+    # Lane 3: regime state, recorded so the artifact names the regime that
+    # produced the stored blocks. A diff against a relaunch is visible to a
+    # human reader; it does not refuse the resume.
+    "admm_reg",
+    "rho_start",
+    "rho_end",
+)
 
 
 def write_fingerprint(ckpt_dir: Path, cfg) -> None:
     record = {"fingerprint": config_fingerprint(cfg)}
+    effective = effective_solver_state(cfg)
     for name in _FINGERPRINT_PROVENANCE:
-        record[name] = getattr(cfg, name, "unknown")
+        # Env-overridable fields record the EFFECTIVE value the solve will use,
+        # beside its source -- a bare config default would misattest a run whose
+        # schedule came from the environment.
+        if name in _ENV_OVERRIDABLE:
+            record[name] = effective[name]
+            record[f"{name}_source"] = effective[f"{name}_source"]
+        else:
+            record[name] = getattr(cfg, name, "unknown")
+    # The resolved device is recorded, not digested: cuda and cpu give different
+    # numerics, so a cross-device resume is visible in the artifact instead of
+    # silent.
+    record["solver_device"] = effective["solver_device"]
+    # The process imports from ``quantibbler.__file__``; recording the imported
+    # path makes an artifact imported from OUTSIDE the tree it was built in
+    # visible from the artifact itself (the stale-install case).
+    record["quantibbler_file"] = str(Path(quantibbler.__file__).resolve())
     (ckpt_dir / _FINGERPRINT_NAME).write_text(
         json.dumps(record, indent=2, sort_keys=True), encoding="utf-8"
     )
@@ -172,7 +243,20 @@ def save_block_checkpoint(ckpt_dir: Path, index: int, layers: list, *, y_b=None)
     # exactly as produced: the stream feeds a later teacher forward, so a lossy
     # cast here would silently move every downstream target.
     if y_b is not None:
-        _yb = y_b.detach().cpu().numpy() if hasattr(y_b, "detach") else np.asarray(y_b)
+        if hasattr(y_b, "detach"):
+            _yb = y_b.detach().cpu()
+            # Serialization boundary: NumPy has no bfloat16 dtype and torch's
+            # .numpy() refuses it ("unsupported ScalarType BFloat16"), so a real
+            # bf16 run died at block 0 with default checkpoints. Widen bf16/f16
+            # to float32 AT THE HOP -- both are exact subsets of float32 (bf16
+            # 8-bit and f16 10-bit mantissas), so nothing is lost, and a fresh
+            # run and a resumed run widen identically, preserving the
+            # byte-identical resume contract.
+            if _yb.dtype in (torch.bfloat16, torch.float16):
+                _yb = _yb.float()
+            _yb = _yb.numpy()
+        else:
+            _yb = np.asarray(y_b)
         arrays[_YB_KEY] = _yb
     for st in layers:
         p = f"{st.name}"

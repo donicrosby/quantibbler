@@ -6,7 +6,7 @@
 |---|---|---|---|
 | stdout | user (live monitoring), witness (`container.log`) | one newline-terminated JSON line per update | always — every pipeline stage, every mode |
 | telemetry CSV | user, planner (artifact read) | one column `progress_json` per row, 2-second cadence matches existing `MemTelemetry` | when the telemetry subsystem is active (`MemTelemetry` thread running) |
-| breadcrumbs | watchdog (`qkb-stall`), user | `qkb:progress <phase> iter=<N>/<total> rate=<r> eta=<s>` | when the breadcrumbs subsystem is active (watchdog armed) |
+| breadcrumbs | watchdog (`qkb-stall`), user | `{epoch} qkb:progress <phase> iter=<N>/<total> rate=<r> eta=<s> eta_sane=<b>` | when the breadcrumbs subsystem is active (watchdog armed) |
 
 All three sinks are fed from a single `ProgressReporter` object. The calling
 site never checks which sinks are live — the reporter handles routing

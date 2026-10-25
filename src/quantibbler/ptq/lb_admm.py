@@ -32,15 +32,17 @@ import numpy as np
 
 from .config import PTQConfig
 from .progress import ProgressReporter
-from .solver_backend import get_backend
+from .solver_backend import get_backend, solver_backend_provenance
 
 __all__ = [
     "ADMMResult",
     "ADMMTrace",
     "BalanceResult",
     "DEFAULT_SCALE_FLOOR",
+    "admm_reg_provenance",
     "lb_admm",
     "magnitude_balance",
+    "rho_end_provenance",
     "svid_proxy",
 ]
 
@@ -61,6 +63,12 @@ class ADMMTrace:
     n_cholesky: int = 0
     n_jitter: int = 0
     svid_sign_preserved: list[bool] = field(default_factory=list)
+    # Lane 3: ``mean(diag(Xn^T Xn))`` of the row/col-normalized design, one entry
+    # per continuous half-update (two per iteration: U-update then V-update).
+    # This is the scale the ridge is anchored to: with a unit-diagonal design it
+    # is ~1 regardless of layer scale, which is the regime's whole claim. Recorded
+    # rather than inferred so a reader can see the anchor the solve used.
+    ridge_scale: list[float] = field(default_factory=list)
 
 
 @dataclass
@@ -338,6 +346,62 @@ def rho_end_provenance(default: float) -> tuple[float, str]:
         raise ValueError(msg) from None
 
 
+def admm_reg_provenance(default: float) -> tuple[float, str]:
+    """Effective ``admm_reg`` and where it came from: ``"env"`` or ``"config"``.
+
+    Exact mirror of :func:`rho_end_provenance` for the normalized regime's
+    stabilizer floor. ``QK_ADMM_REG`` is a solve-time override, so it must be
+    resolved where the solve happens (not at ``PTQConfig()`` construction: a
+    dataclass cannot see the env var at the moment the solve reads it, and
+    freezing it at construction would let a config built before the env was set
+    solve under a value its provenance never names).
+
+    Fail-closed on a malformed value: silently falling back to the default
+    would produce a run whose provenance claims an override it never applied.
+    """
+    raw = os.environ.get("QK_ADMM_REG")
+    if raw is None:
+        return default, "config"
+    try:
+        return float(raw), "env"
+    except ValueError:
+        msg = f"QK_ADMM_REG must be a float, got {raw!r}"
+        raise ValueError(msg) from None
+
+
+def _admm_reg(cfg: PTQConfig) -> float:
+    """`cfg.admm_reg`, with the solve-time ``QK_ADMM_REG`` override applied."""
+    return admm_reg_provenance(cfg.admm_reg)[0]
+
+
+def _col_scales(xp, x: np.ndarray) -> np.ndarray:
+    """Per-column L2 norms of a design matrix, floored so the inverse is finite.
+
+    A dead column (all-zero, e.g. a collapsed latent) would make the map-back a
+    division by zero; the floor keeps it finite instead of poisoning the solve
+    with NaN. Live latents are nowhere near the float64 floor, so this is a
+    guard, not a regularizer.
+    """
+    s = xp.linalg.norm(x, axis=0)
+    return xp.maximum(s, DEFAULT_SCALE_FLOOR)
+
+
+def _ridge_shift(xp, design_n: np.ndarray, rho: float, reg: float) -> tuple[float, float]:
+    """Scale-relative stabilizer: ``rho * mean(diag(Xn^T Xn)) + reg``.
+
+    ``design_n`` is the column-normalized fixed partner factor, so its Gram
+    diagonal is unit-scale by construction and the returned ``scale`` is ~1 for
+    every layer: the ridge no longer depends on raw layer magnitude, which is
+    what lets one rho schedule serve all layers. Returns ``(shift, scale)`` with
+    ``scale`` recorded on the trace.
+    """
+    # mean(diag(Xn^T Xn)) == ||Xn||_F^2 / r exactly; one norm instead of a Gram
+    # build, and it stays inside the backend surface the solver vets.
+    r = int(design_n.shape[1])
+    scale = float(xp.linalg.norm(design_n)) ** 2 / r
+    return rho * scale + reg, scale
+
+
 def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
     """Run LB-ADMM on the preconditioned target ``W~`` ([NQ] Step 2-2).
 
@@ -350,7 +414,12 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
         :class:`ADMMResult` with the final continuous factors, consensus
         proxies, stopping state, and per-iteration trace.
     """
-    xp = get_backend(cfg.solver_backend)
+    # Resolved at the point of consumption, mirroring _rho_end/_admm_reg: the
+    # SOLVER_BACKEND env knob must be able to select the arm for THIS solve, and
+    # the run must not be mislabelled about it. An explicit device env is honoured
+    # (diagnostic path); implicit torch on a CPU box fails closed.
+    backend_name, _backend_source = solver_backend_provenance(cfg.solver_backend)
+    xp = get_backend(backend_name, device=os.environ.get("QUANTIBBLER_DEVICE"))
     dt = xp.dtype(cfg.compute_dtype)
     w = xp.asarray(w_tilde, dtype=dt)
     if w.ndim != 2:
@@ -403,23 +472,42 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
     prev_res = xp.inf
     denom = max(cfg.admm_max_iter - 1, 1)
     rho_end = _rho_end(cfg)
+    # Resolved once at solve time, mirroring rho_end: the effective stabilizer
+    # floor is env-overridable and must be the value the iteration actually used.
+    reg = _admm_reg(cfg)
     for k in range(cfg.admm_max_iter):
         reporter.tick(k + 1)
         # Linear penalty schedule spanning [rho_start, rho_end] across the
         # K iterations (A-2).
         rho = float(cfg.rho_start + (rho_end - cfg.rho_start) * k / denom)
-        shift = rho + cfg.admm_lam
 
-        # Continuous update, Eq. 5 via stabilized Cholesky (Lemma 2 SPD).
-        hu = v.T @ v + shift * eye_r
-        rhs_u = v.T @ w.T + rho * (zu - lu).T
+        # Continuous update for U (Eq. 5), regressed against the COLUMN-NORMALIZED
+        # design X = V. With W ~ U V^T and V = Vn D (D = diag(column norms)), the
+        # normalized-basis unknown is Y = U D, so the constraint U = Z_U becomes
+        # Y = Z_U D and the dual pair maps by the same D. Solving in that basis
+        # gives X^T X a unit diagonal, so the scale-relative stabilizer
+        # rho*mean(diag(X^T X)) + reg is O(1) for every layer. Y D^-1 maps the
+        # iterate back, keeping U V^T a valid factorization of the target.
+        sv = _col_scales(xp, v)
+        vn = v / sv
+        shift_u, scale_u = _ridge_shift(xp, vn, rho, reg)
+        trace.ridge_scale.append(scale_u)
+        hu = vn.T @ vn + shift_u * eye_r
+        rhs_u = vn.T @ w.T + rho * ((zu * sv) - (lu * sv)).T
         # min-eig check (documented SPD probe; cheap at r x r)
         trace.min_eigs.append(float(xp.linalg.eigvalsh(hu).min()))
-        u = _cholesky_solve(xp, hu, rhs_u, trace)[0].T
-        hv = u.T @ u + shift * eye_r
-        rhs_v = u.T @ w + rho * (zv - lv).T
+        u = _cholesky_solve(xp, hu, rhs_u, trace)[0].T / sv
+
+        # Symmetric update for V, regressed against the column-normalized design
+        # X = U (unknown Y = V D_u, mapped back by D_u^-1).
+        su = _col_scales(xp, u)
+        un = u / su
+        shift_v, scale_v = _ridge_shift(xp, un, rho, reg)
+        trace.ridge_scale.append(scale_v)
+        hv = un.T @ un + shift_v * eye_r
+        rhs_v = un.T @ w + rho * ((zv * su) - (lv * su)).T
         trace.min_eigs.append(float(xp.linalg.eigvalsh(hv).min()))
-        v = _cholesky_solve(xp, hv, rhs_v, trace)[0].T
+        v = _cholesky_solve(xp, hv, rhs_v, trace)[0].T / su
 
         # Proxy update, Eq. 6: SVID of the consensus variable.
         pu = u + lu

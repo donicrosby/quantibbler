@@ -153,6 +153,7 @@ class PTQConfig:
 
     rank: int = 8
     compute_dtype: str = "float64"
+    # Torch is the production backend; NumPy is the parity oracle.
     solver_backend: str = "torch"
     scale_dtype: str = "float32"
     seed: int = 0
@@ -167,8 +168,16 @@ class PTQConfig:
     # 400-iteration LB-ADMM (measured on production layers) while ADMM
     # spends 66-83 s/layer at rank 512. Off = SVD init, balance, polish.
     solver: Literal["admm", "svd"] = "admm"
-    rho_start: float = 1e-2
-    rho_end: float = 1e-1
+    # Lane 3: endpoints recalibrated for the NORMALIZED regime. The old
+    # 1e-2 -> 1e-1 pair was characterised against the absolute-ridge solver
+    # and does not carry over.
+    # Lane 3: scale-relative stabilizer offset. Anchored to the normalized
+    # design's own scale, so the ridge magnitude is relative to the data rather
+    # than absolute -- which is what makes the solve invariant to a target
+    # rescale. QK_ADMM_REG overrides it at solve time (admm_reg_provenance).
+    admm_reg: float = 3e-2
+    rho_start: float = 0.0
+    rho_end: float = 1.0
     admm_lam: float = 1e-6
     admm_epsilon: float = 1e-7
     stage_pre: StageHyper = field(default_factory=lambda: StageHyper(1e-4, 4, 8))
@@ -252,8 +261,21 @@ class PTQConfig:
             )
         if self.admm_max_iter < 1:
             raise ValueError(f"admm_max_iter must be >= 1, got {self.admm_max_iter}")
-        if self.rho_start <= 0.0:
-            raise ValueError(f"rho_start must be positive, got {self.rho_start}")
+        # The invariant the solver needs is STABILIZER INVERTIBILITY, and under the
+        # normalized regime that seat moved to admm_reg. At rho_start = 0 the
+        # stabilizer is 0*mean(diag(X^T X)) + reg = reg, so the matrix stays
+        # regularized while the consensus term starts free -- the "continuous fit
+        # first, penalty ramps in" reading of the linear penalty scheduler. The old
+        # check demanded rho_start > 0, which named positivity rather than the
+        # property that actually matters.
+        if self.rho_start < 0.0:
+            raise ValueError(f"rho_start must be >= 0, got {self.rho_start}")
+        if not self.admm_reg > 0.0:
+            raise ValueError(
+                "admm_reg must be > 0 so the stabilizer "
+                "rho*mean(diag(X^T X)) + reg stays invertible: at rho_start = 0 the "
+                f"ridge is admm_reg alone. Got {self.admm_reg}"
+            )
         if self.rho_end < self.rho_start:
             raise ValueError(f"rho_end ({self.rho_end}) must be >= rho_start ({self.rho_start})")
         if self.admm_lam < 0.0:

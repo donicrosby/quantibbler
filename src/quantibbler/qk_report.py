@@ -647,6 +647,13 @@ def provenance(
     *,
     rho_end: float | None = None,
     rho_end_source: str | None = None,
+    rho_start: float | None = None,
+    rho_start_source: str | None = None,
+    admm_reg: float | None = None,
+    admm_reg_source: str | None = None,
+    solver_backend: str | None = None,
+    solver_backend_source: str | None = None,
+    solver_device: str | None = None,
 ) -> dict:
     """Report provenance fields derived from the ACTUAL run arguments.
 
@@ -664,6 +671,19 @@ def provenance(
         # it cannot be audited. Value AND source, or the field lies by omission.
         "rho_end": rho_end,
         "rho_end_source": rho_end_source,
+        # Lane 3 regime identity: the schedule start and the stabilizer floor
+        # are both run-defining, and the floor is env-overridable. Same rule as
+        # rho_end -- value AND source, or the row cannot be audited.
+        "rho_start": rho_start,
+        "rho_start_source": rho_start_source,
+        "admm_reg": admm_reg,
+        "admm_reg_source": admm_reg_source,
+        # The solver arm and the device it ran on. "torch" alone under-identifies
+        # a report: cpu and cuda are different numerics, and a report that names
+        # only the library is the same mislabelling class as an unlabelled rho.
+        "solver_backend": solver_backend,
+        "solver_backend_source": solver_backend_source,
+        "solver_device": solver_device,
         "scale_dtype": scale_dtype,
         "regime_artifact": f"qpk1: +-1 bitplanes + {scale_dtype} scales",
         "dtype_note": (f"solver {solver} (float64 compute) / scales {scale_dtype} / artifact qpk1"),

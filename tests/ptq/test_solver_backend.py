@@ -46,24 +46,78 @@ def test_unknown_backend_is_refused():
         get_backend("numpyish")
 
 
-def test_default_backend_is_the_accelerated_one():
-    """NumPy is an oracle, not a default: nothing production resolves to it."""
+def test_default_backend_is_numpy_torch_opt_in():
+    """Contract (qk-solver-backend): numpy default, torch opt-in.
+
+    The torch default landed un-ratified and silently turned every dev-box
+    measurement into an unlabelled torch-CPU run; the written contract is the
+    authority, and the accelerated arm stays reachable by name or knob.
+    """
     from quantibbler.ptq.solver_backend import DEFAULT_SOLVER_BACKEND
 
-    assert DEFAULT_SOLVER_BACKEND == "torch"
-    assert get_backend().name == "torch"
-    # The oracle stays reachable, but only by asking for it by name.
-    assert get_backend("numpy").name == "numpy"
+    assert DEFAULT_SOLVER_BACKEND == "numpy"
+    assert get_backend().name == "numpy"
+    # The accelerated arm is opt-in, and an explicit device reaches it.
+    assert get_backend("torch", device="cpu").name == "torch"
 
 
 def test_torch_backend_refuses_missing_accelerator():
-    """Fail closed: a torch backend on CPU is not a silent fallback."""
+    """Fail closed: an explicit cuda request on a CPU box is not a fallback."""
     import torch
 
     if torch.cuda.is_available():
         pytest.skip("accelerator present; the refusal path cannot be exercised")
     with pytest.raises(RuntimeError, match="no accelerator is available"):
         get_backend("torch", device="cuda")
+
+
+def test_implicit_torch_without_accelerator_is_refused():
+    """Tri-state on the fail-closed branch (ruled: diagnostic reading).
+
+    implicit + no accelerator -> raises; explicit cpu -> succeeds (the parity /
+    diagnostic path, and the only thing that makes the numpy-oracle comparison
+    runnable on a CPU-only box); explicit cuda without cuda -> raises.
+    """
+    import torch
+
+    from quantibbler.ptq.solver_backend import resolve_device
+
+    if torch.cuda.is_available():
+        pytest.skip("accelerator present; the implicit-refusal path cannot be exercised")
+
+    with pytest.raises(RuntimeError, match="requires an accelerator"):
+        get_backend("torch")
+
+    assert get_backend("torch", device="cpu").name == "torch"
+    assert resolve_device("torch", device="cpu") == "cpu"
+
+    with pytest.raises(RuntimeError, match="no accelerator is available"):
+        resolve_device("torch", device="cuda")
+
+
+def test_solver_backend_env_knob_is_fail_closed(monkeypatch):
+    """SOLVER_BACKEND mirrors QK_RHO_END: unset=config, valid=env, garbage=raise."""
+    from quantibbler.ptq.solver_backend import solver_backend_provenance
+
+    monkeypatch.delenv("SOLVER_BACKEND", raising=False)
+    assert solver_backend_provenance("numpy") == ("numpy", "config")
+
+    monkeypatch.setenv("SOLVER_BACKEND", "torch")
+    assert solver_backend_provenance("numpy") == ("torch", "env")
+
+    monkeypatch.setenv("SOLVER_BACKEND", "  NUMPY  ")
+    assert solver_backend_provenance("torch") == ("numpy", "env")
+
+    monkeypatch.setenv("SOLVER_BACKEND", "cuda-ish")
+    with pytest.raises(ValueError, match="SOLVER_BACKEND"):
+        solver_backend_provenance("numpy")
+
+
+def test_resolve_device_numpy_is_not_a_device():
+    """The numpy lane has no device dimension; the digest records it as n/a."""
+    from quantibbler.ptq.solver_backend import resolve_device
+
+    assert resolve_device("numpy") == "n/a"
 
 
 def test_cholesky_solve_agrees(backends):

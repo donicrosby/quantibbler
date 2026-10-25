@@ -54,7 +54,6 @@ REQUIRED_FILES = {
         "wikitext-2-raw-v1/test-00000-of-00001.parquet",
     ),
 }
-CACHE_DIR_NAMES = tuple(PINNED_REVISIONS)
 MAX_WALL_SECONDS = 600.0
 
 

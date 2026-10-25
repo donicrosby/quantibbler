@@ -235,8 +235,12 @@ mkdir -p "$OUT" 2>/dev/null || true
     printf 'no_cuda_memory_caching=1\nattn_impl=%s\nmem_csv=rehearsal-mem.csv\n' \
       "${QK_ATTN_IMPL:-sdpa}"
   fi
-  printf 'rho_end_override=%s\nsolver_probe=%s\nopenblas_num_threads=%s\nlaunched_at=%s\n' \
-    "${QK_RHO_END:-unset}" "${QK_SOLVER_PROBE:-unset}" "${OPENBLAS_NUM_THREADS:-16}" "$(date -u +%FT%TZ)"
+  # SOLVER_BACKEND is stamped beside the rho override for the same reason: the
+  # solver arm is run identity, and "torch" alone does not say which device ran.
+  # Unset resolves to the config default (numpy); the driver re-resolves and
+  # reports the effective value in the run report and solver-probe rows.
+  printf 'rho_end_override=%s\nsolver_backend=%s\nqk_admm_reg_override=%s\nsolver_probe=%s\nopenblas_num_threads=%s\nlaunched_at=%s\n' \
+    "${QK_RHO_END:-unset}" "${SOLVER_BACKEND:-unset}" "${QK_ADMM_REG:-unset}" "${QK_SOLVER_PROBE:-unset}" "${OPENBLAS_NUM_THREADS:-16}" "$(date -u +%FT%TZ)"
   # The commit and the tree state are part of the run's identity: a run
   # launched from a dirty tree cannot be reproduced from its SHA, which is the
   # whole reason commit-then-fire is a rule here. `grep -vc '^??'` counts

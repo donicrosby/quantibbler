@@ -19,22 +19,83 @@ signs without moving any test that checks magnitudes.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 __all__ = [
     "DEFAULT_SOLVER_BACKEND",
     "NumpyBackend",
+    "SOLVER_BACKEND_ENV",
     "TorchBackend",
-    "get_backend",
     "available_backends",
+    "get_backend",
+    "resolve_device",
+    "solver_backend_provenance",
 ]
 
-# Production execution is the accelerated backend. NumPy is retained ONLY as the
-# parity oracle -- the reference the torch lane is accepted against -- and is
-# reachable only by requesting it by name. No production path resolves to it:
-# a default that silently fell back to NumPy would make a "GPU run" a CPU run
-# wearing the label, which is the failure this constant exists to prevent.
+# Production execution is the accelerated backend. NumPy is retained as the
+# parity oracle — the reference the torch lane is accepted against — and is
+# reachable only by requesting it by name. No production path resolves to it.
 DEFAULT_SOLVER_BACKEND = "torch"
+
+# Env knob for the backend, same idiom as ``QK_RHO_END``: unset resolves to the
+# config default, a valid value overrides it, and anything else RAISES naming the
+# variable. Never a silent fallback -- a run must not be mislabelled about the
+# arm it executed.
+SOLVER_BACKEND_ENV = "SOLVER_BACKEND"
+_SOLVER_BACKEND_NAMES = ("numpy", "torch")
+
+
+def solver_backend_provenance(default: str) -> tuple[str, str]:
+    """Effective backend name and where it came from: ``"env"`` or ``"config"``."""
+    raw = os.environ.get(SOLVER_BACKEND_ENV)
+    if raw is None:
+        return default, "config"
+    value = raw.strip().lower()
+    if value not in _SOLVER_BACKEND_NAMES:
+        msg = f"{SOLVER_BACKEND_ENV} must be one of {_SOLVER_BACKEND_NAMES}, got {raw!r}"
+        raise ValueError(msg) from None
+    return value, "env"
+
+
+def resolve_device(name: str, *, device: str | None = None) -> str:
+    """The device a backend will actually execute on, without constructing it.
+
+    One source of truth for the resolver AND for the fingerprint: the digest must
+    record the device the solve really used, otherwise ``solver_backend="torch"``
+    hashes identically for a cuda write and a cpu resume -- real numerics
+    (reduction order) hidden behind an identical label.
+
+    Diagnostic reading (ruled): an EXPLICIT ``device`` is honoured, so
+    ``resolve_device("torch", device="cpu")`` is the parity/diagnostic path and
+    the only thing that makes the numpy-oracle comparison runnable on a CPU-only
+    sandbox. The IMPLICIT resolution refuses without an accelerator: a torch
+    backend that silently fell back to CPU would report CPU timings under an
+    acceleration label.
+    """
+    if name == "numpy":
+        # No device dimension: NumPy runs where the interpreter runs.
+        return "n/a"
+    if name != "torch":
+        raise ValueError(f"unknown solver backend {name!r}: expected 'numpy' or 'torch'")
+    import torch  # noqa: PLC0415
+
+    available = bool(torch.cuda.is_available())
+    if device is not None:
+        if device.startswith("cuda") and not available:
+            raise RuntimeError(
+                f"solver backend 'torch' requested device={device!r} "
+                "but no accelerator is available"
+            )
+        return device
+    if not available:
+        raise RuntimeError(
+            "solver backend 'torch' requires an accelerator: implicit resolution "
+            "refuses to run torch on CPU (it is a slowdown wearing an "
+            "acceleration's name). Pass an explicit device='cpu' for the "
+            "diagnostic/parity path, or select backend='numpy'."
+        )
+    return "cuda"
 
 
 class _LinalgProxy:
@@ -360,29 +421,22 @@ class TorchBackend(_BaseBackend):
 
 
 def get_backend(name: str | None = None, *, device: str | None = None) -> _BaseBackend:
-    """Resolve a backend by name, defaulting to the accelerated one.
+    """Resolve a backend by name, defaulting to :data:`DEFAULT_SOLVER_BACKEND`.
 
-    ``name=None`` resolves :data:`DEFAULT_SOLVER_BACKEND`. There is deliberately
-    no NumPy fallback: if the accelerator cannot be used, the call fails rather
-    than quietly returning the reference implementation. ``torch`` without an
-    accelerator is refused for the same reason -- a torch backend on CPU is a
-    slowdown wearing an optimization's name, and a run that reported it as
-    accelerated would be reporting CPU timings under a GPU label.
+    There is deliberately no NumPy fallback: if the accelerator cannot be used,
+    the call fails rather than quietly returning the reference implementation.
+
+    ``torch`` without an accelerator **and without an explicit device** is
+    refused (see :func:`resolve_device`): a torch backend that silently fell back
+    to CPU would report CPU timings under an acceleration label. An explicit
+    ``device="cpu"`` remains available as the parity/diagnostic path.
     """
     if name is None:
         name = DEFAULT_SOLVER_BACKEND
     if name == "numpy":
         return NumpyBackend()
     if name == "torch":
-        import torch  # noqa: PLC0415
-
-        resolved = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        if resolved.startswith("cuda") and not torch.cuda.is_available():
-            raise RuntimeError(
-                f"solver backend 'torch' requested device={resolved!r} "
-                f"but no accelerator is available"
-            )
-        return TorchBackend(device=resolved)
+        return TorchBackend(device=resolve_device("torch", device=device))
     raise ValueError(f"unknown solver backend {name!r}: expected 'numpy' or 'torch'")
 
 

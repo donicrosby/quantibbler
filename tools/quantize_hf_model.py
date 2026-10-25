@@ -1099,16 +1099,44 @@ def main() -> int:
     # run must be as self-describing as a finished one.
     # The effective rho endpoint comes from QK_RHO_END or the config default --
     # resolved from the same helper the solver calls, so the report cannot
-    # disagree with the run it describes.
+    # disagree with the run it describes. The alias deliberately avoids the
+    # existing local ``_resolve_device`` (the torch-STAGE device resolver above):
+    # shadowing it made every driver run die on UnboundLocalError before the
+    # pipeline started.
     from quantibbler.ptq.config import PTQConfig as _PTQConfig
+    from quantibbler.ptq.lb_admm import admm_reg_provenance as _reg_prov
     from quantibbler.ptq.lb_admm import rho_end_provenance as _rho_prov
+    from quantibbler.ptq.solver_backend import (
+        resolve_device as _solver_resolve_device,
+    )
+    from quantibbler.ptq.solver_backend import (
+        solver_backend_provenance as _backend_prov,
+    )
 
-    _rho_end_value, _rho_end_source = _rho_prov(_PTQConfig().rho_end)
+    _cfg_defaults = _PTQConfig()
+    _rho_end_value, _rho_end_source = _rho_prov(_cfg_defaults.rho_end)
+    # Lane 3: the stabilizer floor is solve-time env-overridable, resolved from
+    # the same helper the solver calls so the report cannot disagree with the run.
+    _reg_value, _reg_source = _reg_prov(_cfg_defaults.admm_reg)
+    # qk-solver-backend: the arm and the device it actually ran on, resolved the
+    # same way the solver resolves them (SOLVER_BACKEND knob, explicit device env).
+    _backend_value, _backend_source = _backend_prov(_cfg_defaults.solver_backend)
+    _solver_device = _solver_resolve_device(
+        _backend_value, device=os.environ.get("QUANTIBBLER_DEVICE")
+    )
     prov = provenance(
         args.solver,
         args.scale_dtype,
         rho_end=_rho_end_value,
         rho_end_source=_rho_end_source,
+        # rho_start has no env override: it is always the config default.
+        rho_start=_cfg_defaults.rho_start,
+        rho_start_source="config",
+        admm_reg=_reg_value,
+        admm_reg_source=_reg_source,
+        solver_backend=_backend_value,
+        solver_backend_source=_backend_source,
+        solver_device=_solver_device,
     )
 
     # --- stage record (qk-fix-tunefp-teacher / qk-fix-ste-sign-adaptation) --

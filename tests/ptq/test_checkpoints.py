@@ -192,12 +192,27 @@ def test_scn_prefix_probe_and_checkpoint_fingerprints_unchanged_in_shape(tmp_pat
         "solver",
         "rank",
         "factor_mode",
+        # Lane 3 regime state: recalibrated rho endpoints (plural) and the
+        # scale-relative stabilizer floor.
+        "admm_reg",
+        "rho_start",
+        "rho_end",
     ), f"provenance field set moved: {_FINGERPRINT_PROVENANCE}"
     cfg = _cfg()
     write_fingerprint(tmp_path, cfg)
 
     record = json.loads((tmp_path / "fingerprint.json").read_text(encoding="utf-8"))
-    expected = {"fingerprint", *_FINGERPRINT_PROVENANCE}
+    # Env-overridable fields also record their source, and the code leg records
+    # its content hash plus the inclusion list that produced it.
+    expected = {
+        "fingerprint",
+        *_FINGERPRINT_PROVENANCE,
+        "rho_end_source",
+        "admm_reg_source",
+        "solver_backend_source",
+        "solver_device",
+        "quantibbler_file",
+    }
     assert set(record) == expected, (
         f"fingerprint payload keys are {sorted(record)}, expected {sorted(expected)}"
     )

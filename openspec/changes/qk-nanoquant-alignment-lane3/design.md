@@ -16,24 +16,80 @@ FIXED PARTNER FACTOR — the regressor of Eq. 5 — not the SVID consensus
 proxy Z. Regressing against Z is discarded below (rank-1 Gram); Eq. 5's
 regressor is V. The continuous update therefore:
 
-1. Builds the design matrix from X = row/col-normalized V (sequential
-   row-then-column rescaling, ≤2 passes, O(din·r)) — the Gram XᵀX is
-   O(1)-scale with unit-scale diagonal, independent of raw layer scale.
+1. Builds the design matrix from X = **column-normalized** V (per-column
+   L2 rescaling, one pass, O(din·r)) — the Gram XᵀX has a unit-scale
+   diagonal by construction, independent of raw layer scale. (See the
+   2026-10-24 amendment below: column normalization supersedes the
+   earlier "sequential row-then-column" wording.)
 2. Computes the scale-relative ridge: `stabilizer = ρ·mean(diag(XᵀX)) +
    reg`, `reg` from the new `admm_reg` config field (default 3e-2),
    replacing the absolute `(ρ+λ)I` shift in Eq. 37.
 3. Solves `(XᵀX + stabilizer·I)U_Xᵀ = XᵀW̃ᵀ + ρ(Z_U − Λ_U)ᵀ` and maps
-   the solution back to the unnormalized factor basis (the documented
-   linear map U = U_X·D_col·D_row⁻¹ for row/col rescalings), so the
-   returned iterate remains a valid factor of the product UVᵀ and the
-   consensus/proxy/dual updates continue in the original basis
-   unchanged.
+   the solution back to the unnormalized factor basis via the single
+   linear map `U = U_X·D_col⁻¹`, so the returned iterate remains a valid
+   factor of the product UVᵀ and the consensus/proxy/dual updates
+   continue in the original basis unchanged.
 
 At ρ ≈ 0 the stabilizer is ≥ `reg` > 0, so Lemma 2's SPD guarantee holds
 at every schedule point without needing ρ > 0 — the reg floor is what
 makes `rho_start ≈ 0` admissible. `trace.min_eigs` continues to record
 the solved system's minimum eigenvalue each iteration (`lb_admm.py:411,
 415`), now with a floor of `reg` instead of `rho_start + admm_lam`.
+
+## Amendment 2026-10-24 — column normalization supersedes the row pass
+
+Ruling (b), recorded here so the question never resurfaces. The "sequential
+row-then-column rescaling" wording in the Regime mechanics section above is
+**superseded by column-only normalization**. This amendment ALSO supersedes the
+row-pass discussion in the review thread: the claim that the conditioning bound
+"rides ‖V‖₂ spectral, only the row pass addresses it" is retracted by its author
+and must not be cited as evidence anywhere. The correction lives here, in the
+tree, not in the thread record.
+
+Why column-only is sufficient, and why a row pass adds nothing:
+
+- The spec's observable is a **unit-scale diagonal of XᵀX** — a column
+  quantity. Column normalization delivers it exactly (measured
+  `ridge_scale = 1.0` to machine precision).
+- The κ bound (:2945/:2972) is κ ≤ 1 + ‖X‖₂²/shift. For a column-normalized X,
+  `trace(XᵀX) = r`; for PSD matrices λ_max ≤ trace, so ‖X‖₂² ≤ r, giving
+  **κ ≤ 1 + r/shift** — scale-free and rank-only, which is exactly the property
+  the normalization exists to buy. Measured on the lane-3 fixture:
+  λ_max(XᵀX) = 1.997 ≤ r = 4.
+- A row pass is a **congruence** on the Gram (X → RX gives XᵀX → XᵀR²X). It does
+  not set the diagonal to unit scale and would add a second map-back surface for
+  no conditioning gain.
+
+Consequence: a single linear map-back `U = U_X·D_col⁻¹`; no two-sided `D`, no
+row pass. The spec's "row/col-normalized" is satisfied as written because its
+acceptance criterion (unit-scale Gram diagonal) is met. The OQ-3 reconciliation
+should cite this amendment.
+
+## Reg-sweep gate before the faithful run (ruling a)
+
+`reg = 3e-2` STAYS spec-pinned. No re-rule without measurement, and the faithful
+run is **GATED** on the lane-0 reg sweep — hard order:
+
+    lane-0 targets wire → lane-0 A/B with the reg sweep → default decision
+    → faithful run
+
+Sweep points: at least {1e-5, 3e-2} **plus a geometric mid**
+(`sqrt(1e-5·3e-2) ≈ 5.5e-4`), so the default decision sees the curve rather than
+two dots. Each point reports, per layer: post-ADMM pre-polish `cos_raw` against
+the original W, the `trace.min_eigs` floor, residual-stall (terminal residual ÷
+mid-schedule residual; ≥ 1 means no improvement over the second half), and the
+regime identity (ρ endpoints, reg value + source, normalization).
+
+The sweep is staged **untracked** on this checkout, at `tools/lane3_reg_sweep.py`,
+and is not in this commit: it is the follow-up's payload, together with the
+`tools/lane3_reg_sweep.py` task row in `tasks.md` and
+`tests/ptq/test_lane3_reg_sweep.py`. It implements the sweep and the row schema,
+runs on `--synthetic` for a smoke, and **refuses to run without lane-0 targets**
+otherwise. It ships once the row-stamp finding is implemented: the row schema
+carries no code identity today, so a row cannot yet name the code that produced
+it. The only measured trade so far is on rank-EXACT
+structure (3.34e-2 vs 2.4e-6, linear in reg) — expected on a degenerate fixture,
+and explicitly **not** a verdict on production layers.
 
 ## Paper grounding (citations grep-verified against the pinned copy)
 

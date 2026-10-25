@@ -169,7 +169,8 @@ def _record_solver_probe(name, w, bal, res, cfg) -> None:
     if not os.environ.get(SOLVER_PROBE_ENV):
         return
 
-    from .lb_admm import rho_end_provenance
+    from .lb_admm import admm_reg_provenance, rho_end_provenance
+    from .solver_backend import resolve_device, solver_backend_provenance
 
     u = np.asarray(bal.U, dtype=np.float64)
     v = np.asarray(bal.V, dtype=np.float64)
@@ -190,6 +191,15 @@ def _record_solver_probe(name, w, bal, res, cfg) -> None:
         return float(np.linalg.norm(wf - recon)) / nw if nw > 0.0 else float("nan")
 
     value, source = rho_end_provenance(cfg.rho_end)
+    # Lane 3 regime identity, resolved exactly as the solver resolves it. A row
+    # without these cannot say which regime produced its cos, which is the whole
+    # point of the regime label (old-regime rows are inadmissible for the claim).
+    reg_value, reg_source = admm_reg_provenance(cfg.admm_reg)
+    # Backend arm + the device it actually executed on. "torch" alone does not
+    # identify a row: cpu and cuda are different numerics (reduction order), so
+    # an unlabelled device is the same mislabelling class as an unlabelled rho.
+    backend_value, backend_source = solver_backend_provenance(cfg.solver_backend)
+    solver_device = resolve_device(backend_value, device=os.environ.get("QUANTIBBLER_DEVICE"))
     row = {
         "name": name,
         "solver": cfg.solver,
@@ -208,6 +218,13 @@ def _record_solver_probe(name, w, bal, res, cfg) -> None:
         "device": os.environ.get("QUANTIBBLER_DEVICE", "unknown"),
         "rho_end": value,
         "rho_end_source": source,
+        "rho_start": cfg.rho_start,
+        "rho_start_source": "config",
+        "admm_reg": reg_value,
+        "admm_reg_source": reg_source,
+        "solver_backend": backend_value,
+        "solver_backend_source": backend_source,
+        "solver_device": solver_device,
         "n_iter": getattr(res, "n_iter", None),
         "converged": getattr(res, "converged", None),
         "w_fro": nw,
