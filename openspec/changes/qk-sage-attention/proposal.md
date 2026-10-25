@@ -62,7 +62,8 @@ same scaffold.
 ## Impact
 
 - Specs: qk-kernels +2 requirements (quantized reference, INT8 kernel),
-  qk-server +2 requirements (sage face + quality gate).
+  qk-server +4 requirements (sage face admission, PPL-clause-absent
+  admission, quality-gate provenance, serving parity).
 - Code: `src/quantibbler/kernels/attention_sage.py` (reference), the
   kernels crate's gpu_attention module (INT8 path), engine face enum.
 - Invariant note: extends the attention-face surface pinned by

@@ -2,24 +2,21 @@
 
 ## ADDED Requirements
 
-### Requirement: Sage attention face with measured quality gate
+### Requirement: Sage attention face SHALL be admitted only on a passing shipped gate record
 
 The server SHALL expose `gpu:sage` as a third attention face (opt-in env,
 frozen at load, honest `/health` label) only for models whose shipped gate
-record passes: Cosine Sim ≥ 0.999 and Relative L1 ≤ 0.02 vs the exact face
-on captured real activations ([SA] §4.3 metrics; Table 3 worst-case
-motivation), and, when the gate run records one, a quantized-PPL delta
-within the bound recorded at that run. A record that declares no PPL clause
-SHALL be admitted on the [SA] §4.3 metrics alone, with the gap logged at
-WARN level (the PPL clause's only producer is a real-model eval run whose
-capture requires an explicit GO; a fabricated number would be worse than
-the gap). A model that fails the gate MUST refuse the face at startup with
-a typed error — never serve silently degraded attention.
+record passes the [SA] §4.3 metric clauses (Cosine Sim ≥ 0.999, Relative
+L1 ≤ 0.02 vs the exact face). The gate SHALL distinguish evidence classes
+by the record's `activations_kind`. A model that fails the gate MUST
+refuse the face at startup with a typed error, never serving silently
+degraded attention.
 
 #### Scenario: Gate pass enables the face
 
-- **WHEN** the opt-in is set and the model's captured gate record is within
-  bounds,
+- **WHEN** the opt-in is set and the model's shipped gate record is within
+  the [SA] §4.3 metric bounds (Cosine Sim ≥ 0.999, Relative L1 ≤ 0.02 vs
+  the exact face),
 - **THEN** the server starts with `"attention_face": "gpu:sage"` and the
   label stays fixed for the process lifetime.
 
@@ -37,11 +34,60 @@ a typed error — never serve silently degraded attention.
 - **THEN** the face falls back to the exact tiled face (or scalar) exactly
   per the frozen-decision pattern — quality is never the fallback trigger.
 
+#### Scenario: Fixture-battery evidence admits experimental status only
+
+- **WHEN** the gate record's `activations_kind` is `"fixture-battery"` and
+  the [SA] §4.3 metric clauses pass,
+- **THEN** the face SHALL be admitted as `opt-in-experimental` with a WARN
+  log naming the unmeasured real-activation quality, and SHALL NOT be
+  promoted to a recommended status on that record alone.
+
+#### Scenario: Real-activation evidence is the enabling class
+
+- **WHEN** the gate record's `activations_kind` is a recognized
+  real-activation source and the [SA] §4.3 metric clauses pass,
+- **THEN** the face MAY be considered for status beyond experimental, and
+  the log SHALL record the activation source and the clause values.
+
+### Requirement: Gate record PPL clause is enforced when declared, admitted when absent
+
+A shipped gate record that declares a PPL clause SHALL have its delta
+within the bound recorded at that run; the server SHALL refuse the face on
+violation. A record that declares no PPL clause SHALL be admitted on the
+[SA] §4.3 metrics alone with the gap logged at WARN. The PPL delta bound
+is a policy threshold (0.05, from the change's shipped-test convention),
+not a paper-derived constant.
+
+#### Scenario: PPL clause present and within bounds
+
+- **WHEN** the gate record declares a `ppl` clause with `delta` and
+  `bound` and `delta <= bound`,
+- **THEN** the server admits the face on that clause, and the PPL delta
+  value is recorded in the startup log.
+
+#### Scenario: PPL clause present and out of bounds
+
+- **WHEN** the gate record declares a `ppl` clause with `delta` and
+  `bound` and `delta > bound`,
+- **THEN** the server refuses the face with a typed error naming the PPL
+  clause violation.
+
+#### Scenario: PPL clause absent is admitted with a WARN
+
+- **WHEN** the opt-in is set and the model's captured gate record declares no
+  PPL clause,
+- **THEN** the server admits the face on the [SA] §4.3 metrics and
+  logs the absent clause at WARN level; no PPL value is invented (the
+  clause's only producer is a real-model eval run requiring an explicit
+  GO, and a fabricated number would be worse than the gap).
+
 ### Requirement: Quality gate provenance is shipped and reproducible
 
 The gate record (activations source, per-layer metrics, PPL delta, date,
 code commit) SHALL be shipped with the model directory and regenerable by a
-committed tool against the pinned [SA] §4.3 metric definitions, so the
+committed tool against the pinned [SA] §4.3 metric definitions. The
+`activations_kind` field SHALL name the evidence class
+(`"fixture-battery"` or a recognized real-activation source), so the
 face's enabling evidence is auditable rather than asserted.
 
 #### Scenario: Gate record regeneration matches
