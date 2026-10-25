@@ -425,7 +425,7 @@ harness are the foundation). Tests precede implementation per capability.
 
 ## 5. Landing
 
-- [ ] 5.1 Full gate suite (pytest; cargo test kernels+server in both
+- [x] 5.1 Full gate suite (pytest; cargo test kernels+server in both
       feature states; clippy -D warnings; fmt --check; maturin build;
       `openspec validate qk-sage-attention --strict`) and scoped commit
       (spec + code + crystallization together).
@@ -466,14 +466,28 @@ harness are the foundation). Tests precede implementation per capability.
       workspace `cargo fmt`/`clippy` ran directly above). `--no-sync` is
       deliberate: a bare `uv run pytest` re-syncs this shared `/opt/venv` to the
       floor and UNINSTALLS the extras, yielding a silent lean suite.
-      **Why the box stays `[ ]`:** the row's text is a conjunction — full gate
-      suite **and** scoped commit. The suite half is observed green above; the
-      scoped-commit half has NOT happened (this change still carries uncommitted
-      spec/code/crystallization — `design.md`, `tasks.md`,
+      **Why the suite card left the box `[ ]`:** the row's text is a conjunction
+      — full gate suite **and** scoped commit. The suite half was observed green
+      above; the scoped-commit half had NOT happened then (this change still
+      carried uncommitted spec/code/crystallization — `design.md`, `tasks.md`,
       `tests/test_attention_sage.py`, `tools/gen_attention_gate_record.py`, plus
       the untracked `tests/test_attention_gate_record.py`,
       `tools/attention_activations.py`, `tools/capture_attention_activations.py`),
       and per the ticket's landing discipline the leaf never commits (the
-      orchestrator is sole committer). Ticking now would assert a commit that
-      does not exist, so the row is left open with this evidence recorded
-      inline; the orchestrator ticks it on landing.
+      orchestrator is sole committer). Ticking then would have asserted a commit
+      that did not exist, so the row was left open with this evidence recorded
+      inline.
+      — **LANDED 2026-10-25 (card `t_894ccbd4`).** The scoped-commit half is
+      done: commit `be76022` lands this change's seven sage-owned paths
+      (`design.md`, `tasks.md`, `tests/test_attention_sage.py`,
+      `tools/gen_attention_gate_record.py`, `tests/test_attention_gate_record.py`,
+      `tools/attention_activations.py`, `tools/capture_attention_activations.py`)
+      — 7 files, +1457 −75, zero foreign bytes (`git show --stat be76022`).
+      Scoped re-quote on the landing tree: `pytest
+      tests/test_attention_sage.py tests/test_attention_gate_record.py -q`
+      **298 passed** (interp `/opt/venv/bin/python3` = torch 2.14.1+cpu, no
+      accelerator; `PYTHONPATH` pinned to this tree), `openspec validate
+      qk-sage-attention --strict` **valid**, `pre-commit run --files` (those
+      paths) **RC=0**. Both conjuncts of this row are now true, so the box is
+      ticked. The change heads to archive per its own fold row —
+      **ready-for-archive**.
