@@ -23,8 +23,8 @@ Row schema (one row per target x reg point)::
 
 Usage::
 
-    uv run --extra torch python tools/lane3_reg_sweep.py --synthetic
-    uv run --extra torch python tools/lane3_reg_sweep.py \\
+    uv run python tools/lane3_reg_sweep.py --synthetic
+    uv run python tools/lane3_reg_sweep.py \\
         --targets /out/lane0_targets.npz --out /out/lane3_reg_sweep.jsonl
 """
 

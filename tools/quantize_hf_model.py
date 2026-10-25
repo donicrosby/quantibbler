@@ -35,8 +35,9 @@ generation from a real transformer is a separate workstream (qk-engine,
 not yet specced). The server boot at the end of this flow therefore proves
 acquisition, not generation.
 
-Usage (from the repo root):
-    uv sync --extra torch --extra hf --extra kernels
+Usage (from the repo root) — the pipeline's deps are the product's own, so a
+plain sync is enough (no extras):
+    uv sync
     uv run python tools/quantize_hf_model.py \
         --model Qwen/Qwen3-0.6B --rank 8 \
         --calibration-seqs 128 --eval-seqs 40 --seq-len 512 \

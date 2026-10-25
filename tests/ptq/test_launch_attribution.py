@@ -32,6 +32,9 @@ at ``075e7ec78e4773fb0a68c31907398d5fd02d55b3`` (``tools/quantize_hf_model.py``
 still carrying the pre-change launch line), with:
 
     uv run --extra torch --extra hf pytest tests/ptq/test_launch_attribution.py -q
+    # (the command as it was run. The torch/hf extras were deleted by the
+    # qk-dependency-floor change — torch is a product dependency now — so
+    # reproduce it with `uv run pytest tests/ptq/test_launch_attribution.py -q`.)
 
 ``4 failed in 49.92s`` (RC=1); the same four re-failed on the post-``ruff format``
 file (same command, ``4 failed in 63.48s``, RC=1 — wall time varies with the
