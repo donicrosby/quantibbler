@@ -106,22 +106,35 @@ Measured while implementing, so none of the above is assumed:
   refuses to drop them`). The scenario loss is deliberate here, so the requirement
   is REMOVED (full original block, kept for audit) and re-ADDED under the new
   name; the map between the two names is this paragraph.
-- `validate --specs --strict` is 6 passed / 1 failed at this revision, and NOT
-  because of this change: `spec/qk-ci`'s abort-leg requirement is 591 characters,
-  over the 500-character limit, and was pushed there by `b3ed881` (the abort-leg
-  600s→3600s backstop landing of 2026-10-25). The acceptance's "strict validate
-  7/7" is therefore unattainable on this trunk without trimming a landed SHALL
-  from another lane; it is reported rather than fixed here (Open Question OQ-2).
+- `validate --specs --strict` measured 6 passed / 1 failed at this branch's
+  original base `cfa3311`, and NOT because of this change: `spec/qk-ci`'s
+  abort-leg requirement was 591 characters there, over the 500-character limit,
+  pushed there by `b3ed881` (abort-leg 600s→3600s). Trunk has since fixed it at
+  its own lane: `c280aae` ("spec(qk-ci): split over-long probe-abort requirement
+  at its run/assert conjunction"), and a detached worktree at `5d327eb` measures
+  **7 passed / 0 failed, RC=0**. This branch is rebased onto `5d327eb`, where the
+  acceptance's "strict validate 7/7" clause holds; nothing was trimmed here — the
+  fix belongs to that requirement's owner.
 - The lock keeps torch on the `pytorch-cpu` index (`2.14.1+cpu`), now reached
   through an unscoped `[tool.uv.sources]` entry because torch is a product dep
   rather than an extra's member; the ROCm images keep replacing that wheel with
   an AMD-index install afterwards, which is unchanged.
-- **Environment hazard, recorded:** `UV_PROJECT_ENVIRONMENT=/opt/venv` is
-  exported in this box's sessions, so a bare `uv sync` targets the SHARED venv
-  no matter which worktree it runs in — the worktree law's expectation ("uv sync
-  gives the worktree its own .venv") does not hold as written. Worktree-local
-  runs therefore assert `quantibbler.__file__` explicitly and use
-  `uv run --no-sync`; the hazard belongs to the env-law card, not to this change.
+- **Shared-venv re-point hazard (operator-flagged, and measured while landing).**
+  `UV_PROJECT_ENVIRONMENT=/opt/venv` is exported in this box's sessions, so a bare
+  `uv sync` targets the SHARED venv no matter which worktree it runs in — the
+  worktree law's premise ("uv sync gives the worktree its own .venv") does not
+  hold as written. It is not a theoretical hazard: one `uv sync` from THIS
+  worktree moved the shared `quantibbler` editable off
+  `/opt/data/tmp/t_0a8f5936` and uninstalled that lane's
+  `pydantic`/`pydantic-core`/`annotated-types`/`typing-inspection` (restored
+  immediately by `uv pip install pydantic==2.14.1`), and minutes later a
+  sibling's sync re-pointed the same editable at `/opt/data/tmp/t_0761967c`.
+  **Ruling carried (the operator's):** the ONLY sanctioned re-point is
+  `uv sync --locked` from the REPO ROOT (`/opt/data/quantibbler`); a worktree
+  that needs its own environment prefixes `UV_PROJECT_ENVIRONMENT=<worktree>/.venv`
+  and never syncs into the shared one. This landing leaves the shared venv in that
+  sanctioned state (repo-root `uv sync --locked`, run as the last step), and
+  worktree-local evidence runs assert `quantibbler.__file__` explicitly.
 - The ptq tier's determinism pins moved from the deleted hook to conftest
   import time (`_pin_determinism()` at module scope, beside the existing
   OPENBLAS assignment), so the thread count is still fixed before the first
@@ -138,12 +151,10 @@ Measured while implementing, so none of the above is assumed:
   asserts `'torch' not in sys.modules`) — but the *configuration* they name is
   gone with this change. Rewording a folded SHALL is a spec change, so it is
   reported rather than done from inside this change's delta. Status: OPEN.
-- **OQ-2 (owner: orchestrator, routing to the abort-leg lane).** `validate
-  --specs --strict` is 6 passed / 1 failed on this trunk (pre-existing, see the
-  crystallization entry): `spec/qk-ci`'s abort-leg requirement is 591 characters
-  after `b3ed881`. This change's acceptance names "strict validate 7/7", so the
-  clause needs either that requirement trimmed/split by its own lane or the
-  acceptance restated. Status: OPEN.
+- **OQ-2 — RESOLVED on trunk, no action here.** The over-long abort-leg
+  requirement was split by its own lane (`c280aae`), and `validate --specs
+  --strict` is 7 passed / 0 failed at `5d327eb`; this branch is rebased there and
+  re-measured. See the crystallization entry for the numbers.
 
 ## Informed assumptions
 
