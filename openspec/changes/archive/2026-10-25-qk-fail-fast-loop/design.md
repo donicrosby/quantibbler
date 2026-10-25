@@ -176,7 +176,10 @@ recalibration obligation — resolved there, inherited here.
   exists in the module, turning bug-hunter's check (c) ("grep for a second
   `40`") into a suite assertion instead of an eyeball pass.
 - **Task-4 wiring shape decided now, because the e2e tripwire's pins are
-  exact.** Under `2e5cb03`, `_driver_wiring_findings` allows exactly one
+  exact.** Under the e2e gate's landing commit — `0908e45`; recorded here as
+  `2e5cb03`, a pre-rewrite hash that no longer resolves (corrected
+  2026-10-25, see `tasks.md`'s landing row) — `_driver_wiring_findings`
+  allows exactly one
   `return` in `main()`, exactly two `status` assignments
   (`["verdict(ppl_ratio)", "FAILED"]`), and flags every `raise` in `main()`.
   The probe-abort path therefore does NOT take the obvious shapes — not
