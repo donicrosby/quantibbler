@@ -39,12 +39,21 @@ __all__ = [
     "ADMMTrace",
     "BalanceResult",
     "DEFAULT_SCALE_FLOOR",
+    "SOLVER_PROBE_ENV",
     "admm_reg_provenance",
     "lb_admm",
     "magnitude_balance",
     "rho_end_provenance",
     "svid_proxy",
 ]
+
+#: Solver-probe flag. Enables the per-linear diagnostics: the ``min_eigs``
+#: eigenvalue probe in the solve loop below, and ``block_recon``'s per-linear
+#: JSONL writer (which imports this name). It is declared HERE because the gate
+#: is the solver's own -- one name for both readers, so a gate and a writer can
+#: never drift apart. Off (unset) by default: a production run pays no
+#: diagnostic tax.
+SOLVER_PROBE_ENV = "QK_SOLVER_PROBE"
 
 # Dead-channel scale floor (A-11): clamped positive constant in float64.
 DEFAULT_SCALE_FLOOR = float(np.finfo(np.float64).eps) * 64.0
@@ -59,6 +68,11 @@ class ADMMTrace:
 
     residuals: list[float] = field(default_factory=list)
     rhos: list[float] = field(default_factory=list)
+    #: Smallest eigenvalue of each solved system matrix. DIAGNOSTIC: populated
+    #: only when the solver probe is enabled (``QK_SOLVER_PROBE``) -- the SPD
+    #: proof a production run relies on is the Cholesky solve itself, recorded
+    #: always-on in :attr:`n_jitter`, so an empty list here is not a missing
+    #: signal. Read it as "no diagnostic was requested", never as "not SPD".
     min_eigs: list[float] = field(default_factory=list)
     n_cholesky: int = 0
     n_jitter: int = 0
@@ -475,6 +489,15 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
     # Resolved once at solve time, mirroring rho_end: the effective stabilizer
     # floor is env-overridable and must be the value the iteration actually used.
     reg = _admm_reg(cfg)
+    # Diagnostic gate, resolved once from the env at the solve site (like rho/reg,
+    # and NEVER from the config, which the checkpoint fingerprint hashes). The
+    # per-iteration eigenvalue probe is a fixed per-linear tax -- two dense
+    # `eigvalsh` on the r x r system matrices, which do NOT shrink while the
+    # GEMMs around them do -- and it duplicates a proof the always-on path
+    # already carries: `_cholesky_solve` below is the SPD factorization, and
+    # `trace.n_jitter` records every non-SPD event. So the solve runs without it
+    # unless the solver probe asks for the column.
+    probe = bool(os.environ.get(SOLVER_PROBE_ENV))
     for k in range(cfg.admm_max_iter):
         reporter.tick(k + 1)
         # Linear penalty schedule spanning [rho_start, rho_end] across the
@@ -494,8 +517,12 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
         trace.ridge_scale.append(scale_u)
         hu = vn.T @ vn + shift_u * eye_r
         rhs_u = vn.T @ w.T + rho * ((zu * sv) - (lu * sv)).T
-        # min-eig check (documented SPD probe; cheap at r x r)
-        trace.min_eigs.append(float(xp.linalg.eigvalsh(hu).min()))
+        # min-eig check: the documented SPD probe, gated on the solver probe
+        # (`probe` above) -- NOT on being cheap, which it is not at production
+        # thread counts. The Cholesky solve on the next line is the SPD proof
+        # the production path keeps.
+        if probe:
+            trace.min_eigs.append(float(xp.linalg.eigvalsh(hu).min()))
         u = _cholesky_solve(xp, hu, rhs_u, trace)[0].T / sv
 
         # Symmetric update for V, regressed against the column-normalized design
@@ -506,7 +533,8 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
         trace.ridge_scale.append(scale_v)
         hv = un.T @ un + shift_v * eye_r
         rhs_v = un.T @ w + rho * ((zv * su) - (lv * su)).T
-        trace.min_eigs.append(float(xp.linalg.eigvalsh(hv).min()))
+        if probe:
+            trace.min_eigs.append(float(xp.linalg.eigvalsh(hv).min()))
         v = _cholesky_solve(xp, hv, rhs_v, trace)[0].T / su
 
         # Proxy update, Eq. 6: SVID of the consensus variable.

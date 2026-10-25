@@ -8,6 +8,7 @@ import pytest
 from quantibbler.ptq.config import PTQConfig
 from quantibbler.ptq.lb_admm import (
     DEFAULT_SCALE_FLOOR,
+    SOLVER_PROBE_ENV,
     _cholesky_solve,
     _rho_end,
     lb_admm,
@@ -27,7 +28,19 @@ def _ground_truth(m: int, n: int, r: int, seed: int) -> np.ndarray:
     return ub @ vb.T
 
 
-def test_scn_admm_spd_solves():
+@pytest.fixture
+def solver_probe_on(monkeypatch):
+    """Turn the gated solver diagnostics ON for a test that READS them.
+
+    `trace.min_eigs` is a diagnostic column (qk-ptq-speedups: the eigenvalue
+    probe runs only with ``QK_SOLVER_PROBE`` set), so a scenario that asserts on
+    it is a diagnostic configuration by construction. The production path keeps
+    the SPD signal in `trace.n_jitter`, which needs no flag.
+    """
+    monkeypatch.setenv(SOLVER_PROBE_ENV, "1")
+
+
+def test_scn_admm_spd_solves(solver_probe_on):  # noqa: ARG001 - fixture side effect
     """admm_spd_solves: every continuous-update system matrix H = VᵀV+(ρ+λ)I
     is symmetric positive definite (Lemma 2), solved via Cholesky; the
     stabilized fallback engages only on numerically violated PD, and it
@@ -229,6 +242,18 @@ def _lane3_matrix(scale: float = 1.0):
     return a * scale
 
 
+def _lane3_cfg() -> PTQConfig:
+    """``PTQConfig`` for the lane-3 solve tests: the NumPy parity arm, pinned.
+
+    The production default is torch, and ``resolve_device`` refuses an IMPLICIT
+    device on a host with no accelerator -- so a bare ``PTQConfig`` cannot solve
+    on CI's GPU-less runner (the refusal is by design and stays). NumPy is the
+    only arm runnable there, and this file's other solve tests already pin it by
+    name; these call sites drifted.
+    """
+    return PTQConfig(rank=_LANE3[2], solver_backend="numpy")
+
+
 def _rel_fit(res, w) -> float:
     """Relative Frobenius error of the returned factorization U V^T against w.
 
@@ -251,7 +276,7 @@ def test_scn_normalized_regressor_design_matrix():
     iterate is mapped back to the unnormalized factor basis, so U V^T remains a
     valid factorization of the target.
     """
-    cfg = PTQConfig(rank=_LANE3[2])
+    cfg = _lane3_cfg()
     small = lb_admm(_lane3_matrix(1.0), cfg)
     large = lb_admm(_lane3_matrix(1e3), cfg)
 
@@ -304,7 +329,7 @@ def test_scn_stabilizer_scale_relative_ridge():
     assert scale == pytest.approx((5.0 + 14.0) / 2.0)
     assert shift == pytest.approx(0.5 * (5.0 + 14.0) / 2.0 + 3e-2)
 
-    cfg = PTQConfig(rank=_LANE3[2])
+    cfg = _lane3_cfg()
     assert float(cfg.admm_reg) == pytest.approx(3e-2)
     res = lb_admm(_lane3_matrix(1.0), cfg)
     trace = res.trace
@@ -375,7 +400,7 @@ def test_scn_new_solver_state_joins_fingerprint(monkeypatch):
 
     monkeypatch.delenv("QK_ADMM_REG", raising=False)
     monkeypatch.delenv("QK_RHO_END", raising=False)
-    base = PTQConfig(rank=4)
+    base = PTQConfig(rank=4, solver_backend="numpy")
     base_fp = config_fingerprint(base)
 
     for kwargs in ({"admm_reg": 4e-2}, {"rho_start": 5e-3}, {"rho_end": 5e-1}):
@@ -399,14 +424,14 @@ def test_scn_new_solver_state_joins_fingerprint(monkeypatch):
     assert effective_solver_state(base)["rho_end_source"] == "config"
 
 
-def test_scn_rho_endpoints_recalibrated_normalized_regime():
+def test_scn_rho_endpoints_recalibrated_normalized_regime(solver_probe_on):  # noqa: ARG001
     """Scenario ``rho_endpoints_recalibrated_normalized_regime``.
 
     THEN rho follows the paper's linear schedule over K=400 with endpoints ~0->1
     AND at schedule end the ridge sits at the data term's own scale AND the reg
     floor keeps the subproblem SPD near rho ~ 0.
     """
-    cfg = PTQConfig(rank=_LANE3[2])
+    cfg = _lane3_cfg()
     assert float(cfg.rho_start) == 0.0
     assert float(cfg.rho_end) == 1.0
 

@@ -52,8 +52,14 @@ def test_requires_a_target_source():
         sweep.main([])
 
 
-def test_synthetic_smoke_emits_one_complete_row_per_point(tmp_path):
+def test_synthetic_smoke_emits_one_complete_row_per_point(tmp_path, monkeypatch):
     """A provisional synthetic sweep produces the full schema for every point."""
+    # The tool solves with the production default (torch) and this leg is a
+    # schema smoke, not a device claim: on a host with no accelerator the
+    # implicit resolution refuses by design, so the test declares the documented
+    # CPU reading explicitly. QUANTIBBLER_DEVICE is the resolution's own knob --
+    # no resolver is patched and the refusal stays reachable.
+    monkeypatch.setenv("QUANTIBBLER_DEVICE", "cpu")
     out = tmp_path / "sweep.jsonl"
     assert sweep.main(["--synthetic", "--out", str(out)]) == 0
 

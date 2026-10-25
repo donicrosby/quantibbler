@@ -41,7 +41,7 @@ from pathlib import Path
 import numpy as np
 
 from quantibbler.ptq.config import PTQConfig
-from quantibbler.ptq.lb_admm import _admm_reg, lb_admm, rho_end_provenance
+from quantibbler.ptq.lb_admm import SOLVER_PROBE_ENV, _admm_reg, lb_admm, rho_end_provenance
 
 # The ruling's endpoints. A geometric mid is added so the default decision sees
 # the CURVE between ~4 orders of reg, not two dots.
@@ -83,7 +83,15 @@ def _cos(a: np.ndarray, b: np.ndarray) -> float:
 def run_point(name: str, w: np.ndarray, reg: float, *, provisional: bool) -> dict:
     """Solve one target at one reg, returning the full sweep row."""
     prior = os.environ.get("QK_ADMM_REG")
+    prior_probe = os.environ.get(SOLVER_PROBE_ENV)
     os.environ["QK_ADMM_REG"] = repr(float(reg))
+    # This tool IS the diagnostic consumer of `min_eigs` (the lane-3 acceptance
+    # reads the floor out of these rows), and the solver's eigenvalue probe is
+    # gated behind the solver-probe flag. So the sweep turns the gate ON for its
+    # own solves: a row with a NaN floor would be a row that measured nothing,
+    # and no caller should have to remember an env var to get the column the
+    # tool exists to emit.
+    os.environ[SOLVER_PROBE_ENV] = "1"
     try:
         cfg = PTQConfig(rank=min(4, min(w.shape)))
         res = lb_admm(w, cfg)
@@ -96,6 +104,10 @@ def run_point(name: str, w: np.ndarray, reg: float, *, provisional: bool) -> dic
             os.environ.pop("QK_ADMM_REG", None)
         else:
             os.environ["QK_ADMM_REG"] = prior
+        if prior_probe is None:
+            os.environ.pop(SOLVER_PROBE_ENV, None)
+        else:
+            os.environ[SOLVER_PROBE_ENV] = prior_probe
 
     from quantibbler.ptq.solver_backend import to_host_np
 
