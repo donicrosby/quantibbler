@@ -681,6 +681,68 @@ def _terminal_loss_weight(cfg: PTQConfig, pairs) -> np.ndarray | None:
     return _resolve_loss_weight(cfg, pairs)[0]
 
 
+# The unit-mean normalization's derivation, recorded beside the weights it scales
+# (qk-tune-loss-scale). The robust diagonal's ABSOLUTE scale is a free numerical
+# degree of freedom: its relative per-feature structure is the statistical content
+# ([NQ] App. C weighted MSE, Algorithm 1 lines 2-5 Eq. 2). At raw scale -- a
+# mean-SQUARED-gradient statistic, ~1e-10 at hidden-state level -- the weighted loss
+# sits ~1e10x under the residual, the step-0 Adam gradient falls below the
+# optimizer's absolute eps, and the step rounds back on the parameter dtype: the
+# measured inert-stage regime (qk-pertarget-cycle design.md 23, the v5 report).
+LOSS_WEIGHT_MEAN_NORMALIZATION = "unit_mean_normalization"
+
+
+def _normalize_weight_to_unit_mean(weight) -> tuple[np.ndarray, float, float]:
+    """Rescale a resolved terminal weight to unit mean (qk-tune-loss-scale).
+
+    Preserves the robust diagonal's per-feature RELATIVE structure and restores its
+    absolute scale to the residual's own scale. Returns ``(normalized, mean_before,
+    mean_after)`` so both means can travel in the stage record: the scale applied to
+    the loss is then auditable from the artifact, not inferred from the code.
+
+    A non-finite or non-positive mean is a degenerate weight -- nothing to rescale,
+    and dividing by it would poison the loss -- so the vector is handed back
+    unchanged with equal means, which is what the record must be able to say.
+    """
+    arr = np.asarray(weight, dtype=np.float64)
+    if arr.size == 0:
+        return arr, 0.0, 0.0
+    pre = float(arr.mean())
+    if not np.isfinite(pre) or pre <= 0.0:
+        return arr, pre, pre
+    norm = arr / pre
+    return norm, pre, float(norm.mean())
+
+
+def _optimizer_gradient_floor(optimizer_eps: float, params) -> tuple[float, str | None, float]:
+    """Resolution-derived first-step gradient floor (qk-tune-loss-scale).
+
+    ``floor = optimizer_eps * dtype_relative_resolution``, on the COARSEST parameter
+    dtype in the stage: a bf16 parameter is the one that rounds back, so a mixed
+    fp32/bf16 block is guarded by its bf16 members.
+
+    Derivation of record (design.md): at step 0 the bias-corrected Adam update is
+    ``lr * g / (|g| + eps)``, which in the eps-dominated regime ``|g| << eps``
+    degrades to ``lr * g / eps``. A parameter dtype represents relative change only
+    above ``finfo(dtype).eps``, so the asymptotically-smallest gradient whose
+    eps-damped step still clears that floor for a unit-magnitude parameter is the
+    product ``optimizer_eps * finfo(dtype).eps``. Measured on the v5 rows: bf16
+    gives 7.8125e-11 and every recorded step-0 gradient (7.9e-12..6.2e-11) sits
+    below it. Exact zero stays a special case (``0.0 < floor``).
+
+    Returns ``(floor, dtype_name, relative_resolution)`` -- all three are recorded,
+    so a reader can re-derive the floor from the artifact.
+    """
+    rel = 0.0
+    dtype_name: str | None = None
+    for p in params:
+        eps_dtype = float(torch.finfo(p.dtype).eps)
+        if dtype_name is None or eps_dtype >= rel:
+            rel = eps_dtype
+            dtype_name = str(p.dtype)
+    return float(optimizer_eps) * rel, dtype_name, rel
+
+
 def _tune_fp(
     block: nn.Module,
     x_b: torch.Tensor,
@@ -697,6 +759,8 @@ def _tune_fp(
     teacher_source: str = "frozen_reference_copy",
     loss_weight: np.ndarray | None = None,
     loss_weight_source: str = "uniform",
+    loss_weight_mean_before: float | None = None,
+    loss_weight_mean_after: float | None = None,
 ) -> dict:
     """TuneFP ([NQ] Step 1): T_pre steps of full-precision block tuning
     against the cached teacher with Adam + cosine lr ([NQ] App. C).
@@ -710,12 +774,16 @@ def _tune_fp(
     pristine-pinned teacher captured once per block; it is never recomputed
     from tuned weights.
 
-    Guard (A3, fail-closed): a zero first-step gradient norm — or any call
-    emitted with ``factorized_in_block == 0`` (the legacy pre-loop placement
-    the figure rules out) — aborts with the recorder event
+    Guard (A3, fail-closed; extended by qk-tune-loss-scale): a first-step
+    gradient norm below the resolution-derived floor (``optimizer eps x
+    parameter-dtype relative resolution``) — or any call emitted with
+    ``factorized_in_block == 0`` (the legacy pre-loop placement the figure
+    rules out) — aborts with the recorder event
     ``tune_fp_vacuous_teacher`` carrying BOTH the gradient norm and the
-    initial residual norm (gradient-zero + residual-zero = broken teacher;
-    gradient-zero + residual-nonzero = detached student).
+    initial residual norm, plus the floor and the inputs it was derived from
+    (gradient-zero + residual-zero = broken teacher; gradient-zero +
+    residual-nonzero = detached student; nonzero-but-below-floor = the measured
+    inert regime where every step rounds back on the parameter dtype).
 
     The per-target loop's first-target skip is a separate matter and is NOT
     this guard: under dual streams it is justified as "nothing to compensate
@@ -764,10 +832,28 @@ def _tune_fp(
         "residual_after": None,
         "weight_delta_rel": None,
         "vacuous": False,
+        # Inertness is DECLARED, not implied (qk-tune-loss-scale, requirement 3):
+        # `None` means the stage did not run far enough to have an answer, never
+        # "it was fine".
+        "inert": None,
         # Weighting actually used, on the record from construction so the
         # vacuous-teacher early return carries it too.
         "loss_weight": "uniform" if loss_weight is None else "terminal_grad",
         "loss_weight_source": loss_weight_source,
+        # The scale applied to the weighted MSE (qk-tune-loss-scale): the raw
+        # resolved weight's mean and the mean actually handed to the loss. Both
+        # `None` when the uniform/fallback path ran (there is no scale to audit).
+        "loss_weight_mean_before": loss_weight_mean_before,
+        "loss_weight_mean_after": loss_weight_mean_after,
+        "loss_weight_normalization": (
+            LOSS_WEIGHT_MEAN_NORMALIZATION if loss_weight_mean_after is not None else None
+        ),
+        # The resolution-derived vacuous floor and its derivation inputs
+        # (qk-tune-loss-scale, requirement 2). Filled once the optimizer exists.
+        "gradient_floor": None,
+        "floor_optimizer_eps": None,
+        "floor_dtype_rel_resolution": None,
+        "floor_param_dtype": None,
         # The device the stage's tensors ran on, and the stage's own row time
         # (qk-ptq-speedups: scenario `ste_tunefp_gpu_zero_algorithm_change`).
         # Both are read off the ACTIVATION, the authority for where this stage
@@ -795,6 +881,15 @@ def _tune_fp(
             return float((out - y_b).pow(2).mean().sqrt())
 
     opt = torch.optim.Adam(params, lr=cfg.stage_pre.lr)
+    # The resolution-derived floor is read off THIS optimizer's eps and THESE
+    # parameters' dtypes -- never a module constant -- so a reader re-derives it
+    # from the record (qk-tune-loss-scale, requirement 2).
+    opt_eps = float(opt.defaults["eps"])
+    floor, floor_dtype, floor_rel = _optimizer_gradient_floor(opt_eps, params)
+    stats["gradient_floor"] = floor
+    stats["floor_optimizer_eps"] = opt_eps
+    stats["floor_dtype_rel_resolution"] = floor_rel
+    stats["floor_param_dtype"] = floor_dtype
     n = x_b.shape[0]
     bs = max(1, min(batch_size, n))
     total = max(cfg.stage_pre.epochs * (n // bs), 1)
@@ -843,19 +938,32 @@ def _tune_fp(
             residual_norm = float(loss.detach().sqrt())
             stats["gradient_norm"] = grad_norm
             stats["initial_residual_norm"] = residual_norm
-            if grad_norm == 0.0 or factorized_in_block <= 0:
-                reason = (
-                    "no_in_block_layer_factorized"
-                    if factorized_in_block <= 0
-                    else "zero_first_step_gradient"
-                )
+            # The guard is a FLOOR, not an equality (qk-tune-loss-scale,
+            # requirement 2): a nonzero gradient below the resolution-derived
+            # threshold is dead for exactly the same reason an identically-zero
+            # one is -- both round every step back on the parameter dtype -- and
+            # exact zero stays a special case of `grad_norm < floor`.
+            if grad_norm < floor or factorized_in_block <= 0:
+                if factorized_in_block <= 0:
+                    reason = "no_in_block_layer_factorized"
+                elif grad_norm == 0.0:
+                    reason = "zero_first_step_gradient"
+                else:
+                    reason = "below_resolution_gradient_floor"
                 stats["vacuous"] = True
                 stats["vacuous_reason"] = reason
+                # A vacuous stage restored its entry snapshot: it moved nothing,
+                # so the inertness declaration is the honest one (requirement 3).
+                stats["inert"] = True
                 event = {
                     "block": label,
                     "gradient_norm": grad_norm,
                     "initial_residual_norm": residual_norm,
                     "reason": reason,
+                    "gradient_floor": floor,
+                    "floor_optimizer_eps": opt_eps,
+                    "floor_dtype_rel_resolution": floor_rel,
+                    "floor_param_dtype": floor_dtype,
                     "capture_index": capture_index,
                     "teacher_source": teacher_source,
                     "teacher_fingerprint": teacher_fingerprint,
@@ -899,7 +1007,14 @@ def _tune_fp(
             den += float(p0.pow(2).sum())
     stats["residual_after"] = after_residual
     stats["residual_before"] = before_residual
-    stats["weight_delta_rel"] = float(np.sqrt(num) / np.sqrt(den)) if den > 0.0 else 0.0
+    delta_rel = float(np.sqrt(num) / np.sqrt(den)) if den > 0.0 else 0.0
+    stats["weight_delta_rel"] = delta_rel
+    # Inertness is DECLARED, not implied (qk-tune-loss-scale, requirement 3): a
+    # stage that ran steps and moved its parameters by less than the parameter
+    # dtype's relative resolution did nothing measurable, and the record says so
+    # instead of leaving a reader to reconcile `steps: 256` with
+    # `weight_delta_rel: 0.0`.
+    stats["inert"] = bool(stats["steps"] > 0 and delta_rel < floor_rel)
     stats["skipped_steps"] = skipped
     if skipped:
         print(f"[tune_fp:{label}] skipped {skipped}/{total} non-finite-loss steps", flush=True)
@@ -920,6 +1035,8 @@ def _tune_latent_ste(
     label: str = "",
     loss_weight: np.ndarray | None = None,
     loss_weight_source: str = "uniform",
+    loss_weight_mean_before: float | None = None,
+    loss_weight_mean_after: float | None = None,
 ) -> dict:
     """TuneLatentSTE ([NQ] Step 3): joint refinement of (U, V, s1, s2) with
     the straight-through estimator against the block-level objective of
@@ -956,6 +1073,20 @@ def _tune_latent_ste(
         "linears": sorted(facs),
         "steps": 0,
         "per_linear": {},
+        # qk-tune-loss-scale: the weighted-MSE scale actually applied, the
+        # resolution-derived floor, and the declared inertness. Same contract as
+        # the TuneFP row -- `None` means "not measured", never "fine".
+        "loss_weight_mean_before": loss_weight_mean_before,
+        "loss_weight_mean_after": loss_weight_mean_after,
+        "loss_weight_normalization": (
+            LOSS_WEIGHT_MEAN_NORMALIZATION if loss_weight_mean_after is not None else None
+        ),
+        "gradient_floor": None,
+        "floor_optimizer_eps": None,
+        "floor_dtype_rel_resolution": None,
+        "floor_param_dtype": None,
+        "vacuous": False,
+        "inert": None,
         # The device the stage's tensors ran on, and its own row time
         # (qk-ptq-speedups: scenario `ste_tunefp_gpu_zero_algorithm_change`).
         # Read off the activation — the authority for where this stage executes.
@@ -994,6 +1125,16 @@ def _tune_latent_ste(
         lr_scale = max(float(p.detach().abs().median()), 1e-30)
         groups.append({"params": [p], "lr": cfg.stage_latent.lr * lr_scale, "lr_scale": lr_scale})
     opt = torch.optim.Adam(groups)
+    # Same resolution-derived floor as TuneFP (qk-tune-loss-scale, requirement 2),
+    # read off THIS optimizer's eps and THESE parameters' dtypes. With f64 latents
+    # the product is ~2.2e-24, so the guard fires only for a weight scale that puts
+    # the step-0 gradient below it -- the RED fixture drives it there.
+    opt_eps = float(opt.defaults["eps"])
+    floor, floor_dtype, floor_rel = _optimizer_gradient_floor(opt_eps, params)
+    stats["gradient_floor"] = floor
+    stats["floor_optimizer_eps"] = opt_eps
+    stats["floor_dtype_rel_resolution"] = floor_rel
+    stats["floor_param_dtype"] = floor_dtype
     n = x_b.shape[0]
     bs = max(1, min(batch_size, n))
     if steps is None:
@@ -1012,6 +1153,9 @@ def _tune_latent_ste(
             "s1_rel_move": 0.0,
             "s2_rel_move": 0.0,
             "zero_crossings": True,
+            # Declared inertia (qk-tune-loss-scale, requirement 3): set False/True
+            # once the row's movement is measured against the dtype resolution.
+            "inert": None,
             # Every STE row names the device its refinement ran on: the report's
             # per-linear rows are what a reader compares across arms, and a row
             # that cannot say where it ran cannot be compared with one that can.
@@ -1094,6 +1238,31 @@ def _tune_latent_ste(
                 if p.grad is not None:
                     grad_sq += float(p.grad.detach().pow(2).sum())
             first_grad_norm = float(np.sqrt(grad_sq))
+            # Resolution-derived floor, not exact zero (qk-tune-loss-scale,
+            # requirement 2). The stage has no fidelity-fail mechanism today, so
+            # its fail-closed path is: restore the entry snapshot, declare the
+            # stage vacuous AND inert on the record, and end it (design.md's
+            # named delta) -- never run the rest of a budget that cannot move a
+            # parameter.
+            if first_grad_norm < floor:
+                reason = (
+                    "zero_first_step_gradient"
+                    if first_grad_norm == 0.0
+                    else "below_resolution_gradient_floor"
+                )
+                stats["vacuous"] = True
+                stats["vacuous_reason"] = reason
+                stats["inert"] = True
+                with torch.no_grad():
+                    for name, fac in facs.items():
+                        for p, p0 in zip(_fac_params(fac), snapshot[name], strict=True):
+                            p.copy_(p0)
+                print(
+                    f"[tune_latent_ste:{label}] VACUOUS ({reason}): "
+                    f"grad_norm={first_grad_norm!r} floor={floor!r}",
+                    flush=True,
+                )
+                break
         opt.step()
         # The finiteness gate runs BEFORE the counters, and the order is the
         # contract: a step the armor rolls back contributed no sign change, so
@@ -1148,6 +1317,22 @@ def _tune_latent_ste(
             rec["residual_after"] = residual_after
             rec["gradient_norm"] = first_grad_norm
             rec["zero_crossings"] = bool(rec["flips_u"] == 0 and rec["flips_v"] == 0)
+            # Declared inertia (qk-tune-loss-scale, requirement 3): this row's own
+            # movement measured against the coarsest parameter dtype's relative
+            # resolution. A row that cannot say whether it moved is unreadable as
+            # evidence, so the key is always present once the row ran.
+            moves = (
+                rec["u_rel_move"],
+                rec["v_rel_move"],
+                rec["s1_rel_move"],
+                rec["s2_rel_move"],
+            )
+            # A row that moved less than the dtype resolution (including a row a
+            # vacuous stage restored to its entry value) is inert; a row that
+            # cleared it is not.
+            rec["inert"] = bool(max(moves) < floor_rel)
+    if stats["per_linear"]:
+        stats["inert"] = bool(all(rec["inert"] for rec in stats["per_linear"].values()))
     stats["skipped_steps"] = skipped
     if skipped:
         print(
@@ -1573,6 +1758,22 @@ def reconstruct_block(
     terminal_loss_weight, loss_weight_source, missing_terminal = _resolve_loss_weight(
         cfg, _tune_pairs
     )
+    # --- Normalize the terminal weight to unit mean BEFORE either stage consumes
+    # it (qk-tune-loss-scale, requirement 1). The robust diagonal's relative
+    # per-feature structure is the statistical content; its absolute scale is a
+    # free numerical degree of freedom, and at raw scale (~1e-10) the weighted
+    # loss sits ~1e10x under the residual, every Adam step rounds back on the
+    # parameter dtype, and both stages run full budgets that move nothing (v5).
+    # The normalization belongs HERE, not inside a stage: a stage that normalized
+    # its own input could never observe the un-normalized regime the floor guard
+    # exists to catch. `_resolve_loss_weight` keeps returning the raw diagonal --
+    # that is the pre-normalization quantity the record must be able to name.
+    loss_weight_mean_before: float | None = None
+    loss_weight_mean_after: float | None = None
+    if terminal_loss_weight is not None:
+        terminal_loss_weight, loss_weight_mean_before, loss_weight_mean_after = (
+            _normalize_weight_to_unit_mean(terminal_loss_weight)
+        )
     if missing_terminal is not None and recorder is not None:
         recorder(
             TUNE_LOSS_FALLBACK_EVENT,
@@ -1619,6 +1820,8 @@ def reconstruct_block(
                 teacher_source=teacher_source,
                 loss_weight=terminal_loss_weight,
                 loss_weight_source=loss_weight_source,
+                loss_weight_mean_before=loss_weight_mean_before,
+                loss_weight_mean_after=loss_weight_mean_after,
             )
             _note_block_progress(0, f"{name_prefix or 'block'}/tune_fp")
             if recorder is not None:
@@ -1748,6 +1951,8 @@ def reconstruct_block(
                 label=name,
                 loss_weight=terminal_loss_weight,
                 loss_weight_source=loss_weight_source,
+                loss_weight_mean_before=loss_weight_mean_before,
+                loss_weight_mean_after=loss_weight_mean_after,
             )
             per = rec["per_linear"][name]
             if cfg.paper_faithful:
@@ -1823,6 +2028,21 @@ def reconstruct_block(
                 "marker": TUNE_FP_LOSS_MARKER,
                 "steps": 0,
                 "vacuous": False,
+                # A skip is not an execution: inertness is unknown (None), and the
+                # weighting scale is carried so the row still names its regime
+                # (qk-tune-loss-scale).
+                "inert": None,
+                "loss_weight": ("uniform" if terminal_loss_weight is None else "terminal_grad"),
+                "loss_weight_source": loss_weight_source,
+                "loss_weight_mean_before": loss_weight_mean_before,
+                "loss_weight_mean_after": loss_weight_mean_after,
+                "loss_weight_normalization": (
+                    LOSS_WEIGHT_MEAN_NORMALIZATION if loss_weight_mean_after is not None else None
+                ),
+                "gradient_floor": None,
+                "floor_optimizer_eps": None,
+                "floor_dtype_rel_resolution": None,
+                "floor_param_dtype": None,
             }
             if recorder is not None:
                 recorder("tune_fp", **tune_fp_record)
@@ -1833,6 +2053,11 @@ def reconstruct_block(
                 # Weighting actually used by the stage, on the record.
                 loss_weight=("uniform" if terminal_loss_weight is None else "terminal_grad"),
                 loss_weight_source=loss_weight_source,
+                loss_weight_mean_before=loss_weight_mean_before,
+                loss_weight_mean_after=loss_weight_mean_after,
+                loss_weight_normalization=(
+                    LOSS_WEIGHT_MEAN_NORMALIZATION if loss_weight_mean_after is not None else None
+                ),
                 per_linear=ste_records,
                 total_steps=total_ste,
                 teacher_source=teacher_source,
