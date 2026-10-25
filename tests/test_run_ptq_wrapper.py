@@ -5,7 +5,15 @@ sitting: positional arguments were **silently ignored** (so `SEQ_LEN=2048` in
 argument position produced a healthy-looking seq-512 run), and there was no way
 to inspect the launch without executing it — which is why a "check the command
 line" probe started a real 32 GiB container run. `DRY_RUN=1` is the seam that
-makes this testable without a daemon, and these tests use it.
+lets these legs run without launching anything.
+
+`DRY_RUN` alone is not daemon-free, and that was a real defect here: the seam
+still probes the image digest and guards the fixed container name before it
+prints argv, so run against the real daemon the file's rc became a property of
+the HOST — a live fire holding `quantibbler-ptq-run` turned eight `rc == 0`
+assertions into `name is already held` refusals. Every leg therefore runs
+against the form-selective `docker` double in `tests/stubs/docker`, placed at
+the head of PATH and proven in-band before the wrapper runs.
 """
 
 from __future__ import annotations
@@ -14,8 +22,13 @@ import os
 import pathlib
 import subprocess
 
+import pytest
+
 _REPO = pathlib.Path(__file__).resolve().parents[1]
 _SCRIPT = _REPO / "tools" / "run-ptq-container.sh"
+# The double is a real file on an exec-able filesystem, reached by SYMLINK from
+# the (noexec) tmpdir; see `_hermetic_docker`.
+_DOCKER_STUB = _REPO / "tests" / "stubs" / "docker"
 _KNOBS = (
     "MODEL",
     "OUT",
@@ -38,16 +51,82 @@ _KNOBS = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_docker(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Head PATH with the form-selective `docker` double, for EVERY leg.
+
+    `infrastructure_interception_proof` (openspec/changes/qk-wrapper-contract):
+    the wrapper launches real infrastructure, so its `docker` calls have to be
+    intercepted, not merely hoped away. The double is SYMLINKED into
+    `tmp_path/bin` from its tracked source rather than written there: `/tmp` is
+    mounted `noexec` on this host (as in CI sandboxes generally), so a written
+    script would print `Permission denied`, the shell would move to the next
+    PATH entry and the REAL `/usr/bin/docker` would run — measured, not
+    reasoned: a first cut of a sibling leg started a real 32 GiB container.
+
+    The double's knobs are cleared here so no ambient export can decide a leg's
+    answer; a leg that wants the held state sets them explicitly.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "docker").symlink_to(_DOCKER_STUB)
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ.get("PATH", ""))
+    monkeypatch.delenv("QKB_TEST_DOCKER_DIGEST", raising=False)
+    monkeypatch.delenv("QKB_TEST_DOCKER_HOLDER", raising=False)
+
+
+def _assert_interception(environment: dict[str, str]) -> None:
+    """Prove the double answers, in this very environment, before the wrapper runs.
+
+    `command -v` alone does not discharge `infrastructure_interception_proof`:
+    it happily reports a stub the shell later refuses to exec, which is exactly
+    how the noexec fall-through survived a green suite. The exec probe is the
+    assertion that binds — a real docker answers this inspect with a refusal on
+    stderr, and would put the leg on real infrastructure.
+    """
+    stub = os.path.join(environment["PATH"].split(os.pathsep)[0], "docker")
+    resolved = subprocess.run(
+        ["sh", "-c", "command -v docker"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert resolved.stdout.strip() == stub, (
+        f"the shell resolves docker to {resolved.stdout.strip()!r}, not the stub {stub}"
+    )
+    probe = subprocess.run(
+        ["docker", "inspect", "--format", "{{.Id}}", "qkb-interception-probe"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (probe.returncode, probe.stdout, probe.stderr) == (
+        0,
+        environment.get("QKB_TEST_DOCKER_DIGEST", ""),
+        "",
+    ), (
+        "the stub did not answer -- the real docker answers this inspect (no such object, or a "
+        "daemon refusal) and would put this leg on real infrastructure under the test's timeout",
+        probe.returncode,
+        probe.stdout,
+        probe.stderr,
+    )
+
+
 def _launch(**env: str) -> subprocess.CompletedProcess:
-    """Run the wrapper with DRY_RUN on, so no container is ever started.
+    """Run the wrapper with DRY_RUN on, against the hermetic `docker` double.
 
     The ambient environment's knobs are stripped first: an exported `SOLVER` or
     `SEQ_LEN` (empty or otherwise) would otherwise decide what these tests
     observe, which is exactly the kind of hidden input the wrapper is being
-    pinned against.
+    pinned against. Interception is proven in-band first, because DRY_RUN still
+    probes the digest and the name guard before it prints argv.
     """
     environment = {key: value for key, value in os.environ.items() if key not in _KNOBS}
     environment.update({"DRY_RUN": "1", **env})
+    _assert_interception(environment)
     return subprocess.run(
         ["sh", str(_SCRIPT)],
         cwd=_REPO,
@@ -58,73 +137,24 @@ def _launch(**env: str) -> subprocess.CompletedProcess:
     )
 
 
-def _launch_past_dry_run(tmp_path: pathlib.Path, **env: str) -> subprocess.CompletedProcess:
+def _launch_past_dry_run(**env: str) -> subprocess.CompletedProcess:
     """Run the wrapper through its REAL launch path, with no daemon in the loop.
 
     `DRY_RUN` exits before the container starts, so everything that happens
     after the launch (the container witness, the exit-code plumbing) is
-    unreachable from `_launch`. A silent `docker` stub on the head of PATH
-    stands in for the daemon: the run completes, exit 0, having printed
-    nothing -- which is exactly the shape of a fire whose account was not
-    captured.
-
-    The stub is a SYMLINK to `/bin/true`, not a written script, and that is
-    load-bearing: `/tmp` is mounted `noexec` on this host (as in CI sandboxes
-    generally), and a shell does not stop at a PATH entry it cannot exec --
-    dash prints `Permission denied` for the stub, moves to the next PATH
-    entry, and runs the REAL `/usr/bin/docker`. Measured, not reasoned: the
-    first cut of this leg started a real 32 GiB container. The symlink
-    resolves to an exec-able inode, so the stub wins wherever it is placed.
-
-    `infrastructure_interception_proof` (openspec/changes/qk-wrapper-contract)
-    makes the in-band proof below non-optional: a test that overrides `PATH`
-    to intercept a command which launches real infrastructure SHALL assert the
-    resolved binary is the shim, in the same environment handed to the code
-    under test, BEFORE that code runs. `command -v` alone does not discharge
-    that -- it happily reports the stub the shell later refuses to exec, which
-    is precisely how the noexec fall-through above survived a green suite. The
-    exec probe is the assertion that actually binds.
+    unreachable from `_launch`. The same `docker` double the other legs use
+    stands in for the daemon (`docker run` and friends answer nothing, exit 0):
+    the run completes, exit 0, having printed nothing -- which is exactly the
+    shape of a fire whose account was not captured.
     """
-    bindir = tmp_path / "bin"
-    bindir.mkdir(exist_ok=True)
-    stub = bindir / "docker"
-    stub.symlink_to("/bin/true")
-
     environment = {key: value for key, value in os.environ.items() if key not in _KNOBS}
     environment.update(
         {
             "WATCHDOG": "0",  # keep the host-side watchdog out of a unit test
-            "PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
             **env,
         }
     )
-
-    # Proven in-band, in this very environment, before the wrapper runs.
-    resolved = subprocess.run(
-        ["sh", "-c", "command -v docker"],
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert resolved.stdout.strip() == str(stub), (
-        f"the shell resolves docker to {resolved.stdout.strip()!r}, not the stub {stub}"
-    )
-    probe = subprocess.run(
-        ["docker", "inspect", "--format", "{{.Id}}", "qkb-interception-probe"],
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert (probe.returncode, probe.stdout, probe.stderr) == (0, "", ""), (
-        "the stub did not answer -- the real docker answers this inspect (no such object, or a "
-        "daemon refusal) and would put this leg on real infrastructure under the test's timeout",
-        probe.returncode,
-        probe.stdout,
-        probe.stderr,
-    )
-
+    _assert_interception(environment)
     return subprocess.run(
         ["sh", str(_SCRIPT)],
         cwd=_REPO,
@@ -308,6 +338,47 @@ def test_dry_run_announces_nothing_it_need_not_and_the_advisories_it_must():
     assert "rank=512 solver=svd seq_len=2048" in oom.stderr
 
 
+def test_held_name_refuses_by_the_stub_not_by_host_state(monkeypatch):
+    """A held shared name REFUSES — but the answer must come from the double.
+
+    `guards_shall_be_tri_state` (openspec/changes/qk-wrapper-contract): held
+    SHALL refuse, free SHALL proceed, unverifiable SHALL refuse. The refusal is
+    correct and this test does not relax it. What was wrong is that the whole
+    file's verdict depended on what a live fire happened to be doing on the
+    host: with qk-pertarget-v4 holding `quantibbler-ptq-run`, every DRY_RUN
+    `rc == 0` assertion here read as this refusal (8 reds at rc 2) with no code
+    defect behind them.
+
+    Here the held payload is the double's answer, so the branch is covered by
+    construction on any host — daemon or no daemon, fire or no fire.
+    """
+    monkeypatch.setenv("QKB_TEST_DOCKER_DIGEST", "sha256:" + "0" * 64)
+    monkeypatch.setenv(
+        "QKB_TEST_DOCKER_HOLDER",
+        "quantibbler-ptq:rocm-official running=true launch_id=qk-pertarget-v4",
+    )
+    refused = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048")
+    assert refused.returncode == 2, (refused.returncode, refused.stdout, refused.stderr)
+    assert "is already held" in refused.stderr
+    assert "qk-pertarget-v4" in refused.stderr, "the held payload reaches the refusal verbatim"
+    assert "'docker'" not in refused.stdout, "a refused launch must not resolve an argv"
+
+
+def test_free_name_proceeds_whatever_the_stub_is_asked(monkeypatch):
+    """The FREE state is the double's default, so `rc == 0` cannot be ambient.
+
+    Pinned beside the held leg so the pair is discriminating: same helper, same
+    wrapper, same host — only the double's answer differs. Without this, a stub
+    that always answered `held` would look like coverage.
+    """
+    monkeypatch.setenv("QKB_TEST_DOCKER_DIGEST", "sha256:" + "0" * 64)
+    completed = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048")
+    assert completed.returncode == 0, (completed.returncode, completed.stderr)
+    assert "is already held" not in completed.stderr
+    assert completed.stdout.strip().splitlines()[-1].startswith("'docker' 'run'")
+    assert "image_digest=sha256:" in completed.stderr
+
+
 def test_wrapper_never_truncates_the_breadcrumb_trail():
     """The trail is the post-mortem of the run that died, not of the next one."""
     src = _SCRIPT.read_text()
@@ -385,9 +456,7 @@ def test_absent_container_log_witness_fails_closed(tmp_path):
     test. This is that test.
     """
     out = tmp_path / "out"
-    completed = _launch_past_dry_run(
-        tmp_path, RANK="512", SOLVER="svd", SEQ_LEN="2048", OUT=str(out)
-    )
+    completed = _launch_past_dry_run(RANK="512", SOLVER="svd", SEQ_LEN="2048", OUT=str(out))
 
     witness = out / "container.log"
     assert witness.exists(), "the tee must have produced the witness for this leg to mean anything"
@@ -396,3 +465,105 @@ def test_absent_container_log_witness_fails_closed(tmp_path):
     assert completed.returncode == 2, (completed.returncode, completed.stdout, completed.stderr)
     assert "container_log_witness missing or empty" in completed.stderr
     assert str(witness) in completed.stderr
+
+
+def test_fence_hook_install_resolves_the_hooks_dir_in_a_linked_worktree(tmp_path):
+    """The fence installer must ASK git where hooks live, not assume `.git/`.
+
+    The push fence re-installs `tools/git-hooks/pre-push` on every launch, and it
+    used to write to the literal `$REPO_ROOT/.git/hooks`. In a git LINKED
+    WORKTREE -- which is how every lane on this board is told to work -- `.git`
+    is a FILE (a gitdir pointer), so `mkdir -p` on that literal path failed with
+    `Not a directory`, `set -eu` took the whole launch down, and nine legs of
+    THIS file read red in every worktree while a full clone -- where `.git` IS a
+    directory -- stayed green. Every reviewer burned a differential cycle
+    chasing reds that had no other defect behind them.
+
+    `git rev-parse --git-path hooks` is the worktree-aware form: it resolves to
+    the COMMON dir in a linked worktree, which is where git actually reads hooks
+    from, so the fence lands where it is honoured -- once, for the clone and all
+    its linked worktrees. This leg runs the shipped wrapper BYTES from a real
+    linked worktree to pin it, inside a throwaway repo so the install never
+    touches this checkout's own hooks directory. The hooks dir is deleted first,
+    so the `mkdir -p` branch is the one that has to work.
+    """
+    source = _REPO / "tools" / "git-hooks" / "pre-push"
+    repo = tmp_path / "repo"
+    (repo / "tools" / "git-hooks").mkdir(parents=True)
+    # The wrapper derives REPO_ROOT from `dirname $0`, so it has to physically
+    # live in the worktree for this shape to be the real one: a copy of the
+    # shipped bytes, not a stub.
+    (repo / "tools" / "run-ptq-container.sh").write_bytes(_SCRIPT.read_bytes())
+    (repo / "tools" / "git-hooks" / "pre-push").write_bytes(source.read_bytes())
+
+    # The host's git config is kept out of the throwaway repo: a global
+    # `core.hooksPath` or signing config would decide a leg that is about the
+    # repo shape, not about this box.
+    config_env = dict(
+        os.environ,
+        GIT_CONFIG_NOSYSTEM="1",
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_CONFIG_SYSTEM=os.devnull,
+    )
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(repo), *args],
+            env=config_env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    git("init", "-q")
+    git("add", "tools")
+    git(
+        "-c",
+        "user.email=wrapper-test@example.invalid",
+        "-c",
+        "user.name=wrapper-test",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-qm",
+        "seed",
+    )
+    worktree = tmp_path / "wt"
+    git("worktree", "add", "--detach", str(worktree))
+    assert (worktree / ".git").is_file(), (
+        "fixture precondition: a linked worktree's .git is a FILE, which is the whole point"
+    )
+
+    hooks_dir = repo / ".git" / "hooks"
+    for stale in hooks_dir.iterdir():
+        stale.unlink()
+    hooks_dir.rmdir()
+    assert not hooks_dir.exists(), "fixture precondition: the installer has to create it"
+
+    environment = {key: value for key, value in os.environ.items() if key not in _KNOBS}
+    environment.update({"DRY_RUN": "1", "OUT": str(tmp_path / "out")})
+    _assert_interception(environment)
+    completed = subprocess.run(
+        ["sh", str(worktree / "tools" / "run-ptq-container.sh")],
+        cwd=worktree,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, (completed.returncode, completed.stdout, completed.stderr)
+    installed = hooks_dir / "pre-push"
+    assert installed.is_file(), (
+        "the fence did not land in the COMMON hooks dir git resolves for the worktree: "
+        f"stderr={completed.stderr!r}"
+    )
+    assert installed.read_bytes() == source.read_bytes(), (
+        "the installed hook is not the tracked source byte-for-byte"
+    )
+    # The MODE, not os.access: `/tmp` is mounted noexec on this host (the same
+    # fact the docker-double symlink dance above exists for), so X_OK reads
+    # False for a perfectly 755 file. `chmod 755` is what the installer does and
+    # what the mode pin checks.
+    mode = installed.stat().st_mode & 0o777
+    assert mode == 0o755, f"installed hook mode is {oct(mode)}, not 0o755"

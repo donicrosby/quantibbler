@@ -1,0 +1,37 @@
+#!/bin/sh
+# Form-selective `docker` double for `tests/test_run_ptq_wrapper.py`.
+#
+# `DRY_RUN=1` is NOT a daemon-free seam on its own: before printing argv the
+# wrapper probes the image digest (`inspect --format '{{.Id}}' <image>`) and
+# guards the fixed container name (`inspect --format '{{.Config.Image}} ...'
+# quantibbler-ptq-run`). Run against the real daemon, those two calls make the
+# test file's verdict a property of the HOST -- a live fire holding
+# `quantibbler-ptq-run` turns every DRY_RUN `rc == 0` assertion into a
+# `name is already held` refusal at rc 2 (measured: 8 reds in
+# `tests/test_run_ptq_wrapper.py` while qk-pertarget-v4 held the name).
+#
+# So the tests place this double at the head of PATH and prove in-band that it
+# answers. It answers by the inspect FORM it is asked for, from the
+# environment; unset (the default) is the FREE state:
+#   QKB_TEST_DOCKER_DIGEST  stdout for the `{{.Id}}` image-digest probe
+#   QKB_TEST_DOCKER_HOLDER  stdout for the container-name (held) probe
+# Every other invocation -- `docker run` included -- prints nothing and exits 0,
+# which is the shape of a fire whose account was not captured.
+#
+# It is reached by SYMLINK from a `noexec` tmpdir (PATH itself is not
+# exec-capable here), so it must stay a real file on an exec-able filesystem.
+set -eu
+
+_form=""
+for _arg in "$@"; do
+  case "$_arg" in
+    *'{{.Config.Image}}'*) _form=name ;;
+    *'{{.Id}}'*) _form=digest ;;
+  esac
+done
+
+case "$_form" in
+  digest) printf '%s' "${QKB_TEST_DOCKER_DIGEST:-}" ;;
+  name) printf '%s' "${QKB_TEST_DOCKER_HOLDER:-}" ;;
+esac
+exit 0

@@ -348,9 +348,26 @@ fi
 # That trades one silent disarm for another.
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FENCE_SRC="$REPO_ROOT/tools/git-hooks/pre-push"
-FENCE_DST="$REPO_ROOT/.git/hooks/pre-push"
+# The hooks DIRECTORY is resolved by git, never spelled `$REPO_ROOT/.git/hooks`:
+# in a git LINKED WORKTREE -- which is how every lane on this board is told to
+# work -- `.git` is a FILE (a gitdir pointer), so `mkdir -p` on the literal path
+# dies with `Not a directory` and `set -eu` takes the whole launch down before
+# the dry run can even print argv (measured: nine legs of
+# tests/test_run_ptq_wrapper.py red in every worktree while the full clone, where
+# `.git` IS a directory, stayed green). `git rev-parse --git-path hooks` is the
+# worktree-aware form; it lands in the COMMON dir, which is where git actually
+# reads hooks from, so the fence is installed where it is honoured -- once, for
+# the clone and every linked worktree of it.
+# (core.hooksPath is still deliberately NOT used; see the note above.)
+HOOKS_DIR="$(git -C "$REPO_ROOT" rev-parse --git-path hooks 2>/dev/null || true)"
+case "$HOOKS_DIR" in
+  /*) ;;                                   # absolute (linked worktree: the common dir)
+  "") HOOKS_DIR="$REPO_ROOT/.git/hooks" ;; # git unavailable: the full-clone path
+  *) HOOKS_DIR="$REPO_ROOT/$HOOKS_DIR" ;;  # relative to the root we asked from
+esac
+FENCE_DST="$HOOKS_DIR/pre-push"
 if [ -r "$FENCE_SRC" ] && { [ ! -f "$FENCE_DST" ] || ! cmp -s "$FENCE_SRC" "$FENCE_DST"; }; then
-  mkdir -p "$REPO_ROOT/.git/hooks"
+  mkdir -p "$HOOKS_DIR"
   cp "$FENCE_SRC" "$FENCE_DST"
   chmod 755 "$FENCE_DST"
   echo "push fence: installed/refreshed $FENCE_DST from the tracked source"
