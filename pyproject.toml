@@ -10,29 +10,58 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 authors = [{ name = "donicrosby" }]
-dependencies = ["numpy>=2.4,<3"]
-
-[project.optional-dependencies]
-torch = ["torch>=2.13,<3"]
-kernels = ["quantibbler-kernels==0.1.0"]
-# Model-development loop (tools/quantize_hf_model.py): load HF causal LMs
-# (transformers + tokenizers + safetensors weights) and read the wikitext-2
-# calibration/eval parquet shards (pyarrow). HF_HUB_OFFLINE=1 is enforced by
-# the driver; models ride the local HF cache.
-hf = [
+dependencies = [
+    "numpy>=2.4,<3",
+    # The PTQ pipeline IS the product (openspec/config.yaml, component
+    # decomposition), so its deps are the product's own: the driver
+    # (tools/quantize_hf_model.py) loads HF causal LMs (transformers +
+    # tokenizers + safetensors weights), reads the wikitext-2 calibration/eval
+    # parquet shards (pyarrow, HF_HUB_OFFLINE=1 enforced by the driver) and
+    # trains against torch. They are NOT extras and NOT dev-only: the run
+    # images install the product with `uv sync --no-dev --all-extras` and then
+    # assert `import torch, transformers` (Dockerfile.ptq,
+    # Dockerfile.ptq-rocm-official), and `pip install quantibbler` must yield a
+    # working compressor. An extra or a dev-only home would break all three.
+    # Because they are product deps, the test suite receives them from a bare
+    # `uv sync` — which is exactly why the ptq tier no longer needs (or has) a
+    # skip-when-absent hook: a missing one is a sync error, loudly reported at
+    # collection.
+    "torch>=2.13,<3",
     "transformers>=4.51,<6",
-    "tokenizers>=0.21,<1",
-    "safetensors>=0.5,<2",
-    "pyarrow>=18,<24",
+    "tokenizers>=0.22,<1",
+    "safetensors>=0.7,<2",
+    "pyarrow>=25,<27",
 ]
 
+[project.optional-dependencies]
+# An extra is strictly for a part of the PROGRAM a product user may not need.
+# `kernels` is the one that qualifies: the NumPy reference implementations in
+# src/quantibbler/kernels/ are the executable specification and run where the
+# Rust extension is absent, so the extension stays opt-in for product users.
+# The suite exercises the parity tier, so the same package is ALSO a dev-group
+# dependency below — an extra and a dev group are not exclusive.
+kernels = ["quantibbler-kernels==0.1.0"]
+
 [dependency-groups]
-# pyyaml is a TEST-harness dependency, not a product one: tests/test_ci_referee.py
-# parses .github/workflows/ci.yml with `yaml.safe_load` and asserts on the parsed
-# job/step structure, so no spelling of a key (`if:`, `'if':`, `if :`) can escape
-# the pin and blank lines are the parser's problem rather than the matcher's. The
-# lean CI leg installs it explicitly for the same reason — see that job's recipe.
-dev = ["pytest>=9,<10", "pytest-xdist>=3.6,<4", "pre-commit>=4.6,<5", "maturin>=1.14,<2", "pyyaml>=6,<7"]
+# Test/development tooling only — nothing here is needed to RUN the product.
+# `uv sync` installs the product deps plus this default group, so a fresh
+# checkout runs the whole suite with no extra flags.
+# quantibbler-kernels rides the group so the parity tier executes instead of
+# skipping (the extension is the one genuinely-optional product part, so it
+# also stays available as the extra above). PyYAML is the referee's
+# test-harness dependency: tests/test_ci_referee.py parses
+# .github/workflows/ci.yml with `yaml.safe_load` and asserts on the parsed
+# job/step structure, so no spelling of a key (`if:`, `'if':`, `if :`) can
+# escape the pin and blank lines are the parser's problem rather than the
+# matcher's.
+dev = [
+    "pytest>=9,<10",
+    "pytest-xdist>=3.6,<4",
+    "pre-commit>=4.6,<5",
+    "maturin>=1.14,<2",
+    "pyyaml>=6,<7",
+    "quantibbler-kernels==0.1.0",
+]
 
 [tool.uv]
 required-version = ">=0.12"
@@ -43,9 +72,11 @@ members = ["crates/quantibbler-kernels"]
 [tool.uv.sources]
 quantibbler-kernels = { workspace = true }
 # Host lanes are CPU-only (AMD box; the GPU substrate is the container image),
-# so the torch extra resolves to the CPU wheel — no nvidia-* dependency chain.
-# Per the uv PyTorch guide: explicit index, scoped to the extra.
-torch = [{ index = "pytorch-cpu", extra = "torch" }]
+# so torch resolves to the CPU wheel — no nvidia-* dependency chain.
+# Per the uv PyTorch guide: explicit index. Unscoped, because torch is now a
+# product dependency rather than an extra's member; the ROCm images replace
+# the locked wheel afterwards with an AMD-index install (Dockerfile.ptq-rocm).
+torch = [{ index = "pytorch-cpu" }]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
