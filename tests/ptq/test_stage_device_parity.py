@@ -52,12 +52,20 @@ _SRC = (
 )
 
 #: The accelerator is the point of this file; without one the accelerator legs
-#: skip cleanly (the CPU reference legs still run everywhere, so the fixture and
-#: the reference path are exercised on a CPU-only box too).
+#: cannot run at all (the CPU reference legs still run everywhere, so the fixture
+#: and the reference path are exercised on a CPU-only box too).
 HAVE_ACCEL = torch.cuda.is_available()
 requires_accel = pytest.mark.skipif(
     not HAVE_ACCEL, reason="no accelerator: the fp32-GPU-vs-fp64-CPU legs need one"
 )
+#: The accelerator legs carry this marker as well. The full tier's referee parses
+#: pytest's summary line and fails on ANY skip, so a leg that needs an accelerator
+#: is DESELECTED there (``-m 'not integration'`` is the default filter) instead of
+#: being counted as a skip. The skipif above stays, so the lane that does select
+#: them (``pytest -m integration``) still reports the requirement on a box without
+#: one rather than passing vacuously. The pin at the bottom of this file holds the
+#: split: accelerator legs deselected, reference legs in the default tier.
+accelerator_leg = pytest.mark.integration
 
 D_MODEL, RANK, ROWS, SEQ, BATCH = 48, 12, 8, 6, 4
 
@@ -252,6 +260,7 @@ def test_scn_device_authority_not_globals() -> None:
 # --------------------------------------------------------------------------
 
 
+@accelerator_leg
 @requires_accel
 def test_scn_ste_tunefp_gpu_zero_algorithm_change() -> None:
     """The accelerator leg IS the CPU leg's algorithm, and reports row-time."""
@@ -288,6 +297,7 @@ def test_scn_ste_tunefp_gpu_zero_algorithm_change() -> None:
 # --------------------------------------------------------------------------
 
 
+@accelerator_leg
 @requires_accel
 def test_scn_fp32_gpu_within_tolerance_class() -> None:
     """fp32 on the accelerator against the fp64 CPU reference, per stage.
@@ -335,3 +345,43 @@ def test_fp32_gpu_within_tolerance_class_tolerance_is_the_specs_class() -> None:
         / "spec.md"
     ).read_text()
     assert "±0.002 tolerance class" in spec
+
+
+# --------------------------------------------------------------------------
+# The tier split the accelerator legs depend on (the zero-skip CI contract)
+# --------------------------------------------------------------------------
+
+#: The legs whose claim is ABOUT the accelerator, and the reference legs that
+#: carry this file in the default tier. Naming them here is what lets the pin
+#: below assert the split instead of trusting that it was written correctly.
+_ACCELERATOR_LEGS = (
+    test_scn_ste_tunefp_gpu_zero_algorithm_change,
+    test_scn_fp32_gpu_within_tolerance_class,
+)
+_REFERENCE_LEGS = (
+    test_scn_device_authority_not_globals,
+    test_fp32_gpu_within_tolerance_class_tolerance_is_the_specs_class,
+)
+
+
+def test_accelerator_legs_are_deselected_and_the_reference_legs_are_not() -> None:
+    """The accelerator legs need an accelerator; the default tier must not skip.
+
+    The full tier's referee fails on ANY skip, so a leg that needs an accelerator
+    is held out of the default tier by the ``integration`` marker (deselected,
+    never counted as a skip) while its skipif keeps the requirement reportable in
+    ``pytest -m integration``. Both halves are asserted, because either mistake
+    re-reds CI: an accelerator leg left unmarked SKIPS on a GPU-less runner, and a
+    reference leg marked with the marker silently drops this file's default-tier
+    coverage.
+    """
+    for leg in _ACCELERATOR_LEGS:
+        marks = {mark.name: mark for mark in leg.pytestmark}
+        assert "integration" in marks, f"{leg.__name__} still runs in the default tier"
+        skip = marks.get("skipif")
+        assert skip is not None, f"{leg.__name__} lost its accelerator skipif"
+        assert "accelerator" in skip.kwargs.get("reason", ""), leg.__name__
+    for leg in _REFERENCE_LEGS:
+        assert not any(mark.name == "integration" for mark in getattr(leg, "pytestmark", ())), (
+            f"{leg.__name__} runs everywhere and carries the default tier"
+        )

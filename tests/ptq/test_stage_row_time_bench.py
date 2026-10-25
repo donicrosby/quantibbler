@@ -87,8 +87,16 @@ def test_unknown_leg_is_rejected():
         bench.resolve_legs("tpu")
 
 
+@pytest.mark.integration
 def test_accelerator_leg_runs_the_same_configuration(tmp_path):
-    """The accelerator arm is the CPU arm with a different (device, dtype)."""
+    """The accelerator arm is the CPU arm with a different (device, dtype).
+
+    Marked ``integration``: the cuda arm needs an accelerator, and the default
+    tier's referee fails on ANY skip, so this leg is DESELECTED there rather than
+    counted as a skip. The skip below still fires in the lane that does select it
+    (``pytest -m integration``) on a box without an accelerator, and the
+    requirement itself stays testable in the refusal pin above.
+    """
     if not torch.cuda.is_available():
         pytest.skip("no accelerator: the cuda arm needs one")
     out = tmp_path / "rows.json"
@@ -99,3 +107,21 @@ def test_accelerator_leg_runs_the_same_configuration(tmp_path):
         assert readings[stage]["cpu"]["steps"] == readings[stage]["cuda"]["steps"], stage
         assert legs["cuda"]["device"].startswith("cuda"), stage
         assert legs["cuda"]["wall_s"] > 0.0, stage
+
+
+def test_accelerator_leg_is_held_out_of_the_default_tier() -> None:
+    """The cuda arm needs an accelerator: deselected, never a default-tier skip.
+
+    The default ledger must report zero skips, and a leg that requests a cuda arm
+    cannot run on a GPU-less runner — so it is held out by the ``integration``
+    marker (deselected) while the CPU leg stays in the default tier. The refusal
+    pin above is what keeps the accelerator requirement itself testable here.
+    """
+
+    def marks_of(fn: object) -> set[str]:
+        return {mark.name for mark in getattr(fn, "pytestmark", ())}
+
+    held_out = test_accelerator_leg_runs_the_same_configuration
+    in_default = test_cpu_leg_reports_both_stages_with_their_own_row_time
+    assert "integration" in marks_of(held_out)
+    assert "integration" not in marks_of(in_default)

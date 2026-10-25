@@ -56,7 +56,7 @@ explicit = true
 testpaths = ["tests"]
 addopts = "-m 'not integration'"
 markers = [
-    "integration: real-model/driver end-to-end runs (minutes each). Excluded from the default run; `pytest -m integration` is the mandatory pre-fire staging lane.",
+    "integration: real-model/driver end-to-end runs (minutes each), plus the accelerator-only legs (which can never run in the default tier). Excluded from the default run; `pytest -m integration` is the mandatory pre-fire staging lane.",
 ]
 
 [tool.ruff]
