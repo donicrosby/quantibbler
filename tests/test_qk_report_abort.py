@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from test_qk_report import _reject_constant
 from test_qk_report_driver_pin import _DRIVER_SRC, _PTQ_CONFIG
 
-from quantibbler import qk_report
+from quantibbler import qk_report, serialization
 from quantibbler.qk_report import (
     COLLAPSE_LINE,
     EVAL_EVALUATOR,
@@ -341,3 +341,6 @@ def test_abort_report_dumps_strict_and_writes_non_finite_as_null():
     assert parsed["probe_abort"]["block"] == "layers.1"
     assert parsed["probe_abort"]["line"] == COLLAPSE_LINE
     assert parsed["probe"]["history"][0]["ratio"] == 34983.69806211141
+    # Read back through the contract model, like every other report path: the
+    # abort report is written by the same `dump_report`, so it is the same shape.
+    assert serialization.QuantizeReport.model_validate(parsed).status == FAILED

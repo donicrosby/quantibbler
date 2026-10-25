@@ -103,23 +103,60 @@ def json_safe(obj: Any) -> Any:
 
 
 def dump_report(report: dict) -> tuple[str, bool]:
-    """Serialize a report to strict JSON. Always returns a payload.
+    """Serialize a report to strict JSON, validated against the report model.
 
     Returns ``(payload, faithful)``. ``faithful`` is ``False`` only when the
     report could not be serialized as measured — in which case ``payload`` is
-    the minimal failed report instead of nothing at all. A value the
-    sanitizer did not recognize must not cost the verdict: the caller is
-    required to fail the process whenever ``faithful`` is ``False``, so the
-    durable trace and the exit code can never disagree.
+    the minimal failed report instead of nothing at all. A report the model
+    refuses, or a value the sanitizer did not recognize, must not cost the
+    verdict: the caller is required to fail the process whenever ``faithful``
+    is ``False``, so the durable trace and the exit code can never disagree.
+
+    ``quantibbler.serialization.QuantizeReport`` — the executable form of the
+    ``qk-ptq`` requirement this report answers to — GATES the write, and the
+    emitted object stays the writer's own. That split is forced by a second
+    contract on the same bytes: the report's KEY SET is itself a contract
+    (``report_single_shape_both_paths``: the abort, stage-failure and
+    completion paths carry identical keys, with the unmeasured end-of-run
+    numerics present as explicit ``null``). Serializing FROM the model would
+    reorder the keys, and ``exclude_none`` would drop exactly those required
+    nulls. So the model validates, this writer emits, and ``schema_version``
+    is the only added key.
     """
-    try:
-        return json.dumps(json_safe(report), indent=2, allow_nan=False) + "\n", True
-    except (TypeError, ValueError) as exc:
+    # Imported here, not at module scope: ``serialization`` imports THIS
+    # package (the band constants and the stage-journal shape table), so a
+    # module-level import would be a cycle.
+    from ..serialization import SCHEMA_VERSION, ArtifactSchemaError, QuantizeReport
+
+    def _failed(exc: BaseException) -> tuple[str, bool]:
+        """The minimal failed report — the durable status when the full one cannot be written.
+
+        ``schema_version`` is stamped here too, and for the same reason: the
+        fallback IS a ``quantize_report.json``. A version this build cannot read
+        refuses loudly rather than parsing as the current shape, so a reader
+        that can decide has to be told, even about a stub.
+        """
         fallback = {
+            "schema_version": SCHEMA_VERSION,
             "status": FAILED,
             "report_error": f"{type(exc).__name__}: {exc}",
         }
         return json.dumps(fallback, indent=2, allow_nan=False) + "\n", False
+
+    # Sanitized first, so the model sees Python scalars: the driver's numbers
+    # come off numpy arrays, and an np.float32 is not the Python float the
+    # contract names.
+    safe = json_safe(report)
+    try:
+        QuantizeReport.model_validate(safe)
+    except (TypeError, ValueError, ArtifactSchemaError) as exc:
+        return _failed(exc)
+    try:
+        return json.dumps(
+            {"schema_version": SCHEMA_VERSION, **safe}, indent=2, allow_nan=False
+        ) + "\n", True
+    except (TypeError, ValueError) as exc:
+        return _failed(exc)
 
 
 def _as_finite_float(value: Any) -> float | None:

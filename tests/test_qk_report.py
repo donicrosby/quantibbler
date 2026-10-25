@@ -24,6 +24,7 @@ import sys
 import numpy as np
 import pytest
 
+from quantibbler import serialization
 from quantibbler.qk_report import (
     COLLAPSE_LINE,
     OK_LINE,
@@ -276,3 +277,67 @@ def test_report_dump_report_is_faithful_for_healthy_reports():
     payload, faithful = dump_report({"status": "ok", "ppl_ratio": 2.5})
     assert faithful is True
     assert json.loads(payload, parse_constant=_reject_constant)["status"] == "ok"
+
+
+# --------------------------------------------------------------------------
+# report_* — the model-validated write (change `qk-serialization`)
+# --------------------------------------------------------------------------
+
+
+def test_scn_report_payload_validates_against_the_model():
+    """The emitted bytes ARE the contract, not a lookalike of it.
+
+    `quantibbler.serialization.QuantizeReport` is the executable form of the
+    `qk-ptq` requirement this report answers to, so the report a consumer reads
+    back is the one the model accepts — the write is where drift is caught.
+    """
+    payload, faithful = dump_report(
+        {
+            "status": "ok",
+            "ppl_ratio": 2.5,
+            "model": "Qwen/Qwen3-0.6B",
+            "regime": {"artifact": "qpk1: +-1 bitplanes + float64 scales"},
+        }
+    )
+    assert faithful is True
+    parsed = json.loads(payload, parse_constant=_reject_constant)
+    report = serialization.QuantizeReport.model_validate(parsed)
+    assert report.status == "ok"
+    assert report.regime.artifact == "qpk1: +-1 bitplanes + float64 scales"
+    assert parsed["schema_version"] == serialization.SCHEMA_VERSION
+
+
+def test_scn_report_payload_keeps_the_writers_keys_and_order():
+    """`schema_version` is the only added key, and the writer's order survives.
+
+    The report's key set is a contract of its own (`report_single_shape_both_paths`:
+    every path carries identical keys, with the unmeasured end-of-run numerics as
+    explicit `null`), so the object serialized is the writer's — with the version
+    stamped in front — rather than a model dump that would reorder the keys and,
+    with `exclude_none`, drop those deliberate nulls.
+    """
+    report = {"model": "m", "ppl_quant_native": None, "status": "failed", "probe_abort": None}
+    payload, faithful = dump_report(report)
+    assert faithful is True
+    parsed = json.loads(payload)
+    assert list(parsed) == ["schema_version", *report], list(parsed)
+    assert parsed["ppl_quant_native"] is None
+    assert parsed["probe_abort"] is None
+
+
+def test_scn_report_payload_model_rejection_falls_back_to_the_failed_stub():
+    """A report off the contract costs the measurements, never the verdict.
+
+    Same fail-closed shape as an unserializable value: the stub is written, the
+    status is `failed`, and `faithful` is `False` so the caller fails the
+    process — a durable trace and an exit code that can never disagree.
+    """
+    payload, faithful = dump_report({"status": "ok", "rank": "eight", "model": "m"})
+    assert faithful is False
+    parsed = json.loads(payload, parse_constant=_reject_constant)
+    assert parsed["status"] == "failed"
+    assert "report_error" in parsed
+    assert parsed["schema_version"] == serialization.SCHEMA_VERSION
+    # ...and the stub is itself readable through the model, so a consumer can
+    # still decide about it rather than crashing on an unreadable file.
+    assert serialization.QuantizeReport.model_validate(parsed).status == "failed"

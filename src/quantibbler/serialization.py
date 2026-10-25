@@ -157,6 +157,12 @@ class QuantizeReport(ArtifactModel):
     ``extra="allow"``: the writer emits keys beyond this contract — including
     the documented crash report, which carries only ``status`` and
     ``report_error`` — so unmodelled keys ride through instead of being lost.
+
+    The writer VALIDATES through this model and emits its own object, rather
+    than serializing ``model_dump()``: the report's key set is itself a
+    contract (`qk-ptq` scenario ``report_single_shape_both_paths`` — every path
+    carries identical keys, the unmeasured numerics as explicit ``null``), and
+    ``exclude_none=True`` would drop exactly those nulls.
     """
 
     model_config = ConfigDict(extra="allow")

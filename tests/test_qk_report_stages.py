@@ -21,7 +21,7 @@ from test_qk_report_abort import (
     _completion_report_keys,
 )
 
-from quantibbler import qk_report
+from quantibbler import qk_report, serialization
 from quantibbler.qk_report import (
     FAILED,
     abort_report,
@@ -556,7 +556,12 @@ def test_stage_failure_report_is_failed_and_carries_both_guard_norms():
         assert report[key] is None, key
     payload, faithful = dump_report(report)
     assert faithful is True
-    assert json.loads(payload)["paper_faithful"] is False
+    parsed = json.loads(payload)
+    assert parsed["paper_faithful"] is False
+    # Read back through the contract model: the fail-closed shape is the same
+    # report every other path writes, so it clears the same contract.
+    assert parsed["status"] == FAILED
+    assert serialization.QuantizeReport.model_validate(parsed).status == FAILED
 
 
 def test_stage_failure_report_carries_the_completion_key_set_plus_its_own():

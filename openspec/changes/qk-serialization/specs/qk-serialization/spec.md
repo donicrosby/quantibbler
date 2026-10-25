@@ -67,3 +67,30 @@ rejected.
 - **WHEN** a ledger row names a `targeted_row` that is one of `qk_bar.BAR_ROWS`
   labels,
 - **THEN** it validates, and a label outside that set is rejected
+
+### Requirement: The report writer SHALL validate every emitted report against the report model
+
+`quantibbler.qk_report.dump_report` SHALL validate the report against
+`QuantizeReport` before serializing it, SHALL emit the writer's own keys, values
+and order plus `schema_version`, and SHALL write the minimal failed report with
+`faithful` false when validation or serialization fails — never raising, never
+dropping a key the report contract requires as an explicit `null`.
+
+#### Scenario: report_payload_validates_against_the_model
+
+- **WHEN** a report dict is serialized through `dump_report`,
+- **THEN** the emitted JSON parses, validates against `QuantizeReport`, and
+  carries this build's `schema_version`
+
+#### Scenario: report_payload_keeps_the_writers_keys_and_order
+
+- **WHEN** a report carrying the writer's key set is serialized,
+- **THEN** every existing key keeps its value, shape and relative order, the
+  unmeasured end-of-run numerics stay explicit `null`s, and `schema_version` is
+  the only added key
+
+#### Scenario: report_payload_model_rejection_falls_back_to_the_failed_stub
+
+- **WHEN** validation or serialization of a report fails,
+- **THEN** `dump_report` returns the minimal failed report with `faithful` false
+  and never raises

@@ -106,4 +106,45 @@ they are not rediscovered:
 
 ## Implementation crystallization
 
-None: no post-spec implementation finding landed with this change.
+### 2026-10-25 — the report writer validates; it does not dump (adoption A, `t_b4a1383d`)
+
+**Finding.** The handover note above ("their writers must dump with
+`exclude_none=True` to stay byte-compatible") is wrong for the report, and
+following it would have broken a different contract. `quantize_report.json`'s
+key set is itself specified: the abort, stage-failure and completion paths must
+carry IDENTICAL keys, with the unmeasured end-of-run numerics present as
+explicit `null` (`qk-ptq`, scenario `report_single_shape_both_paths`). Dumping
+from `QuantizeReport` with `exclude_none=True` drops exactly those nulls;
+without it, the model adds a `null` for every declared-but-absent field
+(`report_error` on a completion report) and reorders the keys into field
+definition order.
+
+**Ruling.** `dump_report` VALIDATES through `QuantizeReport` and serializes the
+writer's own object with `schema_version` stamped in front. Concretely: same
+keys, same value shapes, same relative order, `schema_version` the only added
+key. A model rejection falls into the same minimal failed report an
+unserializable value already produced (`faithful=False`, so the caller fails the
+process), and that stub carries `schema_version` too — "every emitted
+`quantize_report.json` names the shape it was written as" then has no exception,
+which matters precisely because a reader that cannot decide has to refuse
+loudly.
+
+**Mechanism notes.** The import is function-level: `serialization` imports
+`qk_report` (the band constants and the stage-journal shape table), so a
+module-level import would be a cycle. Sanitization (`json_safe`) runs BEFORE
+validation, so the model sees Python scalars — the driver's numbers come off
+numpy arrays, and an `np.float32` is not the `float` the contract names, so
+validating first would turn a healthy report into a rejection.
+
+**Not adopted, and why.** The acceptance-ledger row has no producer to adopt:
+`docs/acceptance-ledger.jsonl` is authored by a human at gate time and
+`ledger-format.md` rule 2 states no pipeline code writes or reads it, so wiring
+the row model is deferred to the first acceptance fire (an @user request), not
+code that can be written now. `row_meets_bar` keeps its zero-production-caller
+status — it is the ledger's predicate, never a verdict input.
+
+**Superseded wording:** the bullet above beginning "A model with optional fields
+dumps those fields as explicit `null`s unless the writer passes
+`exclude_none=True`" — it holds for a writer that serializes FROM its model, and
+neither the report writer nor (by the same key-set argument) the probe writer
+may do that. Adoption B inherits this ruling.
