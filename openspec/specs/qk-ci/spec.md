@@ -62,19 +62,23 @@ A workflow job SHALL iterate the non-archived `openspec/changes/*` directories a
 - **WHEN** the openspec job runs
 - **THEN** every active change dir is validated individually and zero return codes are required for the job to pass
 
-### Requirement: CI SHALL prove the probe-abort path repeatably on a real checkpoint
+### Requirement: CI SHALL run the recorded probe-abort command offline on a cached checkpoint
 
-A weights-cached leg SHALL run the recorded abort command (`Qwen/Qwen3-0.6B --rank 1 --solver svd --max-admm-iter 1 --seq-len 64 --calibration-seqs 1 --eval-seqs 2 --probe-batches 1`) fully offline and SHALL assert: the run aborts before block 3, wall time inside a contention-immune hang/regression backstop (3600 s ceiling; quiet baseline ≈60 s, aligned with the driver --timeout 3600 kill), the report carries `status: failed` plus the `probe_abort` fields and the history so far, and the process exits nonzero — the catch→report→exit wiring executed under CI, not merely in a manual run.
-
-#### Scenario: abort_leg_repeatable_detection_proof
-
-- **WHEN** the weights-cached abort leg runs
-- **THEN** the measured collapse (prefix ratio ~35,000 at depth 2 against `COLLAPSE_LINE` 40) aborts the driver in the recorded command's shape, with report and exit code asserted from the real process — this leg is the repeatable runtime proof the probe-abort path executes
+A weights-cached leg SHALL run the recorded abort command (`Qwen/Qwen3-0.6B --rank 1 --solver svd --max-admm-iter 1 --seq-len 64 --calibration-seqs 1 --eval-seqs 2 --probe-batches 1`) fully offline.
 
 #### Scenario: abort_leg_weights_cached_offline
 
 - **WHEN** the abort leg needs the Qwen3-0.6B checkpoint and wikitext snapshot
 - **THEN** they come from a restored cache (repo cache or self-hosted runner bind-mount — mechanism is the implementer's choice) with the HF-offline environment set, never a live hub download at run time
+
+### Requirement: CI SHALL assert the abort run's report, exit code, and wall-time backstop
+
+That leg SHALL assert: the run aborts before block 3, wall time inside a contention-immune hang/regression backstop (3600 s ceiling; quiet baseline ≈60 s, aligned with the driver --timeout 3600 kill), the report carries `status: failed` plus the `probe_abort` fields and the history so far, and the process exits nonzero — the catch→report→exit wiring executed under CI, not merely in a manual run.
+
+#### Scenario: abort_leg_repeatable_detection_proof
+
+- **WHEN** the weights-cached abort leg runs
+- **THEN** the measured collapse (prefix ratio ~35,000 at depth 2 against `COLLAPSE_LINE` 40) aborts the driver in the recorded command's shape, with report and exit code asserted from the real process — this leg is the repeatable runtime proof the probe-abort path executes
 
 ### Requirement: CI SHALL be shell-rigorous and supply-chain-hardened
 
