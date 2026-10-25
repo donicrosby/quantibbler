@@ -43,6 +43,45 @@ this change cites it and does not modify it.
   be *written* and still counted as *done*; the failure would move around
   instead of being killed at the source.
 
+## Implementation crystallization
+
+### 2026-10-25 (landing disposition of the two review passes)
+
+- **Scan-side key grammar (the y_b asymmetry).** `completed_blocks` now
+  applies the loader's rule — only ``|``-separated keys derive layer
+  names — so a y_b-only archive (the reserved teacher target carries no
+  separator) is excluded from the done set exactly as a zero-key archive
+  is. This closes the spec-letter gap both reviews flagged against
+  scenario ``empty_archive_is_never_counted_done`` ("no readable
+  quantized-layer names"). RED→GREEN observed:
+  ``test_yb_only_archive_is_not_counted_done`` (2 failed / 9 passed
+  before the fix, 15 passed after, under ``SOLVER_BACKEND=numpy``).
+- **`apply_layer_states.expected_names` is required, not defaulted.**
+  The guard this change exists for cannot be disarmed by omission: a
+  caller that cannot name what the live block is owed has no business
+  restoring into it. All in-tree callers (the one production call site
+  and every test) already pass it. RED→GREEN observed:
+  ``test_expected_names_cannot_be_omitted``.
+- **Ruling requested by review (doctrine vs landed bytes):** the landed
+  record-only digest CONFORMS. This change's spec requires resume to
+  fail closed on empty/incomplete archives; content-hash drift refusal
+  per write is integrity hardening beyond this delta and belongs with
+  the fingerprint surface (model-identity binding, the shared driver
+  ``--checkpoint-dir`` default), which is routed to follow-up tickets,
+  not folded in here.
+- **Findings routed out of this change** (reviews t_a76ffbcd /
+  t_bde3c34c): two-phase validate-before-write apply loop (MEDIUM);
+  fingerprint binds no model identity + shared default (should-fix);
+  archive byte hash, int()-parse notice-vs-crash consistency, and the
+  reconstruct_model fresh-start forensic clobber (LOW). Filed on the
+  board; neither review blocked this change's delta on them.
+- **Foreign gate blocker (not this change):** the torch-default backend
+  refusal at the unthreaded `magnitude_balance` call site (board ticket
+  for it already exists; sec-eng filed it). On this CPU-only host the
+  ptq solve-bearing tiers run green under ``SOLVER_BACKEND=numpy``, the
+  configuration both reviews certified; that env is recorded with every
+  gate run in this landing.
+
 ## User directive (2026-10-21)
 
 User: "Follow the paper TO THE LETTER; prove the paper's method is possible

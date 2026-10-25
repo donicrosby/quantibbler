@@ -196,7 +196,12 @@ def completed_blocks(ckpt_dir: Path) -> list[int]:
     for path in ckpt_dir.glob("block-*.npz"):
         try:
             with np.load(path) as npz:
-                names = {key.rsplit("|", 1)[0] for key in npz.files}
+                # The loader's key grammar, applied scan-side too: only
+                # ``|``-separated keys are layer fields. The reserved
+                # teacher-target key y_b carries no separator, so a
+                # y_b-only archive derives no layer name here either and
+                # is not counted as a done block.
+                names = {key.rsplit("|", 1)[0] for key in npz.files if "|" in key}
         except Exception as exc:  # unreadable archive: never a silent "done"
             print(
                 f"[checkpoint] ignoring unreadable archive {path.name}: {exc!r}",
@@ -331,7 +336,7 @@ def _archive_key(name: str, block_name: str) -> str:
 
 
 def apply_layer_states(
-    block: nn.Module, block_name: str, layers: list, expected_names=None
+    block: nn.Module, block_name: str, layers: list, expected_names: set
 ) -> None:
     """Write checkpointed bits+scales back into a block's linears.
 
@@ -344,30 +349,32 @@ def apply_layer_states(
 
     ``expected_names`` is the set of quantizable names the LIVE block is
     owed (the same predicate the solver scopes with — ``_quantizable_names``
-    filtered by ``layer_scope``), in the block's relative name space. When
-    supplied, the archive's present set is asserted EQUAL to it before any
-    write-back, and a symmetric difference raises naming the block and the
+    filtered by ``layer_scope``), in the block's relative name space. The
+    archive's present set is asserted EQUAL to it before any write-back,
+    and a symmetric difference raises naming the block and the
     missing/unexpected names (qk-fix-fp-resume-guard, scenario
-    ``restore_asserts_expected_equals_present``). The guard is driven by
-    what the block is OWED, never by what the archive happened to contain:
-    a hand-copied or truncated archive therefore fails loudly instead of
-    advancing the prefix on partially-restored weights.
+    ``restore_asserts_expected_equals_present``). The parameter is
+    required, not defaulted: a caller that cannot name what the live block
+    is owed has no business restoring into it, and an omitted guard is a
+    disarmed guard. The guard is driven by what the block is OWED, never
+    by what the archive happened to contain: a hand-copied or truncated
+    archive therefore fails loudly instead of advancing the prefix on
+    partially-restored weights.
     """
     by_rel = {}
     for st in layers:
         by_rel[_archive_key(st.name, block_name)] = st
-    if expected_names is not None:
-        expected = {_archive_key(name, block_name) for name in expected_names}
-        present = set(by_rel)
-        if expected != present:
-            missing = sorted(expected - present)
-            unexpected = sorted(present - expected)
-            raise RuntimeError(
-                f"checkpoint restore for block {block_name!r} is incomplete: the "
-                f"live block is owed {len(expected)} quantized layer(s), the archive "
-                f"holds {len(present)}; missing={missing}, unexpected={unexpected} "
-                "— refusing to advance the quantized prefix on a partial archive"
-            )
+    expected = {_archive_key(name, block_name) for name in expected_names}
+    present = set(by_rel)
+    if expected != present:
+        missing = sorted(expected - present)
+        unexpected = sorted(present - expected)
+        raise RuntimeError(
+            f"checkpoint restore for block {block_name!r} is incomplete: the "
+            f"live block is owed {len(expected)} quantized layer(s), the archive "
+            f"holds {len(present)}; missing={missing}, unexpected={unexpected} "
+            "— refusing to advance the quantized prefix on a partial archive"
+        )
     applied = set()
     for rel, module in block.named_modules():
         # Flat blocks (the block IS the Linear, e.g. _TinyApiModel.lin1)

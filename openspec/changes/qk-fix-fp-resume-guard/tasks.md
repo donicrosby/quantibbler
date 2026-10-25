@@ -14,25 +14,44 @@
   at restore; (b) a truncated archive (one missing linear) raises naming the
   missing name; (c) a good archive restores bit-exactly as before; (d) the
   rung-1 archive format still loads (backward compatibility).
-- [ ] (bug-hunter) Review on the landed bytes: prove by control-flow reading
+- [x] (bug-hunter) Review on the landed bytes: prove by control-flow reading
   that an empty archive cannot pass resume silently on any
   path (write → count → load → apply); confirm the expected-names predicate
   is the same one the solver scopes with; re-run the rung-1 corpse and fp
   archive checks.
-- [ ] (sec-eng) Integrity pass: the new raise cannot corrupt in-flight state
+  (bug-hunter 2026-10-25: done — control-flow proof + file:line in the
+  review verdict; expected-names predicate confirmed byte-identical at
+  block_recon.py:2003 == :1256 == :1337; corpse re-measured on live bytes
+  (two 22-byte zero-key archives, completed_blocks → []), 68 valid archives
+  still readable. Guard tier 13/13 green under a numpy-resolved backend;
+  default-env suite reds are the lb_admm.py:586 backend-refusal class, not
+  this change. Findings filed in the review comment.)
+- [x] (sec-eng) Integrity pass: the new raise cannot corrupt in-flight state
   (raise happens before any write-back); fail-closed semantics hold for
   hand-copied archives; the class-fix sweep report is complete or the
   waivers are explicit.
-- [ ] (orchestrator) `npx --yes @fission-ai/openspec validate
+- [x] (orchestrator) `npx --yes @fission-ai/openspec validate
   qk-fix-fp-resume-guard --strict`; commit (specs + code in one commit); do
   not archive until a resumed-run test against a deliberately truncated
   checkpoint directory fails loudly on record.
+  (orchestrator 2026-10-25: validate VALID, RC=0, one change id per
+  invocation. Fail-loud-on-truncated is on record: the guard tier's
+  `restore_asserts_expected_equals_present` scenario truncates a
+  two-layer archive to one and asserts the raise names the missing layer
+  BEFORE any write-back, and the e2e test asserts a seeded 22-byte empty
+  archive cannot skip a solve — both green in this landing's gate runs.
+  Scoped commit lands as this change's closing commit; `openspec
+  archive` deliberately deferred — archive-readiness is reported on the
+  ticket instead.)
 
 ## Implementation notes (coder, 2026-10-21)
 
 Landed on `src/quantibbler/ptq/checkpoints.py` and `block_recon.py`.
-Evidence: `tests/ptq/test_fp_resume_guard.py` (6 tests, including a real
-end-to-end resume against a hand-copied 22-byte empty archive).
+Evidence: `tests/ptq/test_fp_resume_guard.py` (9 tests, 11 collected items
+with the y_b dtype parametrize — including a real end-to-end resume against
+a hand-copied 22-byte empty archive; 2026-10-25 landing added the y_b-only
+scan-exclusion and required-`expected_names` tests from the review
+findings, RED→GREEN under `SOLVER_BACKEND=numpy`).
 
 **Class-fix sweep (sec-eng's ruling), complete:**
 

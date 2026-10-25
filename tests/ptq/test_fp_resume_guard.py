@@ -215,6 +215,33 @@ def test_empty_archive_never_skips_a_solve_end_to_end(tmp_path):
     assert resumed.serialize() == fresh
 
 
+def test_yb_only_archive_is_not_counted_done(tmp_path):
+    """A y_b-only archive carries no quantized-layer keys: never a done block.
+
+    The reserved teacher-target key (``_YB_KEY``) carries no ``|`` separator,
+    so it derives no layer name — the scan-side derivation must exclude it
+    exactly as ``load_block_checkpoint`` does. Otherwise a y_b-only archive
+    masquerades as a finished block and the next resume SKIPS that solve with
+    nothing restored: the same silent-prefix-advance shape as the zero-key
+    defect, one reserved key wide.
+    """
+    with open(tmp_path / "block-1.npz", "wb") as fh:
+        np.savez(fh, y_b=np.zeros((2, 3), dtype=np.float32))
+    assert completed_blocks(tmp_path) == []
+
+
+def test_expected_names_cannot_be_omitted(tmp_path):
+    """The expected-vs-present guard has no disarm-by-omission default.
+
+    A future caller that cannot name what the live block is owed has no
+    business restoring into it: the parameter is required, so omitting it is
+    a TypeError at the call, never a silently disarmed guard.
+    """
+    block = _Block()
+    with pytest.raises(TypeError):
+        apply_layer_states(block, "block0", [])
+
+
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
 def test_yb_low_precision_survives_the_numpy_hop(tmp_path, dtype):
     """bf16/f16 teacher targets must survive the ``.numpy()`` serialization hop.
