@@ -129,6 +129,7 @@ from quantibbler.qk_report import (
 from quantibbler.qk_report import (
     exit_code as verdict_exit_code,
 )
+from quantibbler.qpk1 import REPRESENTATION_VERSION as qpk1_version
 from quantibbler.serialization import LaunchAttributionRecord
 
 
@@ -638,7 +639,10 @@ def export_model_directory(
     # exactly the inventory-derived float count.
     first = sorted(layer_files.values())[0]
     header = struct.unpack("<4sIIIII", (out_dir / first).read_bytes()[:24])
-    assert header[0] == b"QPK1" and header[1] == 1, header
+    # The exporter writes the CURRENT representation version (bias-carrying);
+    # a stream that claims otherwise means the layer writer and this check
+    # have drifted apart.
+    assert header[0] == b"QPK1" and header[1] == qpk1_version, header
     # d_model as the loader computes it: the embedding column count (the
     # GQA rule n_kv*head_dim == d_model is enforced server-side; heads/width
     # need not equal it per-axis, so derive the count from the same place).

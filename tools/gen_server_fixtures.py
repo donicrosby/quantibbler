@@ -4,13 +4,22 @@
 Writes a minimal valid qpk1 model directory (the ``qk-server`` acquisition
 layout, design D3 of openspec/changes/qk-server) into
 ``tests/fixtures/server-model/`` plus one corrupted variant per SR-1.2
-rejection class into ``tests/fixtures/server-model-bad/<name>/``.
+rejection class into ``tests/fixtures/server-model-bad/<name>/``, and the
+bias-carrying version-2 twin into ``tests/fixtures/server-model-bias/``.
 
 Everything is byte-level against the pinned qpk1 layout (qk-representation,
-design D1): 24-byte u32 LE header (magic b"QPK1", version 1, dtype tag,
+design D1): 24-byte u32 LE header (magic b"QPK1", version, dtype tag,
 dout, din, r), then the scale vectors in the tagged dtype (float16 tag 1 /
-float32 tag 2), then packed uint8 Ub/Vb bitplanes -- row-major, LSB-first
-within bytes, +1 -> bit 1, -1 -> bit 0, zero pad to the byte boundary.
+float32 tag 2), then -- version 2 -- the (dout,) bias vector in that dtype,
+then packed uint8 Ub/Vb bitplanes -- row-major, LSB-first within bytes,
++1 -> bit 1, -1 -> bit 0, zero pad to the byte boundary.
+
+Two versions are produced on purpose. ``server-model`` is the committed
+PRE-BIAS artifact: it is version 1, and every server test that loads it is
+exercising the declared legacy reading (no bias field; the zero map).
+``server-model-bias`` is what the compressor writes today: version 2, with a
+deterministic non-zero bias on every projection, so the loader and the
+engine's forward are exercised on bias-carrying bytes.
 
 Pure Python stdlib (struct + manual bit packing); the Rust crate is never
 imported. Deterministic (fixed seeds); regenerating is idempotent, and
@@ -26,9 +35,13 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "server-model"
 BAD_DIR = REPO_ROOT / "tests" / "fixtures" / "server-model-bad"
+BIAS_DIR = REPO_ROOT / "tests" / "fixtures" / "server-model-bias"
 
 QPK1_MAGIC = b"QPK1"
-REPRESENTATION_VERSION = 1
+#: Version of the committed pre-bias fixture.
+LEGACY_REPRESENTATION_VERSION = 1
+#: Version the compressor writes: scales + a (dout,) bias vector.
+REPRESENTATION_VERSION = 2
 DTYPE_TAG_FLOAT16 = 1
 DTYPE_TAG_FLOAT32 = 2
 _HEADER = struct.Struct("<4sIIIII")
@@ -236,29 +249,52 @@ def qpk1_stream(
     dtype_tag: int = DTYPE_TAG_FLOAT16,
     s1: list[float] | None = None,
     s2: list[float] | None = None,
+    version: int = LEGACY_REPRESENTATION_VERSION,
+    bias: list[float] | None = None,
 ) -> bytes:
-    """Serialize one factorized linear layer to the canonical qpk1 stream."""
+    """Serialize one factorized linear layer to the canonical qpk1 stream.
+
+    ``version`` 1 is the pre-bias layout; version 2 appends the ``(dout,)``
+    bias vector between the scales and the bitplanes (all in the tagged
+    dtype). A version-2 stream always carries the vector -- ``bias=None``
+    writes zeros rather than omitting the field.
+    """
     ub = deterministic_signs(dout, r, seed)
     vb = deterministic_signs(din, r, seed + 1)
     if s1 is None:
         s1 = [round(0.5 + 0.25 * ((seed + k) % 5) / 5.0, 4) for k in range(dout)]
     if s2 is None:
         s2 = [round(0.4 + 0.2 * ((seed + k) % 3) / 3.0, 4) for k in range(din)]
+    if bias is None:
+        bias = [0.0] * dout
     if dtype_tag == DTYPE_TAG_FLOAT16:
         s1_bytes = b"".join(f16_bytes(v) for v in s1)
         s2_bytes = b"".join(f16_bytes(v) for v in s2)
+        bias_bytes = b"".join(f16_bytes(v) for v in bias)
     elif dtype_tag == DTYPE_TAG_FLOAT32:
         s1_bytes = struct.pack(f"<{dout}f", *map(float, s1))
         s2_bytes = struct.pack(f"<{din}f", *map(float, s2))
+        bias_bytes = struct.pack(f"<{dout}f", *map(float, bias))
     else:
         raise ValueError(f"unknown dtype tag {dtype_tag}")
-    header = _HEADER.pack(QPK1_MAGIC, REPRESENTATION_VERSION, dtype_tag, dout, din, r)
-    return header + s1_bytes + s2_bytes + pack_bits(ub) + pack_bits(vb), (ub, vb, s1, s2)
+    if version not in (LEGACY_REPRESENTATION_VERSION, REPRESENTATION_VERSION):
+        raise ValueError(f"unknown representation version {version}")
+    header = _HEADER.pack(QPK1_MAGIC, version, dtype_tag, dout, din, r)
+    body = s1_bytes + s2_bytes
+    if version == REPRESENTATION_VERSION:
+        body += bias_bytes
+    return header + body + pack_bits(ub) + pack_bits(vb), (ub, vb, s1, s2)
 
 
-def expected_size(dout: int, din: int, r: int, w: int) -> int:
-    """qk-representation SF-1.1 size formula."""
-    return 24 + (dout + din) * w + (dout * r + 7) // 8 + (din * r + 7) // 8
+def expected_size(dout: int, din: int, r: int, w: int, with_bias: bool = False) -> int:
+    """SF-1.1 size formula, at the version-2 float count when ``with_bias``."""
+    floats = (2 * dout + din) if with_bias else (dout + din)
+    return 24 + floats * w + (dout * r + 7) // 8 + (din * r + 7) // 8
+
+
+def deterministic_bias(dout: int, seed: int) -> list[float]:
+    """splitmix-driven bias vector: non-zero, deterministic, reviewable."""
+    return [round(0.05 + 0.1 * ((seed + 3 * k) % 5), 4) for k in range(dout)]
 
 
 # One real transformer block's projections: the
@@ -279,20 +315,34 @@ PROBE_LAYER = "layers.0.inner.self_attn.q_proj"
 PROBE_FILE = "layers/q_proj.qpk1"
 
 
-def build_valid_model(root: Path) -> None:
-    """Write the valid fixture model directory (one transformer block)."""
+def build_model(root: Path, *, model_id: str, version: int) -> None:
+    """Write one fixture model directory (one transformer block).
+
+    ``version`` selects the container version: 1 for the committed pre-bias
+    artifact, 2 for the bias-carrying twin, whose every projection carries a
+    deterministic non-zero bias.
+    """
     import shutil
 
     if root.exists():
         shutil.rmtree(root)  # regenerate clean: no stale layer files
     (root / "layers").mkdir(parents=True, exist_ok=True)
     dout, din, r = 4, 4, 4
-    expected = expected_size(dout, din, r, 2)
+    with_bias = version == REPRESENTATION_VERSION
+    expected = expected_size(dout, din, r, 2, with_bias=with_bias)
     entries = []
     for i, name in enumerate(BLOCK_PROJECTIONS):
         stem = name.rsplit(".", 1)[-1]
         rel = f"layers/{stem}.qpk1"
-        stream, _ = qpk1_stream(dout, din, r, seed=20261017 + i)
+        seed = 20261017 + i
+        stream, _ = qpk1_stream(
+            dout,
+            din,
+            r,
+            seed=seed,
+            version=version,
+            bias=deterministic_bias(dout, seed) if with_bias else None,
+        )
         layer_path = root / rel
         layer_path.write_bytes(stream)
         actual = layer_path.stat().st_size
@@ -303,7 +353,7 @@ def build_valid_model(root: Path) -> None:
     manifest_files = "\n".join(f'"{n}" = "{rel}"' for n, rel in entries)
     (root / "manifest.toml").write_text(
         "# qk-server fixture manifest (design D3)\n"
-        'model_id = "server-model-fixture"\n'
+        f'model_id = "{model_id}"\n'
         f"layers = [\n{manifest_layers},\n]\n"
         "\n"
         "[layer_files]\n"
@@ -339,6 +389,16 @@ def build_valid_model(root: Path) -> None:
         emb[i] = ((i % 7) - 3) * 0.25
     (root / "e1.f32.bin").write_bytes(emb.tobytes())
     write_norms_sidecar(root)
+
+
+def build_valid_model(root: Path) -> None:
+    """The committed PRE-BIAS fixture: version 1, no bias field."""
+    build_model(root, model_id="server-model-fixture", version=LEGACY_REPRESENTATION_VERSION)
+
+
+def build_bias_model(root: Path) -> None:
+    """The bias-carrying version-2 twin of the same model directory."""
+    build_model(root, model_id="server-model-bias-fixture", version=REPRESENTATION_VERSION)
 
 
 def build_bad_variants(base: Path) -> dict[str, str]:
@@ -565,6 +625,8 @@ def build_bad_variants(base: Path) -> dict[str, str]:
 def main() -> None:
     build_valid_model(FIXTURE_DIR)
     print(f"wrote {FIXTURE_DIR}")
+    build_bias_model(BIAS_DIR)
+    print(f"wrote {BIAS_DIR}")
     variants = build_bad_variants(BAD_DIR)
     for _name, path in sorted(variants.items()):
         print(f"wrote {path}")

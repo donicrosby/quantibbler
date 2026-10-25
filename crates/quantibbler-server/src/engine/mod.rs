@@ -315,6 +315,10 @@ pub struct PackedLayer {
     pub s1_f32: Vec<f32>,
     /// s2 as float32.
     pub s2_f32: Vec<f32>,
+    /// Bias as float32, exactly `dout` entries. A version-1 stream carries no
+    /// bias vector and normalizes to `dout` zeros — the declared legacy rule,
+    /// so `apply` needs no version branch.
+    pub bias_f32: Vec<f32>,
     /// Ub in kernels per-row bitplane layout: `dout * ceil(r/8)` bytes.
     pub ub_rows: Vec<u8>,
     /// Vb in kernels per-row bitplane layout: `din * ceil(r/8)` bytes.
@@ -345,6 +349,18 @@ impl PackedLayer {
                 "layer {name}: bitplane length mismatch after repack"
             )));
         }
+        if !layer.bias.is_empty() && layer.bias.len() != layer.dout {
+            return Err(EngineError(format!(
+                "layer {name}: bias has {} entries; expected dout={}",
+                layer.bias.len(),
+                layer.dout
+            )));
+        }
+        let bias_f32 = if layer.bias.is_empty() {
+            vec![0.0f32; layer.dout] // legacy v1: the zero map
+        } else {
+            layer.bias.iter().map(|&v| v as f32).collect()
+        };
         Ok(Self {
             name,
             dout: layer.dout,
@@ -352,15 +368,18 @@ impl PackedLayer {
             r: layer.r,
             s1_f32: layer.s1.iter().map(|&v| v as f32).collect(),
             s2_f32: layer.s2.iter().map(|&v| v as f32).collect(),
+            bias_f32,
             ub_rows,
             vb_rows,
             vb_t_rows,
         })
     }
 
-    /// `y = diag(s1) @ (Ub @ (Vb^T @ (diag(s2) @ x)))` — the factorized
-    /// linear transform `x -> W x` with
-    /// `W = diag(s1) (Ub Vb^T) diag(s2)` (qk-representation Eq. 1).
+    /// `y = diag(s1) @ (Ub @ (Vb^T @ (diag(s2) @ x))) + bias` — the
+    /// factorized linear transform `x -> W x + b` with
+    /// `W = diag(s1) (Ub Vb^T) diag(s2)` (qk-representation Eq. 1) and the
+    /// per-linear bias the container carries. A legacy version-1 stream
+    /// contributes an all-zero bias, so the map is the one it always was.
     ///
     /// Bitplane products go through the selected matvec face (task 3.4):
     /// the kernels rlib by default, or the CubeCL HIP face under
@@ -399,7 +418,8 @@ impl PackedLayer {
         };
         Ok(u.iter()
             .zip(&self.s1_f32)
-            .map(|(&u_i, &s1_i)| (u_i as f32) * s1_i)
+            .zip(&self.bias_f32)
+            .map(|((&u_i, &s1_i), &b_i)| (u_i as f32) * s1_i + b_i)
             .collect())
     }
 }
@@ -1402,15 +1422,28 @@ mod tests {
         }
         let vb = vec![0xffu8; (din * r) / 8];
         Layer {
+            // A version-1 legacy layer: no bias term, so the dense reference
+            // below is the pure factorized product.
+            version: quantibbler_qpk1::LEGACY_VERSION,
             dout,
             din,
             r,
             dtype: ScaleDtype::Float16,
             s1: vec![1.0, 0.5, -2.0, 0.25],
             s2: vec![0.25, -0.5, 2.0, 1.0],
+            bias: Vec::new(),
             ub_packed: ub,
             vb_packed: vb,
         }
+    }
+
+    /// `layer_fixture`'s factors/scales at version 2, plus a known
+    /// per-output bias.
+    fn bias_layer_fixture() -> Layer {
+        let mut layer = layer_fixture();
+        layer.version = quantibbler_qpk1::VERSION;
+        layer.bias = vec![0.5, -1.5, 2.0, -0.25];
+        layer
     }
 
     #[test]
@@ -1469,6 +1502,33 @@ mod tests {
                 "got {g}, expected {expected}"
             );
         }
+    }
+
+    /// `apply` is `W x + b`: the parsed bias is added per output feature, and
+    /// a biasless (legacy) layer adds exactly zeros.
+    #[test]
+    fn layer_apply_adds_the_parsed_bias() {
+        let x = [0.5f32, -1.25, 2.0, 0.0];
+        let legacy = PackedLayer::from_layer("l0".into(), &layer_fixture()).expect("layer ok");
+        let biased = PackedLayer::from_layer("l0".into(), &bias_layer_fixture()).expect("layer ok");
+        assert_eq!(legacy.bias_f32, vec![0.0f32; 4], "legacy reads as zeros");
+        assert_eq!(biased.bias_f32, vec![0.5f32, -1.5, 2.0, -0.25]);
+
+        let y0 = legacy.apply(&MatvecFace::Cpu, &x).expect("apply ok");
+        let y1 = biased.apply(&MatvecFace::Cpu, &x).expect("apply ok");
+        assert_eq!(y0.len(), y1.len());
+        for ((a, b), &bias) in y0.iter().zip(&y1).zip(&biased.bias_f32) {
+            // The ONLY difference between the two layers is the bias vector.
+            assert!(
+                (f64::from(*b) - (f64::from(*a) + f64::from(bias))).abs() < 1e-6,
+                "bias not applied: {a} + {bias} != {b}"
+            );
+        }
+        // A wrong-width bias vector is a load-time error, not a silent
+        // truncation or a panic inside the hot loop.
+        let mut bad = bias_layer_fixture();
+        bad.bias.pop();
+        assert!(PackedLayer::from_layer("l0".into(), &bad).is_err());
     }
 
     #[test]

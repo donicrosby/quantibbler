@@ -22,6 +22,14 @@ pub fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/server-model")
 }
 
+/// The bias-carrying twin of `fixture_dir()`: the same geometry, tokenizer
+/// and sidecars with version-2 layer streams (a non-zero bias on every
+/// projection). `fixture_dir()` stays the committed PRE-BIAS artifact, so
+/// loading it is the legacy-reading path.
+pub fn bias_fixture_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/server-model-bias")
+}
+
 pub fn bad_fixture_dir(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/server-model-bad")

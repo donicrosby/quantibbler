@@ -172,6 +172,11 @@ def _tune_fp(
         "initial_residual_norm": None,
         "residual_after": None,
         "weight_delta_rel": None,
+        # Bias is a first-class tuned quantity (the container carries it), so
+        # its movement is recorded separately from the aggregate: the weight
+        # figure alone cannot say whether the stage's bias compensation is
+        # real. `None` = the stage never ran far enough to have an answer.
+        "bias_delta_rel": None,
         "vacuous": False,
         # Inertness is DECLARED, not implied (qk-tune-loss-scale, requirement 3):
         # `None` means the stage did not run far enough to have an answer, never
@@ -210,6 +215,7 @@ def _tune_fp(
         wanted = set(tune_names)
         linears = [(n, m) for n, m in all_linears if n in wanted]
     params = [p for _, m in linears for p in m.parameters()]
+    bias_params = [m.bias for _, m in linears if m.bias is not None]
     if not params:
         stats["steps"] = 0
         _stamp()
@@ -234,6 +240,7 @@ def _tune_fp(
     bs = max(1, min(batch_size, n))
     total = max(cfg.stage_pre.epochs * (n // bs), 1)
     snapshot = [p.detach().clone() for p in params]
+    bias_snapshot = [p.detach().clone() for p in bias_params]
     before_residual = _residual()
     skipped = 0
     # TuneFP is one of the two stages that dominate wall time, so it is the one
@@ -349,6 +356,13 @@ def _tune_fp(
     stats["residual_before"] = before_residual
     delta_rel = float(np.sqrt(num) / np.sqrt(den)) if den > 0.0 else 0.0
     stats["weight_delta_rel"] = delta_rel
+    if bias_params:
+        bnum = bden = 0.0
+        with torch.no_grad():
+            for p, p0 in zip(bias_params, bias_snapshot, strict=True):
+                bnum += float((p.detach() - p0).pow(2).sum())
+                bden += float(p0.pow(2).sum())
+        stats["bias_delta_rel"] = float(np.sqrt(bnum) / np.sqrt(bden)) if bden > 0.0 else 0.0
     # Inertness is DECLARED, not implied (qk-tune-loss-scale, requirement 3): a
     # stage that ran steps and moved its parameters by less than the parameter
     # dtype's relative resolution did nothing measurable, and the record says so

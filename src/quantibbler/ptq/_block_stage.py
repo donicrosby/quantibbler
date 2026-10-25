@@ -193,14 +193,11 @@ def reconstruct_block(
 
     # --- Step 1: TuneFP (line 12) is fired INSIDE the factorization loop
     # below, at the [NQ] Figure 3 placement (after Q/K/V, before O/G/U/D).
-    # The fp block's bias may move there (it shapes the teacher target), but
-    # the factorized replacement reverts to the pre-TuneFP bias: the artifact
-    # has no bias field, so the quantized layer must carry the host's own
-    # bias for the round trip to close.
-    original_bias = {
-        name: (m.bias.detach().clone() if m.bias is not None else None)
-        for name, m in quantizable_linears
-    }
+    # TuneFP's optimizer step moves the remainder linears' bias along with
+    # their weights, and the container carries a per-linear bias, so the
+    # factorized replacement takes the bias the tuning produced: [NQ] App. C
+    # makes the tuned values the product of the stage, and the compensation
+    # the stage computed must not be discarded at factorization.
 
     # --- Step 2: per-linear-layer LB-ADMM (lines 14-17). Statistics for
     # the block come from Phase 1 bookkeeping, or a local pass when absent.
@@ -436,15 +433,14 @@ def reconstruct_block(
             s2_p = to_host_np(bal.s2)
         s1_np = np.ascontiguousarray(s1_p)
         s2_np = np.ascontiguousarray(s2_p)
-        bias0 = original_bias[name]
-        fac = FactorizedLinear(
-            u0,
-            v0,
-            bias0
-            if bias0 is not None
-            else torch.zeros(linear.weight.shape[0], device=linear.weight.device),
-            factor_mode=cfg.factor_mode,
+        # The LIVE bias, i.e. whatever TuneFP just tuned for this target (the
+        # pre-TuneFP value only for target 1, which no TuneFP pass precedes).
+        bias0 = (
+            linear.bias.detach().to(torch.float64).clone()
+            if linear.bias is not None
+            else torch.zeros(linear.weight.shape[0], device=linear.weight.device)
         )
+        fac = FactorizedLinear(u0, v0, bias0, factor_mode=cfg.factor_mode)
         # Scales initialized from Eq. 8 (with the latent scale folded in).
         with torch.no_grad():
             # copy_ requires matching devices; the numpy round trip through the CPU solver
@@ -453,14 +449,11 @@ def reconstruct_block(
             fac.s2.copy_(torch.from_numpy(s2_np).to(fac.s2.device))
         facs[name] = fac
         # Freeze this linear's factorized weight into the module NOW: every
-        # later stage in the block (the per-layer STE below, the TuneFP pass,
+        # later stage in the block (the joint STE below, the TuneFP pass,
         # the next layer's statistics-free solve) must see the quantized
-        # version of the layers already factorized. The pre-TuneFP bias is
-        # restored first — TuneFP's fp-bias move is not part of the artifact
-        # (no bias field in qpk1).
-        if original_bias[name] is not None:
-            with torch.no_grad():
-                linear.bias.copy_(original_bias[name].to(linear.bias.dtype))
+        # version of the layers already factorized. The tuned bias goes with
+        # it (see the loop head) — this linear is out of the tunable
+        # remainder from here on, so its bias is final.
         _set_linear(linear, fac, factor_mode=cfg.factor_mode)
 
         # The refinement does NOT run here: it is ONE joint pass over the whole
@@ -633,13 +626,10 @@ def reconstruct_block(
             layers.append(st)
         # Freeze the effective weight into the module for subsequent prefix
         # capture (the module graph keeps working for later blocks) — the
-        # continuous fp factorization in fp mode, the binary one otherwise. The
-        # pre-TuneFP bias is restored first — TuneFP's fp-bias move is not
-        # part of the artifact (no bias field in qpk1).
+        # continuous fp factorization in fp mode, the binary one otherwise.
+        # The bias written here is the one the artifact carries, so the host
+        # forward equals the reloaded artifact's forward.
         linear = linears_by_name[name]
-        if linear.bias is not None and original_bias[name] is not None:
-            with torch.no_grad():
-                linear.bias.copy_(original_bias[name].to(linear.bias.dtype))
         _set_linear(linear, fac, factor_mode=cfg.factor_mode)
 
     if recorder is not None:

@@ -7,18 +7,25 @@
 //! there is exactly one reader implementation per language, and the server
 //! no longer carries a private copy.
 //!
-//! Byte layout (qk-representation design D1/D2, pinned by that capability's
-//! spec): 24-byte u32 LE header — magic `QPK1`, version 1, dtype tag
-//! (1 = float16, 2 = float32), dims `dout`, `din`, rank `r` — then the
-//! scale vectors in the tagged dtype, then the packed uint8 `Ub`/`Vb`
+//! Byte layout (qk-representation design D1/D2, extended by the bias-carry
+//! decisions D10/D11): 24-byte u32 LE header — magic `QPK1`, version, dtype
+//! tag (1 = float16, 2 = float32), dims `dout`, `din`, rank `r` — then the
+//! scale vectors in the tagged dtype, then (version 2 onward) the `(dout,)`
+//! bias vector in that same dtype, then the packed uint8 `Ub`/`Vb`
 //! bitplanes. Bitplanes are row-major with ONE continuous bit stream per
 //! matrix (element `(i, j)` at stream bit `i*r + j`, LSB-first within
-//! bytes; `+1 -> bit 1`, `-1 -> bit 0`, zero pad). Scale vectors are plain
-//! LE floats.
+//! bytes; `+1 -> bit 1`, `-1 -> bit 0`, zero pad). Scale and bias vectors
+//! are plain LE floats.
 //!
-//! Fail-closed reader rules (SF-1.4 / SR-1.2): bad magic, version != 1,
-//! unknown dtype tag, non-positive dims, truncation, and trailing bytes
-//! are all hard rejections; no partial layer is ever returned. Rank
+//! Version semantics: version 2 is what the compressor writes and carries a
+//! bias vector; version 1 is the pre-bias artifact. A version-1 stream is
+//! read with an EMPTY `Layer::bias` — the declared legacy rule (a biasless
+//! linear's map is the zero vector), never a silent default for a missing
+//! field on a current stream.
+//!
+//! Fail-closed reader rules (SF-1.4 / SR-1.2): bad magic, a version outside
+//! {1, 2}, unknown dtype tag, non-positive dims, truncation, and trailing
+//! bytes are all hard rejections; no partial layer is ever returned. Rank
 //! feasibility (`r <= min(dout, din)`) is a reader-side gate applied by the
 //! model loader (matching `qk-representation`'s deserialize) — this module
 //! exposes the parsed header so the caller can name the file in that
@@ -50,6 +57,9 @@ impl ScaleDtype {
 /// One deserialized qpk1 layer, in serialized layout.
 #[derive(Debug, Clone)]
 pub struct Layer {
+    /// The stream's representation version (2 carries a bias vector;
+    /// 1 is the pre-bias legacy reading).
+    pub version: u32,
     pub dout: usize,
     pub din: usize,
     pub r: usize,
@@ -60,6 +70,10 @@ pub struct Layer {
     /// float64 scales (float16 values widened exactly; f16 -> f64 is exact).
     pub s1: Vec<f64>,
     pub s2: Vec<f64>,
+    /// float64 bias, `dout` entries. EMPTY on a legacy version-1 stream:
+    /// consumers read an empty vector as "no bias term" (the declared
+    /// legacy rule), never as a missing field on a current stream.
+    pub bias: Vec<f64>,
     /// Canonical (continuous-bit) bitplane for Ub, exactly
     /// `(dout*r + 7) / 8` bytes.
     pub ub_packed: Vec<u8>,
@@ -70,7 +84,10 @@ pub struct Layer {
 
 const HEADER_LEN: usize = 24;
 const MAGIC: [u8; 4] = *b"QPK1";
-const VERSION: u32 = 1;
+/// Version the compressor writes: scales + a `(dout,)` bias vector.
+pub const VERSION: u32 = 2;
+/// Pre-bias artifacts. Read-only legacy: parsed with an empty bias vector.
+pub const LEGACY_VERSION: u32 = 1;
 const TAG_FLOAT16: u32 = 1;
 const TAG_FLOAT32: u32 = 2;
 
@@ -84,9 +101,21 @@ fn u32le(bytes: &[u8], offset: usize) -> u32 {
 }
 
 /// Exact stream size for `(dout, din, r)` at the tagged scale itemsize
-/// (qk-representation SF-1.1 formula).
-pub fn expected_size(dout: usize, din: usize, r: usize, dtype: ScaleDtype) -> usize {
-    HEADER_LEN + (dout + din) * dtype.itemsize() + (dout * r).div_ceil(8) + (din * r).div_ceil(8)
+/// (qk-representation SF-1.1 formula, version 2). `with_bias` adds the
+/// `(dout,)` bias vector's floats; pass `false` for a version-1 stream.
+pub fn expected_size(
+    dout: usize,
+    din: usize,
+    r: usize,
+    dtype: ScaleDtype,
+    with_bias: bool,
+) -> usize {
+    let floats = if with_bias {
+        2 * dout + din
+    } else {
+        dout + din
+    };
+    HEADER_LEN + floats * dtype.itemsize() + (dout * r).div_ceil(8) + (din * r).div_ceil(8)
 }
 
 /// IEEE binary16 -> float64, exact (std-only bit twiddling).
@@ -136,9 +165,10 @@ pub fn parse(bytes: &[u8]) -> Result<Layer, String> {
         return Err(format!("bad magic {:?}; expected {MAGIC:?}", &bytes[0..4]));
     }
     let version = u32le(bytes, 4);
-    if version != VERSION {
+    if version != LEGACY_VERSION && version != VERSION {
         return Err(format!(
-            "unsupported representation version {version}; this reader implements version {VERSION} only"
+            "unsupported representation version {version}; this reader implements version \
+             {LEGACY_VERSION} (pre-bias legacy) and version {VERSION} (current, with bias)"
         ));
     }
     let tag = u32le(bytes, 8);
@@ -159,7 +189,8 @@ pub fn parse(bytes: &[u8]) -> Result<Layer, String> {
             "dout, din and r must all be >= 1, got ({dout}, {din}, {r})"
         ));
     }
-    let expected = expected_size(dout, din, r, dtype);
+    let has_bias = version >= VERSION;
+    let expected = expected_size(dout, din, r, dtype, has_bias);
     if bytes.len() < expected {
         return Err(format!(
             "truncated stream: {} bytes; header declares {expected}",
@@ -186,18 +217,31 @@ pub fn parse(bytes: &[u8]) -> Result<Layer, String> {
         ScaleDtype::Float32 => f32_vec(&bytes[offset..offset + s2_len]),
     };
     offset += s2_len;
+    let bias = if has_bias {
+        let bias_len = dout * dtype.itemsize();
+        let decoded = match dtype {
+            ScaleDtype::Float16 => f16_vec(&bytes[offset..offset + bias_len]),
+            ScaleDtype::Float32 => f32_vec(&bytes[offset..offset + bias_len]),
+        };
+        offset += bias_len;
+        decoded
+    } else {
+        Vec::new()
+    };
     let ub_len = (dout * r).div_ceil(8);
     let vb_len = (din * r).div_ceil(8);
     let ub_packed = bytes[offset..offset + ub_len].to_vec();
     offset += ub_len;
     let vb_packed = bytes[offset..offset + vb_len].to_vec();
     Ok(Layer {
+        version,
         dout,
         din,
         r,
         dtype,
         s1,
         s2,
+        bias,
         ub_packed,
         vb_packed,
     })
@@ -208,7 +252,9 @@ mod tests {
     use super::*;
 
     /// SF-1.3 known layer (dout=3, din=5, r=7, float16): the pinned 48-byte
-    /// stream from tests/test_representation.py (qk-representation lane).
+    /// VERSION-1 stream from tests/test_representation.py (qk-representation
+    /// lane). A version-1 stream is the pre-bias legacy artifact: it parses
+    /// to an EMPTY bias vector, i.e. the zero map a biasless linear applies.
     /// The writer-only fixture is rank-infeasible (7 > min(3, 5)) so the
     /// full model loader rejects it; the byte-level parse must still match
     /// it field-for-field (IA5 / e2e anchor, task 6.1).
@@ -226,18 +272,92 @@ mod tests {
              55e6413503";
         let bytes = hex_bytes(EXPECTED);
         let layer = parse(&bytes).expect("byte-legal stream parses");
+        assert_eq!(layer.version, LEGACY_VERSION);
         assert_eq!(layer.dout, 3);
         assert_eq!(layer.din, 5);
         assert_eq!(layer.r, 7);
         assert_eq!(layer.dtype, ScaleDtype::Float16);
         assert_eq!(layer.s1, vec![1.0, 0.5, -2.0]);
         assert_eq!(layer.s2, vec![0.25, -0.5, 2.0, 1.0, 0.125]);
+        // A pre-bias stream carries no bias, and an empty vector IS the zero
+        // map: the declared legacy reading, not a missing-field default.
+        assert!(layer.bias.is_empty());
         assert_eq!(layer.ub_packed, vec![0x2b, 0x73, 0x07]);
         assert_eq!(layer.vb_packed, vec![0x55, 0xe6, 0x41, 0x35, 0x03]);
         // Reader-side rank feasibility (qk-representation deserialize rule)
         // is applied by the model loader; assert the raw header here so the
         // loader's rejection is provably about the rank gate.
         assert!(layer.r > layer.dout.min(layer.din));
+    }
+
+    /// The version-2 pinned vector, byte-identical to what
+    /// `qpk1.serialize(...)` produces in tests/test_representation.py for the
+    /// same inputs — one bias-carrying vector, both faces, same bytes.
+    /// dout=3, din=5, r=3, float16, bias `[1.0, -0.5, 2.0]`. 50 bytes:
+    /// 24 + (2*3 + 5)*2 + ceil(9/8) + ceil(15/8).
+    #[test]
+    fn parses_the_v2_bias_carrying_vector_from_the_python_face() {
+        const EXPECTED: &str = "51504b31\
+             02000000\
+             01000000\
+             03000000\
+             05000000\
+             03000000\
+             003c003800c0\
+             003400b80040003c0030\
+             003c00b80040\
+             7301\
+             e535";
+        let bytes = hex_bytes(EXPECTED);
+        assert_eq!(bytes.len(), 50);
+        assert_eq!(
+            expected_size(3, 5, 3, ScaleDtype::Float16, true),
+            bytes.len()
+        );
+        let layer = parse(&bytes).expect("v2 stream parses");
+        assert_eq!(layer.version, VERSION);
+        assert_eq!(layer.dout, 3);
+        assert_eq!(layer.din, 5);
+        assert_eq!(layer.r, 3);
+        assert_eq!(layer.dtype, ScaleDtype::Float16);
+        assert_eq!(layer.s1, vec![1.0, 0.5, -2.0]);
+        assert_eq!(layer.s2, vec![0.25, -0.5, 2.0, 1.0, 0.125]);
+        // The bias vector sits between the scales and the bitplanes.
+        assert_eq!(layer.bias, vec![1.0, -0.5, 2.0]);
+        assert_eq!(layer.ub_packed, vec![0x73, 0x01]);
+        assert_eq!(layer.vb_packed, vec![0xe5, 0x35]);
+        // The same header at version 1 is one bias vector shorter.
+        let mut legacy = bytes.clone();
+        legacy.drain(40..46);
+        legacy[4..8].copy_from_slice(&LEGACY_VERSION.to_le_bytes());
+        let legacy = parse(&legacy).expect("v1 sibling of the same layer parses");
+        assert_eq!(legacy.version, LEGACY_VERSION);
+        assert!(legacy.bias.is_empty());
+        assert_eq!(legacy.ub_packed, layer.ub_packed);
+        assert_eq!(legacy.vb_packed, layer.vb_packed);
+    }
+
+    /// A version-2 header whose body is short by the bias vector's bytes is
+    /// a truncation; one byte past the extent is trailing garbage. Neither
+    /// may be read as a silent zero bias.
+    #[test]
+    fn rejects_a_v2_stream_missing_its_bias_vector() {
+        const V2: &str = "51504b31\
+             02000000\
+             01000000\
+             03000000\
+             05000000\
+             03000000\
+             003c003800c0\
+             003400b80040003c0030\
+             003c00b80040\
+             7301\
+             e535";
+        let bytes = hex_bytes(V2);
+        assert!(parse(&bytes[..44]).is_err(), "v2 truncation must reject");
+        let mut long = bytes.clone();
+        long.push(0);
+        assert!(parse(&long).is_err(), "v2 trailing byte must reject");
     }
 
     /// Decode a hex string to bytes (test helper).

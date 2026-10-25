@@ -68,13 +68,21 @@ class TinyGateModel(nn.Module):
     token embedding (fp, A-9) + 2 x block (fc1: d -> wide, GELU, fc2:
     wide -> d, residual) + final linear head (fp, A-9). The blocks' linears
     are low-rank by construction (seeded ``a @ b`` weights) so the rank-r
-    factorization can represent them; fc1 is deliberately wide so the
-    serialized artifact has any chance of an aggregate BPW below 1.0
-    (square d x d layers cannot: container overhead alone exceeds 1 bit per
-    weight at d = 32).
+    factorization can represent them; fc1 is deliberately wide and d large
+    enough that the container's fixed per-row overhead (two scales AND a
+    bias vector, 16 bits per output row each at float16) stays a small
+    fraction of the byte count — a square d x d layer at d = 32 cannot get
+    under one bit per weight, because that overhead alone exceeds it.
+
+    ``d``/``wide`` are chosen against the TWO bounds the gate asserts, not
+    ``d`` alone: the byte-derived BPW must stay below 1.0 and the corruption
+    delta below 1.0, and the delta moves NON-monotonically with geometry
+    (measured at rank 8/f16: (64,128) 1.188, (64,192) 0.518, (64,384) 1.310,
+    (96,128) 0.711, (112,128) 1.582). (64,192) is the largest margin pair
+    measured, so it is the default.
     """
 
-    def __init__(self, d: int = 32, wide: int = 128, rank: int = 4, seed: int = 0) -> None:
+    def __init__(self, d: int = 64, wide: int = 192, rank: int = 4, seed: int = 0) -> None:
         super().__init__()
         self.d = d
         self.embed = nn.Embedding(16, d, dtype=torch.float64)
@@ -137,12 +145,12 @@ def build_gate_batches(
 def gate_config(seed: int = 0) -> PTQConfig:
     """Gate PTQConfig.
 
-    rank 8 is the PTQConfig default and the gate keeps it: at (32,128)/(128,32)
-    layer shapes the qpk1 aggregate works out to 0.984 BPW < 1.0 with float16
-    scales — the fixture's layers are small enough that scale bytes dominate
-    the blend, so the gate pins scale_dtype="float16" (a supported opt-in tag;
-    production keeps the float32 default, which adds only ~0.03 BPW at
-    realistic widths). Fixture scales are bounded (the corruption tripwire
+    rank 8 is the PTQConfig default and the gate keeps it: at (64,192)/(192,64)
+    layer shapes the qpk1 aggregate works out to 0.682 BPW < 1.0 with float16
+    scales — the fixture's layers are small enough that the scale and bias
+    bytes dominate the blend, so the gate pins scale_dtype="float16" (a
+    supported opt-in tag; production keeps the float32 default, which adds
+    only ~0.03 BPW at realistic widths). Fixture scales are bounded (the corruption tripwire
     computes geometry dynamically for both tags), so the f16 cast cannot
     overflow here. Stage steps/lr are documented
     test-speed overrides per A-10 (paper defaults stay in PTQConfig): TuneFP

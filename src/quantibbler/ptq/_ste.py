@@ -65,11 +65,10 @@ def _tune_latent_ste(
     declaration — a silent zero-flip completion cannot be produced here,
     because the counts leave the stage in the returned record.
 
-    The bias is deliberately NOT a refinement parameter: the qpk1 container
-    carries no bias field, so a bias moved during refinement would make the
-    artifact unreproducible from bits + scales + host (the reload-then-
-    forward equality of the round-trip requirement). The factorized layer
-    keeps the layer's pre-pipeline bias.
+    The bias is deliberately NOT a refinement parameter: the container's bias
+    field is the TuneFP stage's product, so a bias moved here would be a
+    second, unstated producer of the same artifact field. Each factorized
+    layer keeps the bias it was constructed with, verbatim.
     """
     t_stage = time.perf_counter()
     params = [p for fac in facs.values() for p in (fac.u_latent, fac.v_latent, fac.s1, fac.s2)]

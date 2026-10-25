@@ -304,7 +304,7 @@ class QuantizedModel:
             )
         dtype = np.float16 if self.config.scale_dtype == "float16" else np.float32
         return {
-            name: qpk1.serialize(st.Ub, st.Vb, st.s1, st.s2, dtype=dtype)
+            name: qpk1.serialize(st.Ub, st.Vb, st.s1, st.s2, bias=st.bias, dtype=dtype)
             for name, st in self.layers.items()
         }
 
@@ -314,10 +314,11 @@ class QuantizedModel:
     ) -> QuantizedModel:
         """Reload from qpk1 byte streams (fail-closed reader, D8).
 
-        Bias vectors are not part of the qpk1 container; attach the artifact
-        to a host model (:meth:`attach_to`) to recover a full forward state,
-        or forward through the recorded fp stem + post-head of the run that
-        produced the artifact.
+        A version-2 stream carries the layer's bias; a version-1 (pre-bias)
+        stream reads with ``st.bias is None``, leaving a host model's own bias
+        standing. Attach the artifact to a host model (:meth:`attach_to`) to
+        recover a full forward state, or forward through the recorded fp stem
+        + post-head of the run that produced the artifact.
         """
         from .. import qpk1
 
@@ -330,7 +331,7 @@ class QuantizedModel:
                 layer.Vb,
                 np.asarray(layer.s1, dtype=np.float64),
                 np.asarray(layer.s2, dtype=np.float64),
-                None,
+                None if layer.bias is None else np.asarray(layer.bias, dtype=np.float64),
             )
         return cls(layers, config or PTQConfig())
 
@@ -354,10 +355,9 @@ class QuantizedModel:
             with torch.no_grad():
                 linear.weight.copy_(torch.from_numpy(np.ascontiguousarray(w_q)))
                 if linear.bias is not None and st.bias is not None:
-                    # The container carries no bias field; when the artifact
-                    # has one (a quantize_model product) it is authoritative,
-                    # otherwise the host's own bias stands (it is host state
-                    # by construction — see block_recon reconstruct_block).
+                    # The artifact's bias is authoritative when it carries one
+                    # (every version-2 stream does); a legacy artifact leaves
+                    # the host's own bias standing.
                     linear.bias.copy_(torch.from_numpy(np.ascontiguousarray(st.bias)))
         self.source_model = host
 
