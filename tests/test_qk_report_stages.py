@@ -381,7 +381,9 @@ def test_the_verdict_reads_the_required_column_as_data(monkeypatch):  # noqa: AN
         (key, lines, description, deviation, required and key != "lb_admm")
         for key, lines, description, deviation, required in qk_report._STAGE_LINES
     )
-    monkeypatch.setattr(qk_report, "_STAGE_LINES", relaxed)
+    # The reader resolves the inventory in its own module, so the patch must
+    # land there — patching the re-export in the package namespace is inert.
+    monkeypatch.setattr(qk_report.stages, "_STAGE_LINES", relaxed)
     stages = [entry for entry in _clean_stages() if entry[0] != "lb_admm"]
     label, conditions = fidelity_verdict("admm", [], stages, requested=True)
     assert "required_lb_admm_executed" not in conditions

@@ -43,16 +43,22 @@ def test_probe_comparator_reuses_gate_band():
 
 
 def test_probe_threshold_is_the_shared_constant_not_a_copy():
-    """No second literal 40 lives in qk_report (bug-hunter's check (c))."""
-    tree = ast.parse(pathlib.Path(qk_report.__file__).read_text())
-    numeric = {
-        node.value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float))
-    }
+    """No second literal 40 lives anywhere in the qk_report package (bug-hunter's check (c))."""
+    # ``qk_report`` is a package, so ``__file__`` is ``__init__.py``: the scan
+    # must walk every module that could carry a copied line, not only the
+    # re-exports, or it stops covering the constant it exists to police.
+    package = pathlib.Path(qk_report.__file__).parent
+    numeric: set = set()
+    for path in sorted(package.glob("*.py")):
+        tree = ast.parse(path.read_text())
+        numeric |= {
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, (int, float))
+        }
     assert 40 not in numeric
     assert 40.0 not in numeric
-    # ...and the module really does carry the derived constant.
+    # ...and the package really does carry the derived constant.
     assert COLLAPSE_LINE == 40.0
 
 
