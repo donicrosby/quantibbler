@@ -32,6 +32,7 @@ All code landed in `d78f648` (branch `qk-pertarget-cycle`, = `7db1ab9` + this + 
 
 ## Open
 
-- [ ] Re-fire the faithful run with the per-target cycle live. This is a ~21.8 h run (918 s × 28 blocks, plus TuneFP/STE overhead). The change stays alive as the tracking vehicle for this fire.
+- [x] Re-fire the faithful run with the per-target cycle live. This is a ~21.8 h run (918 s × 28 blocks, plus TuneFP/STE overhead). The change stays alive as the tracking vehicle for this fire.
+  - Fired 2026-10-25 (v5, attributed launch `qk-pertarget-v5-t_83fc6e93-20261025T1905Z`) and **decided negative at 46 minutes**: probe abort at `layers.1`/depth 2, ratio 8,035.19 vs the original fire's 64,151.52 (identical site); the per-target cycle was live and measured **inert** (12 TuneFP + 14 STE cycles, net 0.0 across all). Evidence: `artifacts/qwen3-0.6B-r512-admm-paperfaithful-v5-pertarget/quantize_report.json` (sha256 `7612ce32…`), design.md §20–§21, card t_83fc6e93. Ticked per orchestrator ruling: the row is the fire, and the fire occurred with a decided verdict.
   - **Planner decisions recorded (design.md §18)**: (1) Shape (c) counterfactual deferred until after re-fire, with trigger condition and +7.1 h pricing on record. (2) Phantom-date ruling: @user confirm.
 - [ ] After the re-fire records the per-target cycle numbers, fold delta + archive.

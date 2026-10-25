@@ -589,3 +589,116 @@ reconcile card.
 
 No spec-delta changes to this change — its SHALLs are the standing truth and
 validated as-is.
+
+## 20. Implementation crystallization — 2026-10-25 (fire v5: geometry, resume read, digest environment)
+
+**The re-fire's geometry is DERIVED from the record, not replayed.** `SOLVER=admm`
+(`qk-fix-ste-sign-adaptation/design.md:167-181`: *"The faithful run fires
+`SOLVER=admm`"*; the wrapper's "production is `svd`" is the measured ablation, not
+a fidelity ruling), `SEQ_LEN=2048`, `TUNE_SEQ_LEN` **unset** (§11 above measures the
+512 bound fidelity-hostile), `RANK=512`, `CALIBRATION_SEQS=128` / `EVAL_SEQS=144`
+(the pins' 16/18 **batches** under the sequence-counting knob — corroborated in
+flight by the run's own `calib 16 batches, eval 18 batches` and `eval coverage:
+144/145 blocks, 98.653%`), `PAPER_FAITHFUL=1`, `max-admm-iter=400` (wrapper).
+**Named exposure:** 2048/unset is the geometry the wrapper flags as the memcg-OOM
+one. Fired deliberately: the alternative lever is fidelity-hostile by this change's
+own measurement, so the 512 split would be a new ruling, not a retry parameter.
+
+**Fresh OUT dir, never a reused arm:** `artifacts/qwen3-0.6B-r512-admm-paperfaithful-v5-pertarget`.
+The killed v4 dir is left in place as evidence and holds zero completed-block
+archives (stage journal = `capture` + `tune_fp` idx 1..5, died mid-block-0), so
+there was nothing for a resume to restore.
+
+**Correction to my own earlier salvage analysis (this card, attempt 2).** That
+report gave two reasons the v4 salvage must refuse; the second — *"the digest's code
+component moved c90984e → 52b98ea"* — is **wrong**, and the way it is wrong is
+load-bearing. `config_fingerprint` shells out to `git describe --always --dirty`
+and falls back to the literal `"unknown"` on `OSError`; **the run image has no
+`git`** (`docker run --entrypoint sh quantibbler-ptq:rocm-official -lc 'command -v
+git'` → `NO_GIT`), so inside a fire the digest's code component is always
+`"unknown"` and the digest does not move with a commit. Measured both ways:
+
+| where | recomputed digest | vs recorded `9f32ae64…` |
+|---|---|---|
+| host `9b4a39a-dirty` (git present) | `4f557f654647…` | **false MISMATCH** |
+| `quantibbler-ptq:rocm-official` (no git) | `9f32ae64dab277ea1dc9705baab9153d45ae1de354197c7df559ee3f565fc4d7` | **MATCH** |
+| control: same image, `rank=64` | `4538ce8a0899…` | no match (still discriminates) |
+
+Recorded, with no new mechanism: a host-side digest comparison is **not** evidence
+about a resume (judge it in the run image, or force the component to `"unknown"`),
+and the surviving v4 objection was never the digest — v4 fails only on *no
+completed-block archive*.
+
+**Resume read path verified against the LIVE v5 dir** (after block 0 archived
+`block-1.npz`, 1.03 GiB): `completed_blocks() → [1]`;
+`load_block_checkpoint(dir, 1, QuantizedLayerState) → 7` states named
+`layers.0.inner.*`; `load_block_yb → (128, 2048, 1024)` — the 128×2048 calibration
+geometry the knobs above assert. **NOT** exercised: the model-identity half of
+`check_fingerprint`, which needs the pipeline-constructed live model.
+
+**The tree moved under the fire — benign, with evidence.** HEAD went `f47e26d` →
+`b729e64` → `9b4a39a` while the fire ran, dirty count 56 → 20. `git diff --stat
+f47e26d..HEAD -- src/ crates/ tools/` is **empty**, so no executed code path
+changed (the commits are openspec prose). `:ro` does not freeze the tree against
+other writers; the run's identity is `commit=f47e26d` (stamped in `launch.env`)
+plus that empty diff.
+
+## 21. Implementation crystallization — 2026-10-25 (re-fire v5: the verdict, and a gate that did not fire)
+
+**The re-fire ran and the per-target cycle does NOT fix the collapse.** Launch
+`qk-pertarget-v5-t_83fc6e93-20261025T1905Z`, geometry = §20, `wall_seconds=2768.7`,
+`status=failed`, `artifact_exported=false`, report filed at
+`artifacts/qwen3-0.6B-r512-admm-paperfaithful-v5-pertarget/quantize_report.json`.
+
+**Same abort site, 8x smaller.** The proposal's first-faithful-run report is still
+on disk, so the comparison is report-to-report, same instrument:
+
+| fire | probe_abort block | depth | line | prefix_ppl | ratio |
+|---|---|---|---|---|---|
+| `qwen3-0.6B-r512-admm-paperfaithful` (once-per-block reading) | `layers.1` | 2 | 40.0 | 1,211,247.77 | **64,151.52** |
+| `…-v5-pertarget` (per-target cycle) | `layers.1` | 2 | 40.0 | 151,709.19 | **8,035.19** |
+
+Identical site and identical `fp_prefix_ppl` (18.88105 / 18.88060). The cycle
+lowered the collapse by **7.98x** and did not remove it. `paper_faithful=false`
+with `no_stage_failure` the only false fidelity condition (plus
+`required_tune_scales_kd_executed` false — the abort precedes the global stage).
+
+**Both instrumented stages measured inert on EVERY cycle.** This is the
+attribution the change was built to produce, and it is not a gate finding — it is
+the stage records themselves:
+
+| stage | cycles | net reduction (sum of per-fire `residual_after - residual_before`) | `weight_delta_rel` |
+|---|---|---|---|
+| TuneFP, per-target | 12 (6/block x 2 blocks) | **0.0 on 12 of 12** | 0.0 – 4.68e-08 |
+| TuneLatentSTE | 14 rows (7/block x 2) | **0.0 on 14 of 14** | — |
+
+`gradient_norm` 1.4e-11 – 6.2e-11 at step 1 of 1024; `vacuous_events: 0`.
+
+**The no-op detector did not fire, and the reason is a claim-vs-verdict read.**
+`tools/ci/report_checks.py:stage_evidence_findings()` returns **0 findings** on
+this report while the effect floor is `STEPS_EFFECT_EPS=1e-3` against a measured
+net of exactly `0.0` on 12 TuneFP cycles and 14 STE rows. Code:
+`faithful = report.get("paper_faithful") is True` — that is the **rolled-up
+verdict**, False on any failed run — while the requirement says *"On runs claiming
+paper fidelity, the gate SHALL assert a per-cycle net-reduction test against
+`STEPS_EFFECT_EPS=1e-3`"* (`specs/qk-ptq/spec.md:61`): the CLAIM, which this run
+carries (`fidelity_conditions.paper_faithful_flag: true`; `--paper-faithful` on
+the argv). The detector is therefore disabled in exactly the run shape its own
+scenario names (*"a no-op stage on a faithful run is a finding"*, `:66`).
+Control, same function, same tree: on the pre-instrumentation original report it
+returns **14 presence findings** — the presence half works; only the effect floor
+is unreachable. **Reported, not fixed**: the fix is a code change to a shared
+(sibling-owned) file and the reading is a ruling, not this fire's call.
+**Resolved the same day**: the read was ruled a code bug (the requirement
+stands; key on the claim) and the one-line fix landed in `3f461ba`; the
+post-fix gate returns 3 findings on this report (TuneFP `layers.0`/`layers.1`
+net 0.0; STE block rows net 0.0), which dissolves §18's trigger by
+construction (the gate now attributes the failure to the inert stages).
+
+**Per-linear quality is not the story.** The 14 `solver_probe` rows read
+`cos_raw` 0.7285 – 0.8620 (mean **0.8025**; `layers.0` mean **0.7946**), against
+§17's recorded ADMM arm mean of **0.348** — **2.28x better** per linear than the
+arm whose collapse this is — and the prefix still dies. All 14: `n_iter=400
+converged=False`. Consistent with §17's scale read (the imbalance is the bridge
+from per-linear quality to end-to-end damage); it does not explain the collapse
+away, and it rules out "the solvers are producing worse factors than before".
