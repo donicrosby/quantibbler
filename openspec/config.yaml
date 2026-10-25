@@ -125,3 +125,5 @@ rules:
     - "Each task is independently verifiable with a command and expected outcome."
     - "Tests precede implementation per capability (test names reference scenario IDs)."
     - "Last task is always: run the full gate suite (pytest, cargo test, clippy -D warnings, fmt --check, maturin build) and record results."
+    - "Every task maps to a ticket on the quantibbler kanban board assigned to its role profile (coder/planner/bug-hunter/sec-eng; orchestrator tasks go to default), carrying definition-of-done and success criteria on top of this change; the ticket body points at the change dir, it never rewrites it."
+    - "Fire-bearing tasks (production or real-model runs) are ticketed as HOLD at low priority and launch only on explicit @user GO; no ticket self-authorizes a run, and lane status changes are @user's call alone."
