@@ -126,3 +126,21 @@ ambiguity:
 - Scope of the bias change: it is the layer's POST-tuning bias, i.e. the
   compensation the stage produced. Phase 3 (global scale calibration) still
   tunes `s1`/`s2` only; the bias is not a calibration parameter.
+- Module placement follows the `block_recon` split that landed while this
+  change was in flight: the stage edits live with their stages
+  (`_tuning.py` for the TuneFP record and bias snapshot, `_ste.py` for the
+  rationale, `_block_stage.py` for the two deleted reverts and the live-bias
+  construction), and `block_recon.py` stays a pure façade. The test spy for
+  `_tune_fp` is anchored on `_block_stage`, the module holding the call site.
+- The gate fixture's `d`/`wide` are chosen against BOTH bounds the e2e gate
+  asserts — byte-derived BPW < 1.0 and corruption delta < 1.0 — because the
+  bias vector forces `d` up (at `d = 32` the float section alone exceeds one
+  bit per weight for any `wide`; measured 1.037 even at `wide = 1024`) and the
+  delta moves NON-monotonically with geometry. Measured at rank 8 / f16
+  (`(d, wide) -> delta`): `(64,128) 1.188`, `(64,192) 0.518`, `(64,384)
+  1.310`, `(96,128) 0.711`, `(112,128) 1.582`, `(128,128) 1.828`; BPW at
+  `(64,192)` is 0.682. The first choice `(64,128)` passed pre-sibling (delta
+  0.893) and stopped passing once `qk-ste-joint` landed its single joint
+  TuneLatentSTE pass (delta 1.188) — the fixture had 0.107 of margin, and the
+  joint pass consumed it. `(64,192)` restores ~0.48 of margin under the joint
+  pass without relaxing either bound.
