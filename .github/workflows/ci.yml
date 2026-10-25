@@ -43,8 +43,8 @@ env:
   HF_CACHE_KEY: hf-abort-leg-qwen3-0.6b-c1899de289a04d12100db370d81485cdf75e47ca-wikitext-b08601e04326c79dfdd32d625aee71d232d685c3-v1
 
 jobs:
-  lean-python:
-    name: lean python (dependency floor, torch proven absent)
+  product-floor:
+    name: product floor (the shipped deps install and import; the harness is not in the product)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -54,43 +54,38 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
-      # lean_python_interpreter_built_without_extras: a fresh venv from the
-      # shipped dependency floor — not a hand-pruned environment, not a synced
-      # one with extras. Deliberately NOT `--locked` and not `uv sync`: this leg
-      # floats on purpose, because "does the shipped floor still work" is its
-      # signal. Do not "fix" it into determinism.
-      # The referee test file pins this workflow's shape by PARSING it
-      # (`yaml.safe_load`), and PyYAML is not in the product floor, so the lean
-      # leg installs it explicitly here. It is a test-harness dependency: the
-      # absence assertion below still proves the PRODUCT floor cannot import
-      # torch/transformers/tokenizers.
-      - name: Build the lean interpreter (uv venv + pip install -e . pytest + pyyaml, no extras)
+      # product_floor_carries_the_pipeline: a fresh venv from the project's OWN
+      # dependency set. `uv pip install -e .` installs the declared
+      # dependencies only — no optional dependency (extra) and no dependency
+      # group rides along — which is the whole assertion: the PTQ pipeline IS
+      # the product, so torch/transformers/tokenizers/safetensors/pyarrow must
+      # be importable from the shipped set, and the test harness must not be in
+      # it. Deliberately NOT `--locked` and not `uv sync`: this leg floats on
+      # purpose, because "does the shipped dependency set still install and
+      # import" is its signal. Do not "fix" it into determinism.
+      - name: Build the floor interpreter (uv venv + the project's own dependencies)
         run: |
-          rm -rf .venv-lean
-          uv venv --python 3.12 .venv-lean
-          VIRTUAL_ENV="$PWD/.venv-lean" uv pip install -e . pytest "pyyaml>=6,<7"
-      # lean_python_asserts_absence_before_skips: absence is proven in THIS
-      # interpreter before any count is parsed. A torch-synced run reporting
-      # "lean" numbers is the failure mode this step exists to make impossible.
-      - name: Prove torch/transformers/tokenizers are absent before believing any count
+          rm -rf .venv-floor
+          uv venv --python 3.12 .venv-floor
+          VIRTUAL_ENV="$PWD/.venv-floor" uv pip install -e .
+      - name: Prove the product's own lane imports from the floor alone
         run: |
-          if .venv-lean/bin/python -c "import torch, transformers, tokenizers"; then
-            echo "::error::this 'lean' interpreter can import torch/transformers/tokenizers - every count below would be a false lean"
+          .venv-floor/bin/python -c "import numpy, torch, transformers, tokenizers, safetensors, pyarrow; print('product floor imports:', torch.__version__, transformers.__version__)"
+      # dev_tooling_is_not_product: the suite's harness must NOT be part of the
+      # product's declared dependency set. Nothing here may be soft-gated
+      # either — the ptq tier's skip-when-absent hook is deleted, so a missing
+      # product dep is a sync error that fails loudly at collection rather than
+      # a green suite with a hole in it.
+      - name: Prove the dev/test harness is absent from the floor
+        run: |
+          if .venv-floor/bin/python -c "import pytest, yaml"; then
+            echo "::error::the product floor can import pytest/pyyaml - the test harness leaked into the product's own dependency set"
             exit 1
           fi
-          echo "absence proven: torch, transformers and tokenizers are not importable here"
-      # Tier skips are documented values, not ignorable noise: the lean tier's
-      # legitimate skip count is asserted exactly (16 = the kernels Rust leg,
-      # which needs the maturin extension built by a different extra).
-      - name: pytest (lean tier) and the skip-count assertion
-        run: |
-          if .venv-lean/bin/python -m pytest --color=no -q -rs > pytest-lean.log 2>&1; then rc=0; else rc=$?; fi
-          cat pytest-lean.log
-          .venv-lean/bin/python tools/ci/pytest_summary.py \
-            --log pytest-lean.log --pytest-rc "$rc" --expect-skipped 16
+          echo "harness absent: pytest and PyYAML are not importable from the product floor"
 
   full-python:
-    name: full python (torch + hf + kernels, zero skips)
+    name: full python (the locked dev environment, zero skips)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -100,9 +95,9 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
-      - name: Sync the explicit extras (never a bare uv sync, never unlocked)
-        run: uv sync --extra torch --extra hf --extra kernels --locked
-      # This is the job that refuses every pre-extras "green suite": a skipped
+      - name: Sync the project (the product's own deps + the default dev group; locked)
+        run: uv sync --locked
+      # This is the job that refuses every "green suite with a hole": a skipped
       # ptq tier is a hole, and the summary line is parsed, not eyeballed.
       - name: pytest (full suite) and the zero-skip assertion
         run: |
@@ -197,8 +192,8 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
-      - name: Sync the extras the driver needs (torch + hf, locked)
-        run: uv sync --extra torch --extra hf --locked
+      - name: Sync the project the driver needs (locked)
+        run: uv sync --locked
       # Plumbing-only by measurement: the random-init fixture's next-token
       # distribution is already uniform (rank-1 quantized ratio 1.0000006; a
       # zeroed o_proj moves its PPL by 3 ppm), so this job proves the gate's code
@@ -232,8 +227,8 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
-      - name: Sync the extras the driver needs (torch + hf, locked)
-        run: uv sync --extra torch --extra hf --locked
+      - name: Sync the project the driver needs (locked)
+        run: uv sync --locked
       # fail-on-cache-miss: a cold cache fails the job. Never a silent live
       # download - that would make the leg network-dependent and let a miss pass
       # quietly, which is the disease this repo just burned.

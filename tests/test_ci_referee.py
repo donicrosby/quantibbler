@@ -1,15 +1,15 @@
-"""qk-ci-referee: the referee's own logic, refereed in the lean tier.
+"""qk-ci-referee: the referee's own logic, refereed in the default tier.
 
 CI-only logic that never runs anywhere else is exactly the disease this repo just
 burned, so the pieces the workflow calls are loaded and exercised here: the
-pytest summary parser (the skip-count discipline both python jobs rest on), the
+pytest summary parser (the skip-count discipline the full job rests on), the
 report assertions of the smoke and abort legs (fed real-shaped payloads,
 including the shapes that must fail), the abort leg's fail-closed cache check,
 and the workflow's own structural pins (SHA-pinned actions, no privileged
-trigger, no masked gate rcs, absence-before-counts ordering, cache key naming the
-revisions the tooling asserts).
+trigger, no masked gate rcs, the product-floor/dev-tooling split, cache key
+naming the revisions the tooling asserts).
 
-No torch, no weights, no network: this file runs in the lean tier.
+No torch, no weights, no network: PyYAML (dev group) is this file's only dep.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ abort_leg = _load("abort_leg", TOOLS_CI / "abort_leg.py")
 
 
 # ---------------------------------------------------------------------------
-# The skip-count discipline (both python jobs)
+# The skip-count discipline (the full-python job)
 # ---------------------------------------------------------------------------
 
 
@@ -167,19 +167,32 @@ def test_summary_cli_exit_codes(tmp_path):  # noqa: ANN001
     assert missing.returncode == 2
 
 
-def test_workflow_lean_job_proves_absence_before_believing_skips():
+def test_workflow_product_floor_pins_the_dependency_split():
+    """The product floor carries the pipeline's deps, never the test harness.
+
+    The ruling this pins: torch/transformers/tokenizers/safetensors/pyarrow are
+    the PRODUCT's own dependencies (the PTQ pipeline is the product) and the
+    suite's harness is not. The floor leg installs the project's declared
+    dependency set alone — no extra, no dependency group — and asserts both
+    halves, so moving a needed dep into an extra or a dev group reds this job
+    instead of quietly re-opening the soft gate.
+    """
     text = WORKFLOW.read_text()
-    lean = _job_block(text, "lean-python")
-    absence = lean.index("import torch, transformers, tokenizers")
-    parse = lean.index("tools/ci/pytest_summary.py")
-    assert absence < parse, "the absence assertion must precede the skip-count parse"
-    assert "uv pip install -e . pytest" in lean
-    assert re.search(r"uv venv --python 3\.12 \.venv-lean", lean)
-    assert "--expect-skipped 16" in lean
+    floor = _job_block(text, "product-floor")
+    assert "uv pip install -e ." in floor
+    assert "import numpy, torch, transformers, tokenizers, safetensors, pyarrow" in floor
+    assert 'if .venv-floor/bin/python -c "import pytest, yaml"; then' in floor, (
+        "the floor leg must prove the harness is NOT part of the product"
+    )
+    # The floor leg runs no suite: its interpreter cannot run one (no pytest),
+    # and the skip-count assertion it used to carry died with the ptq tier's
+    # skip-when-absent hook.
+    assert "tools/ci/pytest_summary.py" not in floor
+    assert "pytest-lean.log" not in floor
 
     full = _job_block(text, "full-python")
     assert "--expect-skipped 0" in full
-    assert "uv sync --extra torch --extra hf --extra kernels" in full
+    assert "uv sync --locked" in full
 
 
 # ---------------------------------------------------------------------------
@@ -944,7 +957,8 @@ def test_workflow_never_resolves_dependencies_unlocked():
 
     A PR editing `pyproject.toml`/`Cargo.toml` would otherwise re-resolve
     silently and test different dependencies than main under the same green job
-    names. The lean leg is the deliberate exception — it floats on purpose.
+    names. The product-floor leg is the deliberate exception — it floats on
+    purpose.
     """
     text = _uncommented(WORKFLOW.read_text())
     syncs = re.findall(r"^\s*run: .*\buv sync\b.*$", text, re.M)
@@ -957,13 +971,14 @@ def test_workflow_never_resolves_dependencies_unlocked():
         assert "--locked" in line, line
     assert "uv run --locked maturin build" in text
 
-    lean = _job_block(text, "lean-python")
-    assert "uv pip install -e . pytest" in lean
-    # The referee test file imports yaml and PyYAML is NOT in the product floor,
-    # so the lean recipe must install it explicitly: an uninstalled harness
-    # dependency would fail the whole lean leg at collection.
-    assert "pyyaml" in lean, "the lean recipe must install the referee's harness dependency"
-    assert "--locked" not in lean, "the lean leg floats on the dependency floor by design"
+    floor = _job_block(text, "product-floor")
+    # The floor recipe installs the project's OWN dependency set and nothing
+    # else: no extra, no dependency group, so the harness (pytest, PyYAML) can
+    # never ride along — the absence assertion below it pins that directly.
+    assert 'VIRTUAL_ENV="$PWD/.venv-floor" uv pip install -e .\n' in floor, (
+        "the floor leg must install the project's own dependencies only"
+    )
+    assert "--locked" not in floor, "the floor leg floats on the dependency floor by design"
 
 
 def _rust_gate_lines(text: str) -> dict[str, str]:

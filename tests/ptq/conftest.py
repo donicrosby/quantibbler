@@ -1,12 +1,14 @@
-"""Tier gate for the ptq tests (torch/hf extras).
+"""Determinism pins for the ptq tier (hard dev dependencies, never extras).
 
-The ptq tier tests the PRODUCT's torch lane (PTQ driver, calibration, KD):
-torch + transformers are runtime deps of that lane (extras `torch`/`hf`),
-not dev deps — a user quantizing a model needs them with no test runner
-in sight. This conftest mirrors the kernels crate's hardware-gate pattern:
-without the extras the tier is IGNORED cleanly (lean suite stays green)
-instead of erroring at collection. Run the full tier with:
-    uv sync --all-groups --extra kernels --extra torch --extra hf
+The ptq tier tests the PRODUCT's torch lane (PTQ driver, calibration, KD).
+torch, transformers, tokenizers, safetensors and pyarrow are HARD dev
+dependencies of this repo (``[dependency-groups].dev``), so there is
+deliberately NO skip-when-absent hook here: a missing one of them is a sync
+error, and the tier must fail loudly at collection. Ignoring the directory
+would report a green suite with a hole in it — the exact false green this
+tier's dependencies stopped being extras to prevent. Run the full tier with:
+
+    uv sync && uv run pytest
 """
 
 from __future__ import annotations
@@ -27,16 +29,6 @@ import os
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
 
-def pytest_ignore_collect(collection_path, config):  # noqa: ANN001, ARG001
-    try:
-        import torch  # noqa: F401
-        import transformers  # noqa: F401
-    except ImportError:
-        return True
-    _pin_determinism()
-    return None
-
-
 def _pin_determinism() -> None:
     """One thread, one reduction order.
 
@@ -50,3 +42,9 @@ def _pin_determinism() -> None:
     import torch
 
     torch.set_num_threads(1)
+
+
+# Import-time, like the OPENBLAS pin above: the conftest is loaded before any
+# test module in this directory, so the thread count is fixed before the first
+# reduction the divergence gate reads.
+_pin_determinism()
