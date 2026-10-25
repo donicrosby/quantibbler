@@ -583,7 +583,12 @@ def magnitude_balance(
     (informed implementation choice; Phase 3 recalibrates the scales
     afterwards). Without ``target`` the Eq. 7 scale is kept as-is.
     """
-    xp = get_backend(backend)
+    # The device is resolved here, exactly as at the solve site: an explicit
+    # QUANTIBBLER_DEVICE is honoured (the diagnostic/parity path a CPU-box driver
+    # exports), while implicit torch on a box with no accelerator still fails
+    # closed in resolve_device. A balance that silently ran somewhere other than
+    # the solve it refits would be a device mismatch nothing records.
+    xp = get_backend(backend, device=os.environ.get("QUANTIBBLER_DEVICE"))
     du = xp.asarray(d_out_tilde, dtype=xp.dtype("float64"))
     di = xp.asarray(d_in_tilde, dtype=xp.dtype("float64"))
     pu = xp.asarray(p_u, dtype=xp.dtype("float64"))
