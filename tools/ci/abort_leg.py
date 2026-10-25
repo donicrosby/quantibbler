@@ -88,13 +88,27 @@ def cache_findings(cache: Path) -> list[str]:
 def recorded_command(out_dir: Path) -> list[str]:
     """The abort command as recorded on the fail-fast landing (b5712d5).
 
-    These flags are the recorded shape, not a re-tuned one: the numbers this leg
-    asserts (abort at depth 2, ratio ~35,000) come from that run's report. If the
-    asserted shape ever changes, the leg is re-recorded — not loosened.
+    These flags are the recorded shape, not a re-tuned one: the collapse this leg
+    runs into (abort before block 3, a prefix ratio far past `COLLAPSE_LINE`,
+    minutes not tens of minutes) comes from that run's report — ratio 34,983
+    there, 52,773 measured again on the re-expressed invocation below, same depth
+    and same crossing. If the asserted shape ever changes, the leg is re-recorded
+    — not loosened.
+
+    The explicit `--device cpu` is the one addition since that record, and it adds
+    no geometry: `--device auto` means "the accelerator or refuse" (the
+    fail-closed default) and this leg runs on a CI runner with no accelerator.
+    Measured before this flag, on a GPU-less runner: exit 1 at the refusal and
+    "no quantize_report.json was written", so the recorded shape itself became
+    unrunnable there. The recorded run this leg cites was itself a CPU run under
+    CI, and the driver publishes QUANTIBBLER_DEVICE from the resolved value, so
+    the per-linear solver stages read the same explicit device.
     """
     return [
         sys.executable,
         str(DRIVER),
+        "--device",
+        "cpu",
         "--model",
         MODEL,
         "--rank",
@@ -105,10 +119,16 @@ def recorded_command(out_dir: Path) -> list[str]:
         "1",
         "--seq-len",
         "64",
+        # The data knobs count SEQUENCES (qk-geometry-conformance). The recorded
+        # run's 1 calibration / 2 eval PACKED BATCHES are 8 / 16 sequences in the
+        # knob's own unit -- and under the sequence unit the old literals are not
+        # even legal: the driver refuses a count that is not a whole number of
+        # packed batches (measured: "--calibration-seqs counts sequences: 1 is not
+        # divisible by the packed batch size 8"). Same geometry, faithful unit.
         "--calibration-seqs",
-        "1",
+        "8",
         "--eval-seqs",
-        "2",
+        "16",
         "--probe-batches",
         "1",
         "--out",

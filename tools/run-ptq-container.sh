@@ -326,14 +326,31 @@ set -- "$@" -e "QUANTIBBLER_IMAGE=$IMAGE" -e "QUANTIBBLER_IMAGE_DIGEST=$IMAGE_DI
 # device nodes rather than named: this host has no `render` group (kfd and
 # renderD128 are GID 993, card1 is video 44), so matching GIDs is the portable
 # form and needs no host user change and no reboot.
+#
+# The presence check binds REAL launches, and DRY_RUN keeps its documented
+# reading: a dry run inspects a launch without executing it, so on a host with
+# no accelerator nodes it prints the plan (minus --group-add, whose gid is only
+# readable off the nodes) and says the real launch refuses here -- the same shape
+# the unresolvable-digest path above already uses. Measured: a GPU-less ubuntu
+# runner (no /dev/kfd, /dev/dri) reddened every GPU=1 guard leg with
+# "GPU=1 but /dev/kfd is absent on this host" before any argv was printed, which
+# is the DRY_RUN seam being unable to inspect a launch it does not run.
 if [ "${GPU:-0}" = "1" ]; then
+  _gpu_absent=""
   for node in /dev/kfd /dev/dri; do
-    if [ ! -e "$node" ]; then
-      echo "error: GPU=1 but $node is absent on this host" >&2
-      exit 2
-    fi
+    [ -e "$node" ] || _gpu_absent="$_gpu_absent $node"
   done
-  set -- "$@" --device /dev/kfd --device /dev/dri --group-add "$(stat -c %g /dev/kfd)"
+  if [ -z "$_gpu_absent" ]; then
+    set -- "$@" --device /dev/kfd --device /dev/dri --group-add "$(stat -c %g /dev/kfd)"
+  elif [ "${DRY_RUN:-0}" = "1" ]; then
+    echo "note: DRY_RUN without$_gpu_absent - the real launch refuses here (GPU=1 needs the accelerator devices); the argv below is the plan for a GPU host and carries no --group-add, whose gid is read off the device nodes" >&2
+    set -- "$@" --device /dev/kfd --device /dev/dri
+  else
+    for node in $_gpu_absent; do
+      echo "error: GPU=1 but $node is absent on this host" >&2
+    done
+    exit 2
+  fi
 fi
 
 # QK_SOLVER_PROBE enables the read-only per-linear diagnostic

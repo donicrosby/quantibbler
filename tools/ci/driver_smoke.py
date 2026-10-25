@@ -164,6 +164,16 @@ def invocation(fixture: Path, out_dir: Path) -> list[str]:
     return [
         sys.executable,
         str(DRIVER),
+        # Explicit CPU, and it is not optional here: `--device auto` means "the
+        # accelerator or refuse" (the fail-closed default), and this leg runs on
+        # a CI runner with no accelerator. Measured before this flag, on a
+        # GPU-less runner: exit 1 at the refusal and "no quantize_report.json was
+        # written" -- the leg cannot referee a gate whose process died at
+        # startup. The driver publishes QUANTIBBLER_DEVICE from this resolved
+        # value, so the per-linear solver stages inherit the same explicit
+        # reading instead of an implicit one.
+        "--device",
+        "cpu",
         "--model",
         str(fixture),
         "--rank",
@@ -174,10 +184,17 @@ def invocation(fixture: Path, out_dir: Path) -> list[str]:
         str(MAX_ADMM_ITER),
         "--seq-len",
         str(SEQ_LEN),
+        # The data knobs count SEQUENCES (qk-geometry-conformance): the driver
+        # converts them to packed batches and refuses a count that is not a whole
+        # number of them (measured: the pre-existing 1/2 here died with
+        # "--calibration-seqs counts sequences: 1 is not divisible by the packed
+        # batch size 8"). BATCH = 8 rows, so 8 / 16 sequences are the recorded
+        # 1 / 2 packed batches re-expressed in the knob's own unit -- the same
+        # geometry, in a legal value.
         "--calibration-seqs",
-        "1",
+        "8",
         "--eval-seqs",
-        "2",
+        "16",
         "--probe-batches",
         "1",
         "--out",

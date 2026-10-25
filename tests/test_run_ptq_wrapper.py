@@ -143,6 +143,15 @@ def test_gpu_requires_a_rocm_tagged_image():
     hardware a CUDA-wheel torch -- the same failure the rocm Dockerfile's build
     assertion makes unbuildable. Refusing is the only safe direction: a run's
     record cannot repair a wrong binary after the fact.
+
+    This leg is device-independent by construction, and that is the point:
+    DRY_RUN inspects a launch without executing it, so an absent /dev/kfd +
+    /dev/dri is an advisory for the dry run (whose argv is the plan for a GPU
+    host) and a refusal for the real launch. Measured on a GPU-less ubuntu
+    runner: with the presence check binding the dry run too, this leg and four
+    sibling lane0 legs died at "GPU=1 but /dev/kfd is absent on this host"
+    before printing any argv -- the seam unable to inspect a launch it never
+    runs.
     """
     refused = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048", GPU="1")
     assert refused.returncode == 2, refused.stderr
@@ -273,24 +282,45 @@ def test_lane0_pins_its_image_rather_than_inheriting_the_ambient_one():
 
 
 def test_lane0_refuses_the_unpinned_diy_digest():
-    """The image that actually killed green-1 is refused, by digest not by tag."""
-    if not _resolves(_BROKEN_DIY):
-        import pytest
+    """The image that actually killed green-1 is refused, by digest not by tag.
 
-        pytest.skip(f"{_BROKEN_DIY} not present, cannot resolve a digest to refuse")
+    Two environments, two documented readings, both asserted -- and neither one
+    a skip. Where the retired DIY image is present, the refusal itself is the
+    assertion. Where it is not (a fresh CI runner holds no image at all),
+    the digest is unresolvable, so the wrapper's documented DRY_RUN reading is
+    asserted instead: it ADVISES and the real launch is the one that fails
+    closed. Skipping there was the earlier shape and it was worse than a hole:
+    it added two skips to a tier whose count is exact (16) and to a full tier
+    that asserts zero, so the guard read as green CI while asserting nothing.
+    """
     completed = _launch(IMAGE=_BROKEN_DIY, **_LANE0)
-    assert completed.returncode == 2, (completed.returncode, completed.stdout)
-    assert "lane0 image identity is pinned" in completed.stderr
+    if _resolves(_BROKEN_DIY):
+        assert completed.returncode == 2, (completed.returncode, completed.stdout)
+        assert "lane0 image identity is pinned" in completed.stderr
+        return
+    assert completed.returncode == 0, completed.stderr
+    assert (
+        "DRY_RUN with an unresolvable image digest; the real launch fails closed"
+        in completed.stderr
+    )
+    assert "lane0 image identity is pinned" not in completed.stderr
 
 
 def test_lane0_digest_override_names_the_digest_it_authorizes():
-    """The door exists, and it opens only for a digest someone wrote down."""
-    if not _resolves(_BROKEN_DIY):
-        import pytest
+    """The door exists, and it opens only for a digest someone wrote down.
 
-        pytest.skip(f"{_BROKEN_DIY} not present, cannot authorize its digest")
+    The override is what makes an otherwise-refused launch legal, so it is
+    asserted where the digest resolves: the run proceeds AND carries the
+    authorized digest in its announce. Where no image is present the digest is
+    `unknown` -- and the override cannot manufacture one, which is the same
+    fail-closed direction: the leg asserts the `unknown` it actually recorded
+    rather than skipping the leg and asserting nothing.
+    """
+    resolvable = _resolves(_BROKEN_DIY)
     completed = _launch(IMAGE=_BROKEN_DIY, LANE0_IMAGE_DIGEST_ALLOW=_BROKEN_DIY_DIGEST, **_LANE0)
     assert completed.returncode == 0, completed.stderr
+    expected_digest = _BROKEN_DIY_DIGEST if resolvable else "unknown"
+    assert f"image_digest={expected_digest}" in completed.stderr
 
 
 def test_lane0_launch_env_records_harness_knobs_not_driver_geometry(tmp_path):

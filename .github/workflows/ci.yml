@@ -204,6 +204,11 @@ jobs:
       # zeroed o_proj moves its PPL by 3 ppm), so this job proves the gate's code
       # path executes end-to-end and that the report and the exit code agree. It
       # makes no detection and no abort-path claim - those are the abort leg's.
+      # The invocation list in the tool names `--device cpu` explicitly:
+      # `--device auto` means "the accelerator or refuse" (the fail-closed
+      # default) and this runner has none. Measured before that flag: exit 1 at
+      # the refusal and "no quantize_report.json was written", so the leg could
+      # not referee the gate it exists to referee.
       - name: driver smoke on the tiny offline fixture
         run: |
           uv run --no-sync python tools/ci/driver_smoke.py --out "$RUNNER_TEMP/smoke-out"
@@ -241,6 +246,9 @@ jobs:
       # The recorded abort command, executed offline, with the abort asserted
       # from the real process: abort before block 3, minutes not tens of minutes,
       # status failed + probe_abort fields + the trajectory so far, nonzero exit.
+      # Its invocation list also names `--device cpu` (see tools/ci/abort_leg.py):
+      # the recorded run this leg cites was itself a CPU run under CI, and
+      # `--device auto` is fail-closed on the accelerator-less runner.
       - name: run the recorded abort command and assert the abort
         run: |
           uv run --no-sync python tools/ci/abort_leg.py \
