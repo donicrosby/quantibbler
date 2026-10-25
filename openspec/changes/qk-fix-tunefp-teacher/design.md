@@ -202,3 +202,50 @@ fork fires only after a paper-faithful run exists.
   its bands on the faithful (admm) artifact when it un-parks. Bug
   Hunter's independent `real_floor`/`naive` table is solver-independent
   (computed from the pinned safetensors) and stands as-is.
+
+## Implementation crystallization (landing, 2026-10-25)
+
+Both review lanes PASS on the landed bytes (sec-eng t_5855d059: integrity
++ required-stage re-audit verdicts; bug-hunter t_a531ff73: teacher-once +
+guard, required-stage poison directions). The landing commits their ticks
+and evidence; the findings are ROUTED, not fixed post-review (no RED-first
+exists for any of them on this change's surface):
+
+- **Balance-arm bypass is not this change's bytes.** The 52-57F CPU-suite
+  class (`magnitude_balance` → `get_backend(None)` → torch default refuses
+  implicit CPU) originates in lane-3's backend-default flip (8d1bcc0 /
+  97a4725) after this change's CPU-green landing (2bb04fb, 2026-10-21);
+  both reviews proved this change's surfaces green under the numpy-default
+  probe (teacher/guard/dual-stream 17 passed RC=0 with a sitecustomize
+  discriminator; `tests/test_qk_report.py` 91/91 RC=0). Owned by card
+  t_5e71e281; the dropped-QUANTIBBLER_DEVICE half landed via t_7190f18b.
+- **A2's "memory-only" letter is superseded on HEAD.** Lane-2 commit
+  ec906a7 persists the fp-stream teacher target as checkpoint npz key
+  `y_b` (checkpoints.py save path; block_recon.py resume restores from
+  it), and the A2 self-test greps npz keys for the substring "teacher",
+  which cannot see the real key; resume trusts `y_b` without the
+  pristine-source-hash + capture-index binding A2 names. Spec-accuracy
+  reconcile routed to the planner BEFORE any archive; the deny-only
+  resume property on landed bytes is verified and unaffected.
+- **The delta's teacher-cycle wording is superseded by the spec graph.**
+  pertarget-cycle's universal idx==0 skip (landed block_recon.py:1531,
+  pinned by test_dual_stream.py) vs lane-2's single-identity-prefix
+  design vs this change's compressed-prefix/once-per-block delta text
+  contradict over the same requirement surface; the stale single-stream
+  rationale remains at block_recon.py:1490-1496 and in the `_tune_fp`
+  docstring. A planner reconcile card gates the archive sweep (linked as
+  a parent of t_944374c0) so `openspec/specs/` never folds contradictory
+  SHALLs.
+- **Eval-geometry label gap (t_f5dc83f7 routing).**
+  `geometry_deviations` never flags `eval_len != 2048`, so a split-window
+  run can carry `paper_faithful: true` under stage-fidelity semantics;
+  the bar protection is the human-gated acceptance ledger. Routed to the
+  same planner reconcile: either the label contract states that
+  protection or the deviation class is added — a contract decision, not
+  a post-review code patch.
+- **Archive gate stands.** Per the orchestrator task row: do not archive
+  until a real run shows a nonzero TuneFP effect on record — a fire-class
+  event needing @user GO (lane authority rule). This change is
+  validate-strict, double-reviewed PASS, landed and pushed; the archive
+  itself belongs to sweep t_944374c0 after the run record and the planner
+  reconcile exist.

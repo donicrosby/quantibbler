@@ -42,7 +42,7 @@
   the terminal scale stage is verified against TuneScalesKD semantics
   (line 27: global scale-only KD against the FP teacher, packed binaries
   frozen, T_glob steps) or recorded as a named deviation.
-- [ ] (bug-hunter) Review on the landed bytes: teacher captured once before
+- [x] (bug-hunter) Review on the landed bytes: teacher captured once before
   tuning from the pristine-pinned block weights on the compressed-prefix
   stream, never recomputed from tuned weights and never read from live
   module state; source fingerprint + capture index in the artifact; cache
@@ -55,17 +55,34 @@
   no call site still passes self-outputs as the teacher;
   artifact marker present. Verify the regression tests run green from clean
   checkout.
-- [ ] (sec-eng) Integrity pass: the pristine-source load adds no new network
+- [x] (sec-eng) Integrity pass: the pristine-source load adds no new network
   or persistence surface beyond the pinned cache; the abort path cannot
   corrupt in-flight state (snapshot-restore discipline preserved);
   provenance fields (source fingerprint, capture index) provable from the
   artifact alone; the two-norm event distinguishes broken-teacher from
   detached-student on the landed bytes.
-- [ ] (orchestrator) `npx --yes @fission-ai/openspec validate
+  *(sec-eng 2026-10-25: PASS — verdict + command evidence on card
+  t_5855d059; one cross-lane spec-accuracy finding routed to planner:
+  lane-2 commit ec906a7 persists the fp-stream teacher output `y_b` into
+  block checkpoints, so the A2 "never persisted" wording and the
+  substring-`teacher` npz-key assertion no longer describe HEAD bytes.)*
+- [x] (orchestrator) `npx --yes @fission-ai/openspec validate
   qk-fix-tunefp-teacher --strict`; review the delta against the frozen fork
   timing (this fix is owed regardless of the ladder verdict); commit
   (specs + code in one commit), do not archive until a real run shows a
   nonzero TuneFP effect on record.
+  *(orchestrator 2026-10-25: validate VALID rc=0, re-run after the
+  crystallization entry — still VALID. Delta-vs-frozen-fork review: the
+  2026-10-21 user directive already pins this fix as owed before any
+  further diagnostic run, so no ladder-verdict dependency exists; nothing
+  re-sequenced. Review ticks + verification evidence landed in the landing
+  commit scoped to this change dir; archive withheld per this row's own
+  condition — a real run showing nonzero TuneFP effect on record is
+  outstanding (fire class, @user GO). Findings routed, not
+  post-review-patched: t_5e71e281 (balance arm; QUANTIBBLER_DEVICE half
+  via t_7190f18b), planner reconcile card (A2 letter vs lane-2 `y_b`
+  checkpoint + TuneFP-cycle spec graph + eval-geometry label gap),
+  post-fire JSONL card.)*
 
 ## User directive (2026-10-21)
 
@@ -339,15 +356,22 @@ seq 32 by the driver fixture tests.
   skip-marked event, and the verdict is the conservative side. Recorded so
   that divergence reads as a declared split, not drift; if a future change
   wants the map stricter, that is a stage-map spec delta, not this task.
-- [ ] (bug-hunter) Verify on landed bytes: both poison directions
+- [x] (bug-hunter) Verify on landed bytes: both poison directions
   (dropped required stage → false + named; full faithful record → green),
   plus the skip-marker directions — a tune_fp-skipped-only record and an
   fp-mode tune_scales_kd event each leave their condition false; the
   required column is the only inventory of the set, the empty-record
   repro now denies, and no diagnostic path is newly denied.
-- [ ] (sec-eng) Re-audit the amended enumeration (the verdict you
+- [x] (sec-eng) Re-audit the amended enumeration (the verdict you
   audited gains required-stage conditions): fail-closed still holds on
   garbage records, and the new conditions cannot be satisfied vacuously.
+  *(sec-eng 2026-10-25: PASS — 40/40 adversarial probes on landed
+  `fidelity_verdict` (control green, empty/truncated/garbage/skip-marker/
+  vacuous classes all deny-or-raise); named property: the required-stage
+  conditions are payload-blind (a name-only record with capture provenance
+  reaches True) — unreachable today because `stage_events` is in-process
+  only, but it is the exact property the post-fire JSONL fix must not
+  expose; evidence on card t_5855d059.)*
 
 ### Post-fire follow-ups (2026-10-21)
 
@@ -365,3 +389,95 @@ seq 32 by the driver fixture tests.
   then: a tail-resumed artifact's `paper_faithful: false` with missing
   stages named is the resume artifact's shape, not a protocol deviation;
   the per-block evidence lives in the fingerprinted checkpoints.
+
+## Bug-hunter verification (2026-10-25, this change's two review rows)
+
+Both rows verified on the landed bytes (HEAD `afb220e`, worktree
+`/opt/data/quantibbler`, branch `qk-pertarget-cycle`). Environment named:
+CPU-only host (no accelerator), `UV_PROJECT_ENVIRONMENT=/opt/venv` shared
+across lanes, extras re-synced immediately before each run
+(`uv sync --all-groups --extra kernels --extra torch --extra hf` RC=0).
+`tests/ci/` and `tests/qk_report/` do not exist (lane-2 design item 4
+records the drift); the real paths are `tests/ptq/`, `tests/test_qk_report.py`,
+`tests/test_ci_referee.py`.
+
+Commands + counts (RC via `echo RC=$?`, never a filtered pipe):
+
+- `uv run pytest tests/ptq/ tests/test_qk_report.py tests/test_ci_referee.py -q`
+  → 57 failed / 331 passed, RC=1. Census: ONE class dominates —
+  `RuntimeError: solver backend 'torch' requires an accelerator` raised at
+  `solver_backend.resolve_device` via `magnitude_balance` (`lb_admm.py:586`).
+- Same + `QUANTIBBLER_DEVICE=cpu` → 52 failed / 336 passed (the env reached
+  the solve site only). Same + `SOLVER_BACKEND=numpy` → still 52 failed:
+  both knobs are deaf at the balance site.
+- Same + `/tmp` pytest plugin repointing `DEFAULT_SOLVER_BACKEND='numpy'`
+  (matches what these tests themselves configure: `PTQConfig(solver_backend=
+  "numpy", ...)`) → 4 failed / 384 passed; the 4 = the plugin's own expected
+  footprint (`test_default_backend_is_torch_and_fails_closed_without_accelerator`
+  pins `DEFAULT=='torch'`) + 3 subprocess-tier driver tests whose subprocess
+  has no plugin.
+- Discriminator: same 3 driver tests + `tests/ptq/test_tunefp_teacher.py` +
+  `tests/ptq/test_dual_stream.py` with a `sitecustomize.py` repointing the
+  default in the subprocess too → **17 passed, RC=0**. The refusal class is
+  therefore attributable to the balance site alone; with it patched at the
+  invocation level every teacher/guard/dual-stream regression test is green.
+- `uv run pytest tests/test_qk_report.py -q` → **91 passed** in 1.92s, RC=0.
+- Independent in-memory probe of `fidelity_verdict` on landed bytes: full
+  faithful record → True/all-true; empty record → False with all 7 required
+  conditions false; each required stage dropped in turn → exactly its own
+  condition falls; tune_fp skip-marked only → `required_tune_fp_executed`
+  False with all sibling conditions true; fp-mode `tune_scales_kd`
+  (`artifact: False`) → `required_tune_scales_kd_executed` False, siblings
+  true; genuine fire + later per-block skip → True (no false-deny); vacuous
+  event → `no_vacuous_teacher` False; `_STAGE_LINES.required` is the only
+  inventory (condition set == derived set).
+
+### Findings (named severity; evidence file:line)
+
+1. **should-fix (coder/lane owner)** — `magnitude_balance` ignores the run's
+   configured solver arm: `lb_admm.py:586` calls `get_backend(backend)` with
+   the kwarg unset → `DEFAULT_SOLVER_BACKEND='torch'`, and the production
+   caller `block_recon.py:1582` passes no `backend`, while the solve site
+   (`lb_admm.py:422`) honors cfg + `SOLVER_BACKEND`/`QUANTIBBLER_DEVICE`.
+   Consequences: (a) the ptq tier cannot run green on any accelerator-less
+   host (the 52-test class above) even when the tests configure the numpy
+   oracle — the recorded "two knobs moved the same 5 tests, the rest deaf"
+   pattern, reproduced; (b) on accelerator hosts the balance stage runs torch
+   even when cfg says numpy, so the recorded `solver_backend` provenance
+   misdescribes the balance stage's arm (attribution-doctrine violation).
+   Fix direction: thread the resolved backend into the balance call, keeping
+   fail-closed device semantics intact.
+2. **should-fix (orchestrator, archive gate)** — the A2 "memory-only" letter
+   is superseded on HEAD and its self-test is vacuous: `save_block_checkpoint
+   (..., y_b=y_b)` persists the teacher target under npz key `y_b`
+   (`checkpoints.py:245-260,300`; call site `block_recon.py:2072`), resume
+   restores the fp stream from it (`block_recon.py:2016-2018`) without the
+   pristine-source-hash + capture-index binding A2 requires (fingerprint
+   covers config+version+git only — `checkpoints.py:86-115`; calibration
+   data identity absent, so a cross-data resume mixes the two streams
+   silently). The A2 self-test greps archive keys for the substring
+   `teacher` (`test_tunefp_teacher.py:374-378`) and cannot see the real key.
+   Matches sec-eng's independent finding (lane-2 commit `ec906a7`).
+3. **should-fix (planner/orchestrator, spec graph)** — active deltas
+   contradict over the TuneFP cycle: qk-pertarget-cycle's delta SHALLs the
+   universal idx==0 skip (landed: `block_recon.py:1531`, pinned by
+   `test_dual_stream.py:361-370`), while qk-nanoquant-alignment-lane2's
+   design records the skip as "the single precise identity-prefix case"
+   (block 1 only) and its `guard_rationale_rewritten` scenario forbids
+   inherent-vacuity text — yet `block_recon.py:1490-1496` still justifies
+   the skip with the single-stream "objective identically zero" argument,
+   false under the landed dual-stream capture at blocks ≥ 2 (and
+   `_tune_fp`'s docstring line "the teacher is its deepcopy" is the
+   single-stream reading). This change's own delta text (compressed-prefix
+   teacher, once-per-block) is likewise superseded by lane-2 + pertarget
+   deltas; reconcile before `openspec archive`, or `openspec/specs/` will
+   carry contradictory SHALLs over the same requirement surface.
+
+Verdicts: review row 1 (teacher-once + guard) — PASS on the core contract
+(captured once pre-tuning, pristine-pinned weights via frozen reference copy,
+never recomputed from tuned weights, single production call site fed by the
+pristine forward, fingerprint + capture index in capture/tune_fp/ste records,
+marker present, two-norm fail-closed guard with diagnostic-continue and
+faithful-raise, regression suite green under the named invocation) with
+findings 1-3 above. Review row 2 (required-stage poison directions) — PASS
+clean (91/91 + probe).
