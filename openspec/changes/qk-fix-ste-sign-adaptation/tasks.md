@@ -32,7 +32,7 @@
 - [x] (coder) Rehearse the stage-trace probe against the fixed bytes: post
   per-linear flip counts for the 7 scoped linears and the accepted-flip
   deltas; record the new probe sha and the adopted alternative per linear.
-- [ ] (bug-hunter) Review on the landed bytes: instrumentation counts both
+- [x] (bug-hunter) Review on the landed bytes: instrumentation counts both
   factors and cannot be bypassed; refinement covers all seven scoped
   linears (attn q/k/v/o, mlp gate/up/down) and scales (s1, s2) are in the
   parameter set with movement recorded; the acceptance objective is the
@@ -43,14 +43,26 @@
   state; the re-scoping marker is greppable in code, spec, and run record;
   zero-flip completion without a declaration is impossible (prove by
   reading the control flow).
-- [ ] (sec-eng) Integrity pass: the flip pass adds no new persistence or
+- [x] (sec-eng) Integrity pass: the flip pass adds no new persistence or
   network surface; deterministic order removes nondeterminism from the
   artifact; accepted flips cannot violate the round-trip byte-exact contract
   (bits are exported from the same tensors the pass wrote).
-- [ ] (orchestrator) `npx --yes @fission-ai/openspec validate
+- [x] (orchestrator) `npx --yes @fission-ai/openspec validate
   qk-fix-ste-sign-adaptation --strict`; commit (specs + code in one commit);
   do not archive until the fixed stage's flip counts land in a real run on
   record.
+  <!-- 2026-10-25 orchestrator (t_a3cd5cee): validate → "Change
+  'qk-fix-ste-sign-adaptation' is valid", RC=0. Review ticks (bug-hunter,
+  sec-eng) + marker literal named in the delta + crystallization entry land
+  in the same commit. Archive WITHHELD per the run-record condition (fire
+  class, @user GO). Gates: `uv run pytest -q` 412 passed/16 skipped RC=0
+  (lean tier — torch/transformers absent from the shared venv at this
+  sync; ptq tier cleanly skipped; full-extras tier = 57F/331P/3D on
+  CPU-only hosts, proven cross-lane root cause 8d1bcc0 → card
+  t_5e71e281, this change's file 13/13 under the numpy-default probe per
+  both review lanes). cargo test 24/0 RC=0; clippy -D warnings RC=0;
+  cargo fmt --check RC=0; maturin build RC=0; pre-commit (3 touched
+  paths) RC=0. -->
 
 ## Implementation notes (coder, 2026-10-21)
 

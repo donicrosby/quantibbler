@@ -27,7 +27,10 @@ the run record.
 - **WHEN** the stage completes with zero accepted flips on a scoped linear
   on the non-faithful (diagnostic) path
 - **THEN** either the run record declares the stage scale-only for that
-  linear with the re-scoping marker, or the gate for this change fails
+  linear with the re-scoping marker — the literal
+  `ste_scale_only_declared` (`STE_RESCOPE_MARKER`,
+  `src/quantibbler/ptq/block_recon.py`) — or the gate for this change
+  fails
 - **AND** the paper-faithful path is exempt from the re-scope branch: it
   records the measured zero crossings and completes as the paper's
   mechanism — [NQ] prescribes sign+pack on whatever signs STE produced

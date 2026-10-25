@@ -207,3 +207,34 @@ Figure 3 right panel) stands.
   (measured preflight: (4,2048) = 519.9 ms inside the container) makes a
   tune-geometry split defensible — and then with the OOM evidence
   attached to the named deviation and the label false.
+
+## Implementation crystallization (orchestrator, 2026-10-25 — landing pass)
+
+- **Review closure.** Both review lanes PASS on the landed bytes (bug-hunter
+  t_fca49b96: nine clauses with file:line evidence; sec-eng t_908b2665
+  integrity verdict). Findings disposition at landing:
+  - Nit — the marker literal `ste_scale_only_declared` was absent from this
+    delta's spec text (present in code `STE_RESCOPE_MARKER`, run record,
+    tasks.md). Resolved in this landing: the
+    `sign_adaptation_is_effective_or_declared` scenario now names the
+    literal. Spec-only; no code change; no requirement semantics touched.
+  - Should-fix (bug-hunter) — phantom flip counters on the non-finite abort
+    path (`block_recon.py:1046-1072`): counters ingest flips from a
+    non-finite step that is then rolled back, so `zero_crossings` can skip
+    the ladder and declare `paper_ste` on restored uncrossed latents.
+    NOT fixed at landing (post-review code change on a passing change would
+    need its own RED first); filed as follow-up card for coder.
+  - Nit (stale comment `block_recon.py:1168-1170`) folded into the same
+    follow-up card. Pre-existing `torch.sign(0)=0` vs export `>=0→+1`
+    asymmetry (873c274, unreachable via accepted flips) recorded as a
+    hardening note, deliberately unfixed.
+  - Cross-lane blocker — `magnitude_balance` backend bypass
+    (`block_recon.py:1582`, born 8d1bcc0 AFTER this change landed 2bb04fb)
+    is lane-3 surface; fix card t_5e71e281. Not this change's delta; the
+    full-suite gate is red on CPU-only hosts for that reason alone
+    (57F/331P/3D twice, root cause proven by the numpy-default probe:
+    this change's file 13/13).
+- **Archive gate.** tasks.md withholds archive until the fixed stage's flip
+  counts land in a REAL run on record (a fire-bearing condition — @user GO
+  required). This landing therefore validates and commits, and reports the
+  change landed-but-not-archive-ready.
