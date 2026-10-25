@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Regenerate a model directory's `attention_gate.json` (change qk-sage-attention).
+"""Regenerate a model directory's `attention_gate.json`.
 
 The `gpu:sage` server face is opt-in only for models whose SHIPPED gate record
 passes ([SA] §4.3 metrics vs the exact face). This tool is the record's

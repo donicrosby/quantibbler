@@ -350,9 +350,8 @@ def test_scn_seam_oracle_is_dry_run_rc(monkeypatch):
     refuse, free SHALL proceed, unverifiable SHALL refuse. The refusal is
     correct and this test does not relax it. What was wrong is that the whole
     file's verdict depended on what a live fire happened to be doing on the
-    host: with qk-pertarget-v4 holding `quantibbler-ptq-run`, every DRY_RUN
-    `rc == 0` assertion here read as this refusal (8 reds at rc 2) with no code
-    defect behind them.
+    host: every DRY_RUN `rc == 0` assertion here read as this refusal (8 reds
+    at rc 2) with no code defect behind them.
 
     The scenario: the name-inspect answers with a held payload, so `rc == 2`
     means the interception is alive AND the guard refused through the full
@@ -578,9 +577,8 @@ def test_fence_hook_install_resolves_the_hooks_dir_in_a_linked_worktree(tmp_path
 
 # --- launch ownership: an unattributable fire is refused ----------------------
 # A fire that names no owner leaves the launch path unable to say whose run it
-# was. These
-# legs pin the refusal and the attribution it lacked, through the same DRY_RUN
-# seam every other gate in this file is proved through.
+# was. These legs pin the refusal and the attribution it lacked, through the
+# same DRY_RUN seam every other gate in this file is proved through.
 
 _TRAIL = pathlib.Path("/opt/data/tmp/quantibbler-breadcrumbs.log")
 
@@ -603,8 +601,8 @@ def test_scn_wrapper_refuses_unattributed_launch():
 def test_scn_launch_ownership_label_spellings_carry_the_same_evidence():
     """Spec scenario ``launch_ownership_label_spellings_accepted``.
 
-    The incident ruling named the container LABELS (`qkb_launch_owner` /
-    `qkb_launch_card`), and docker never shows a container its own labels, so a
+    The container labels (`qkb_launch_owner` / `qkb_launch_card`) are the
+    contract's spelling, and docker never shows a container its own labels, so a
     launcher holding only that vocabulary has to hand it over as env. Those
     spellings MUST be read as the same evidence -- never as a second, weaker
     contract -- and the launch MUST proceed and stamp the contract labels.

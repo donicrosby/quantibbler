@@ -554,7 +554,7 @@ _YB_KEY = "y_b"
 
 
 def load_block_yb(ckpt_dir: Path, index: int):
-    """Return the block's stored fp-stream target, or None if it predates Lane 2.
+    """Return the block's stored fp-stream target, or None if it predates the field.
 
     A checkpoint written before the field existed has no y_b; that is a resume
     across the change, and the caller falls back to recomputing the stream rather

@@ -123,9 +123,9 @@ def current_env() -> dict[str, str]:
 def current_commit() -> str:
     """The checkout's short commit, or "" when it cannot be read.
 
-    `spec.md:144-146` compares the recorded commit alongside ROCm and PyTorch, so
-    this must never raise: outside a checkout (installed package, sdist) an empty
-    string simply drops out of the comparison rather than failing a reporter.
+    The recorded commit is compared alongside ROCm and PyTorch, so this must
+    never raise: outside a checkout (installed package, sdist) an empty string
+    simply drops out of the comparison rather than failing a reporter.
     """
     try:
         out = subprocess.run(
@@ -142,12 +142,12 @@ def current_commit() -> str:
 def constants_stale(env: dict[str, str] | None = None) -> tuple[bool, list[str]]:
     """Whether the recorded constants may no longer describe this machine.
 
-    Compares commit, ROCm and PyTorch, as `spec.md:144-146` requires: any of the
-    three differing means the numbers may not describe this machine, so the
-    reporter warns on its first line instead of rendering a confident ETA from
-    stale measurements. A side with no value (no checkout, no HIP runtime) drops
-    out rather than counting as a difference. Returns the verdict and the list of
-    differing keys so the warning can name them.
+    Compares commit, ROCm and PyTorch: any of the three differing means the
+    numbers may not describe this machine, so the reporter warns on its first
+    line instead of rendering a confident ETA from stale measurements. A side
+    with no value (no checkout, no HIP runtime) drops out rather than counting
+    as a difference. Returns the verdict and the list of differing keys so the
+    warning can name them.
     """
     env = current_env() if env is None else env
     differing = [

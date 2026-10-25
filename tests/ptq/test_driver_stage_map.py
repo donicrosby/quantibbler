@@ -398,8 +398,8 @@ def test_a_faithful_claim_is_refused_at_preflight_on_an_undersampled_eval_window
 ):
     """`faithful_fire_uses_maximal_local_evaluation_window`, at preflight.
 
-    Bug Hunter's should-fix: the method label could not see the eval geometry,
-    so a faithful-flagged run on a 27%-coverage sample published a green claim.
+    The method label could not see the eval geometry, so a faithful-flagged run
+    on a 27%-coverage sample published a green claim.
     The refusal is a usage error (nonzero exit, named reason, the number to
     use), and it fires at preflight — nothing was quantized.
     """

@@ -24,8 +24,7 @@ Embeddings, LM heads and norms stay full precision (A-9); only ``nn.Linear``
 children of the block are factorized. In-block layer order is module
 declaration order (A-12).
 
-Stage changes folded here (2026-10-21 user directive, "follow the paper to
-the letter"):
+Stage changes folded here:
 
 * ``qk-fix-tunefp-teacher`` — the teacher is the pristine FP block's output
   on the compressed-prefix stream, captured once per block from a frozen
@@ -33,7 +32,7 @@ the letter"):
   placement with the still-FP remainder as its tunable set; a zero
   first-step gradient aborts with ``tune_fp_vacuous_teacher`` carrying both
   the gradient norm and the initial residual norm (A3).
-  Under Lane 2's dual streams the first target's skip is NOT a vacuity
+  Under the dual streams the first target's skip is NOT a vacuity
   claim: ``Y_b`` comes from the fp reference reading a different input than
   the block's own forward, so the target-1 gradient is no longer ~0 and the
   engine has real work. The skip stands only as "nothing to compensate yet"

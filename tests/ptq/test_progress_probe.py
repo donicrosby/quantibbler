@@ -1,4 +1,4 @@
-"""Progress-probe contract (change qk-fail-fast-loop).
+"""Progress-probe contract.
 
 The per-block observer: ``PTQConfig.progress_probe`` is invoked by the
 sequential block reconstruction after each block is written back into the

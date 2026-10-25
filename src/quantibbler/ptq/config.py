@@ -36,7 +36,7 @@ _LOSS_WEIGHT_MODES = ("terminal_grad", "uniform")
 class PrefixProbeAbort(RuntimeError):
     """Raised by a ``progress_probe`` to halt the pipeline mid-run.
 
-    Carries the evidence the run report needs (change ``qk-fail-fast-loop``):
+    Carries the evidence the run report needs:
     the aborting block's module name and 1-based depth, the quantized
     prefix's perplexity, the fp-prefix baseline at the SAME depth, and the
     ratio between them.
@@ -143,7 +143,7 @@ class PTQConfig:
         stage_latent: TuneLatentSTE hyperparameters ([NQ] App. C).
         stage_global: TuneScalesKD hyperparameters ([NQ] App. C).
         cosine_schedule: cosine lr schedule per stage ([NQ] App. C).
-        progress_probe: observer hook (change qk-fail-fast-loop): called after
+        progress_probe: observer hook: called after
             each block is written back into the host as ``(model, depth,
             name)``; may raise ``PrefixProbeAbort`` to halt the run. Default
             ``None`` (unset probe changes nothing); excluded from the

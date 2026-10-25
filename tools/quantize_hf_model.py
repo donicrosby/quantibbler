@@ -727,8 +727,8 @@ def _export_norm_weights(causal, inventory) -> np.ndarray:
 def _resolve_rev() -> str:
     """The checkout revision this driver file belongs to, or literal 'unknown'.
 
-    The launch line names the run's CODE identity (change qk-launch-attribution),
-    so the revision is read from the driver's OWN location rather than the cwd:
+    The launch line names the run's CODE identity, so the revision is read from
+    the driver's OWN location rather than the cwd:
     a fire launched from elsewhere still belongs to the tree its code came from,
     and that is what a reader of a surviving trail needs. A copy placed outside
     any checkout (CI smoke harnesses, bare scripts) has no revision to name and

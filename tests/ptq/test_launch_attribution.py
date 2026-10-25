@@ -11,18 +11,16 @@ Scenarios covered (IDs verbatim from the spec delta):
 - ``default_path_disambiguates_concurrent_launches``
 - ``configured_path_honored_exactly``
 
-and the launch-ownership scenarios added by the 2026-10-25 incident (an
-ownerless paper-faithful fire ran on this box; nothing in the launch path could
-say whose it was):
+and the launch-ownership scenarios:
 
 - ``driver_refuses_unattributed_launch``
 - ``label_spelled_owner_accepted``
 - ``owner_without_card_records_unset``
 
 Why the driver is invoked as a doomed start rather than a full run: the
-2026-10-20 corpse WAS a doomed start, and the whole point of this change is that
-the survivor attributes its run even when the launch protocol is violated. So
-every process here starts the driver for real and lets it abort where it lands —
+survivor attributes its run even when the launch protocol is violated, so a
+process that aborts where it lands still exercises the attribution.
+Every process here starts the driver for real and lets it abort where it lands —
 at model load, on a model path that does not exist — WITHOUT ever reaching
 quantization. ``--device cpu`` is passed by name (the driver's ``auto`` refuses
 on a box with no accelerator, which would abort before the trail under test is
@@ -168,8 +166,8 @@ def _assert_launch_identity(
 
     The epoch crumb field leads the line (every crumb's first field is the
     watchdog's own timestamp) and the identity fields follow in the order
-    ``design.md`` decision 1 pins, with the launch-ownership fields (2026-10-25
-    incident) appended after ``out``: pid, argv, rev, out, owner, card.
+    ``design.md`` decision 1 pins, with the launch-ownership fields appended
+    after ``out``: pid, argv, rev, out, owner, card.
     """
     assert line.split()[0].isdigit(), f"launch line does not lead with the epoch field: {line!r}"
     assert "start pid=" in line, line
@@ -423,7 +421,7 @@ def test_scn_driver_refuses_unattributed_launch(tmp_path):
 def test_scn_label_spelled_owner_accepted(tmp_path):
     """Spec scenario ``label_spelled_owner_accepted``.
 
-    The incident ruling named the container LABELS, and docker never shows a
+    The container labels are the contract's spelling, and docker never shows a
     container its own labels, so a launcher holding only that vocabulary hands it
     over as env. Those spellings MUST be read as the same evidence: the run
     proceeds and the launch line records that owner and card.

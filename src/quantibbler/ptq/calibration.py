@@ -162,7 +162,7 @@ def cotangent_grad_sq_sum(g: torch.Tensor) -> torch.Tensor:
     (App. C :3011).
 
     This is the SINGLE blessed implementation of that accumulation, and the body
-    is the form Lane 0's Arm B measured, adapted to one device per the dtype
+    is the form Arm B measured, adapted to one device per the dtype
     ruling. Three non-negotiables, each of them a defect when dropped:
 
     * ``reshape(-1, g.shape[-1])`` -- module outputs are 3D, ``[batch, seq, d_out]``.
