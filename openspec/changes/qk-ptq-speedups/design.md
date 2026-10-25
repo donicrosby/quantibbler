@@ -156,6 +156,13 @@ are recorded here rather than left to be re-litigated by the next reader.
    102.9 s versus 0.585 s at one thread — i.e. the 16-thread reading there is a
    contention artifact, not a property of the code. Any per-linear delta quoted
    for this change states the loadavg it was taken at.
+   **AMENDED 2026-10-25, same day (quiet window — superseded by the row-9
+   measurement section at the END of this file): the two contended readings in
+   this item (`102.9 s`, `0.585 s`) are SUPERSEDED as characterizations of the
+   box.** On a quiet box the same op pair reads **20.10 ms** at one thread and
+   **130.6 ms** at 16 threads: the `102.9 s` figure is ~790× the quiet 16-thread
+   value and `0.585 s` is ~29× the quiet 1-thread value. The contention caveat in
+   this item stands and is re-measured there; these two numbers do not.
 
 ## Implementation crystallization (coder, 2026-10-25) — tasks 17, 18
 
@@ -295,3 +302,88 @@ above them.
    `t_97576d39`'s "tasks 19, 23" are the row line numbers, and every insertion above a
    cited row invalidates them (the sibling entry records the same convention for rows
    17/18). Cite the row's text; the line numbers here are as of this record only.
+
+## Implementation crystallization (coder, 2026-10-25) — row 9, the measured min_eigs probe tax
+
+The row asks for solver wall time on **real production layers, flag on vs off**, with the
+per-linear delta recorded. The blocked attempt could not take it (box at loadavg 47–70 /
+32 cores); the row-9 ruling then authorized a labeled 1-thread CPU micro-measure and named
+the quiet-window reading as an optional, non-blocking follow-up. **The quiet window arrived
+(same day), so both were taken**, and this section supersedes item 6 above.
+
+**Regime — stated once, because a number without it is not evidence.** `/opt/venv` python
+3.12, **torch 2.14.1+cpu** (`torch.version.hip None`, `torch.cuda.is_available() False`,
+32 CPUs) — the dev CPU wheel, so this is NOT the production (interpreter × device) pair.
+Backend/device are declared, never implicit: default `solver_backend="torch"` with
+`QUANTIBBLER_DEVICE=cpu` (the documented diagnostic reading; implicit torch refuses on this
+host by design). Real weights from the local `Qwen3-0.6B` cache, **rank 512** (production),
+float64. Thread counts set explicitly per arm
+(`OPENBLAS_NUM_THREADS`/`OMP_NUM_THREADS`/`MKL_NUM_THREADS`); `/proc/loadavg` is stamped on
+every pair by the instrument. Instrument: `/opt/data/scratch/speedups_measure.py` (paired
+**interleaved** `off,on` within a rep, one process, `n_iter == K` and "the gate tracks the
+flag" asserted after every solve), attached to ticket `t_2522c684`. Production layers:
+`model.layers.0.self_attn.q_proj` (2048×1024) and `model.layers.0.mlp.down_proj` (1024×3072).
+
+All Δ/ratio cells are the instrument's own medians (`ratio := median(on) / median(off)`,
+`Δ := median(on − off)` over the reps of that row); a row with `reps ≥ 2` therefore also
+carries interleaved replication, and the per-rep spread is named where it matters.
+
+| thread env | layer | K | reps | off ms/iter | on ms/iter | Δ ms/iter | ratio | Δ s/linear (Δ × K/1e3) | loadavg |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | q_proj | 20 | 2 | 301.8 | 322.6 | **+20.75** | 1.069 | +8.3 (extrap.) | 2.8–3.1 |
+| 1 | down_proj | 20 | 2 | 438.4 | 457.5 | **+19.08** | 1.044 | +7.6 (extrap.) | 2.8–3.1 |
+| 1 | q_proj | **400** | 1 | 324.6 | 334.2 | **+9.61** | 1.030 | **+3.85 (measured)** | 2.9–3.9 |
+| 16 | q_proj | 20 | 2 | 582.3 | 722.5 | **+140.24** | 1.241 | +56.1 (extrap.) | 2.8–3.4 |
+| 16 | down_proj | 20 | 2 | 794.5 | 969.2 | **+174.67** | 1.220 | +69.9 (extrap.) | 2.8–8.8 |
+| 16 | q_proj | 400 | 1 | 558.8 | 1202.2 | +643.5 | 2.152 | +257.4 (measured) | 3.6 — **flagged, see below** |
+| 16 | q_proj | 60 | 3 | 2216.7 | 2481.7 | +328.7 | 1.120 | +131.5 (extrap.) | 2.7–7.2 — **contended**; per-rep ratios 1.18 / 0.69 / 1.18 |
+
+**Per-linear delta (K=400, rank 512, real production linear):** **+3.9 s at 1 thread** —
+directly measured, 129.84 s guarded vs 133.69 s probed (1.030×); that layer's own K=20 pair
+extrapolates to +8.3 s (down_proj +7.6 s), so read the 1-thread cost as **~4–8 s/linear**. At 16 threads the
+load-protected interleaved pair gives Δ 140.2 (q_proj) and 174.7 (down_proj) ms/iter, i.e.
+**≈ +56–70 s/linear**, against a guarded solve of 582–795 ms/iter there.
+
+**The benchmark claim is REPRODUCED (−8 % on the op pair).** Claim: "2× `eigvalsh(512×512)`
+≈ 142 ms/iteration at 16 threads vs 62 ms for the 2× matmul + 2× Cholesky it sits next to."
+Quiet-box op-level micro-bench (same interpreter, torch, `r=512`):
+
+| ops | 1 thread | 16 threads |
+|---|---|---|
+| `eigvalsh(512)` | 9.44 ms | 60.42 ms (numpy sibling: 59.96 ms) |
+| 2× `eigvalsh(512)` | 20.10 ms | **130.58 ms** (claim 142: −8 %) |
+| 2× (GEMM + Cholesky) | 17.29 ms | **49.63 ms** (claim 62: −20 %) |
+
+and the in-solve interleaved marginal at 16 threads is 140–175 ms/iter (median 157.5) —
+the same quantity the row names, measured where it is actually paid.
+
+**Findings (each one is a reason the gate exists):**
+
+1. **The tax is a 16-thread pathology, not a fixed cost.** One thread is **6.4× faster**
+   than 16 for `eigvalsh(512)` (9.44 vs 60.42 ms) and **1.72× faster** for the whole guarded
+   solve on the same layer (324.6 vs 558.8 ms/iter, quiet box): OpenMP dispatch overhead
+   dominates a 512³ problem, so the operator's own 16-thread setting is the worst case —
+   which is where the probe taxed production solves (ratio 1.22–1.24) versus ~1.03–1.07 at
+   one thread.
+2. **The single K=400 16-thread pair is flagged, not quoted.** Its off arm
+   (558.8 ms/iter) matches the interleaved K=20 off arm (582.3) while its on arm
+   (1202.2 ms/iter) ran **1.66×** its K=20 sibling (722.5) — the signature of co-tenant
+   load arriving inside the ~290 s on-arm window of an unreplicated sequential pair, not of
+   a K-dependence (an `eigvalsh` on a fixed 512² matrix costs the same at iteration 400 as
+   at iteration 1). The interleaved pair is the load-protected reading; this one is an upper
+   bound.
+3. **The contention band is measured, not asserted.** A third 16-thread run (K=60, reps=3,
+   interleaved) came back at median Δ +328.7 ms/iter with **rep 1 reading ratio 0.69** — the
+   probe arm FASTER than the guarded arm (215.1 s off vs 148.9 s on) — while off-arm cost
+   inflated from 559 to 1808–3585 ms/iter, at per-pair loadavg 7.18 / 4.53 / 2.73 and 15.10
+   observed mid-run (32 cores). Only the quiet-window interleaved pair and the 1-thread pairs
+   are load-protected; no single 16-thread pair is a property of the code.
+4. **The gated solve is ~22 % cheaper at the production thread setting and ~4–7 % cheaper at
+   one thread** (interleaved medians: ratio 1.241 / 1.220 at 16 threads, 1.069 / 1.044 at 1),
+   i.e. the +56–70 s/linear versus +4–8 s/linear above. It is a fixed per-linear tax that does
+   not shrink while the GEMMs around it do (the `min_eigs` field's own comment), on all 196
+   linears of a fire — which is what the row exists to establish.
+5. **Optional follow-up (never blocking, per the ruling):** the production
+   (interpreter × device) pair — `quantibbler-ptq:rocm-official` + `/dev/kfd` — is the only
+   configuration in which this row's number is a production number; the dev CPU wheel cannot
+   reach the accelerated path at all.
