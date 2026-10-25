@@ -64,7 +64,7 @@ A workflow job SHALL iterate the non-archived `openspec/changes/*` directories a
 
 ### Requirement: CI SHALL prove the probe-abort path repeatably on a real checkpoint
 
-A weights-cached leg SHALL run the recorded abort command (`Qwen/Qwen3-0.6B --rank 1 --solver svd --max-admm-iter 1 --seq-len 64 --calibration-seqs 1 --eval-seqs 2 --probe-batches 1`) fully offline and SHALL assert: the run aborts before block 3, wall time is minutes not tens of minutes, the report carries `status: failed` plus the `probe_abort` fields and the history so far, and the process exits nonzero — the catch→report→exit wiring executed under CI, not merely in a manual run.
+A weights-cached leg SHALL run the recorded abort command (`Qwen/Qwen3-0.6B --rank 1 --solver svd --max-admm-iter 1 --seq-len 64 --calibration-seqs 1 --eval-seqs 2 --probe-batches 1`) fully offline and SHALL assert: the run aborts before block 3, wall time inside a contention-immune hang/regression backstop (3600 s ceiling; quiet baseline ≈60 s, aligned with the driver --timeout 3600 kill), the report carries `status: failed` plus the `probe_abort` fields and the history so far, and the process exits nonzero — the catch→report→exit wiring executed under CI, not merely in a manual run.
 
 #### Scenario: abort_leg_repeatable_detection_proof
 

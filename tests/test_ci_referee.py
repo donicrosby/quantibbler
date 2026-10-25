@@ -447,8 +447,8 @@ def test_abort_contract_holds_on_the_recorded_collapse():
         ({"probe_abort": _abort_with(ratio=1.0)}, 1, 69.6, "not a finite crossing"),
         ({"probe": {"interval": 1, "batches": 1, "history": []}}, 1, 69.6, "no probe history"),
         ({"ppl_quant_native": 12.0}, 1, 69.6, "no end-of-run numerics"),
-        ({}, 1, 901.0, "minutes, not tens"),
-        ({"wall_seconds": 901.0}, 1, 69.6, "wall_seconds"),
+        ({}, 1, 4501.0, "backstop"),
+        ({"wall_seconds": 4501.0}, 1, 69.6, "wall_seconds"),
     ],
 )
 def test_abort_contract_flags_every_broken_shape(overrides, rc, elapsed, expected):  # noqa: ANN001

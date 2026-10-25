@@ -244,8 +244,10 @@ jobs:
           key: ${{ env.HF_CACHE_KEY }}
           fail-on-cache-miss: true
       # The recorded abort command, executed offline, with the abort asserted
-      # from the real process: abort before block 3, minutes not tens of minutes,
-      # status failed + probe_abort fields + the trajectory so far, nonzero exit.
+      # from the real process: abort before block 3, wall time inside the 3600s
+      # contention-immune backstop (quiet baseline ≈60s — catches hangs and
+      # gross regressions, not an abort-latency contract), status failed +
+      # probe_abort fields + the trajectory so far, nonzero exit.
       # Its invocation list also names `--device cpu` (see tools/ci/abort_leg.py):
       # the recorded run this leg cites was itself a CPU run under CI, and
       # `--device auto` is fail-closed on the accelerator-less runner.
