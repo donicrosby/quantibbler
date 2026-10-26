@@ -53,7 +53,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 #: The required stages a crash in the pipeline TAIL leaves to the journal: the
 #: ones the interrupted launch executed inside the block loop. Phase-1
 #: statistics re-runs on the resumed launch (it is not checkpointed), and the
-#: driver's scale stage is emitted after the block loop, so neither needs it.
+#: scale stage is emitted after the block loop by the ``calibrate_scales`` call
+#: site in ``api.py`` — so the resume re-runs (and re-emits) both, and neither
+#: needs the journal to attest it.
 _SOLVE_STAGES = ("capture", "tune_fp", "lb_admm", "ste", "sign_extract_pack")
 
 
@@ -124,7 +126,8 @@ def test_a_tail_resumed_record_matches_the_uninterrupted_record(
     Interrupt a faithful tail: solve both blocks, die at scale calibration.
     Every block is then on disk, so the resume re-runs NO solve — the solver is
     rigged to explode if it is called — and the only events the resumed launch
-    can emit itself are Phase-1 statistics. Everything else in its record comes
+    can emit itself are Phase-1 statistics and the scale stage (both re-run on
+    every launch; neither is checkpointed). Everything else in its record comes
     from the journal, and the record has to read exactly like the uninterrupted
     run's, which is what makes a tail-resumed artifact's label mean the same
     thing as a clean run's.
@@ -155,8 +158,8 @@ def test_a_tail_resumed_record_matches_the_uninterrupted_record(
     resumed = _launch(cfg, batches, ckpt_dir, driver_module)
     monkeypatch.undo()
 
-    assert _names(resumed) == [*journal_names, "phase1_statistics"], (
-        "the resumed record is not exactly the seeded journal plus the stage this launch re-emits"
+    assert _names(resumed) == [*journal_names, "phase1_statistics", "tune_scales_kd"], (
+        "the resumed record is not exactly the seeded journal plus the stages this launch re-emits"
     )
     assert resumed[: len(journal)] == journal, (
         "the journal was not seeded verbatim at the head of the resumed record"
@@ -207,7 +210,7 @@ def test_a_missing_journal_denies_exactly_as_before_the_journal_existed(
     resumed = _launch(cfg, batches, ckpt_dir, driver_module)
     monkeypatch.undo()
 
-    assert _names(resumed) == ["phase1_statistics"]
+    assert _names(resumed) == ["phase1_statistics", "tune_scales_kd"]
     conditions = fidelity_conditions("admm", [], resumed, requested=True)
     for key in _SOLVE_STAGES:
         assert conditions[f"required_{key}_executed"] is False, (

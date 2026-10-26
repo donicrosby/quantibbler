@@ -98,19 +98,44 @@ def calibrate_scales(
         raise ValueError("scale calibration needs calibration batches")
 
     linears = dict((name, m) for name, m in model.named_modules() if isinstance(m, nn.Linear))
+    # Device authority for the whole stage is the quantized layer's own weight
+    # (activation-as-authority, never a process-wide default): the scale
+    # parameters, the frozen factors and the paged teacher logits all follow it.
+    # On a CPU-only box every move below is a no-op, so that path is unchanged.
+    device = None
+    for name in layers:
+        linear = linears.get(name)
+        if linear is not None and getattr(linear, "weight", None) is not None:
+            device = linear.weight.device
+            break
+    if device is None:
+        device = next(model.parameters()).device
     # Scale tensors live outside the modules so no Linear weight is ever in
     # the autograd graph of this phase.
     s1_params = {
-        name: torch.from_numpy(np.ascontiguousarray(st.s1, dtype=np.float64))
+        name: torch.from_numpy(np.ascontiguousarray(st.s1, dtype=np.float64)).to(device)
         for name, st in layers.items()
     }
     s2_params = {
-        name: torch.from_numpy(np.ascontiguousarray(st.s2, dtype=np.float64))
+        name: torch.from_numpy(np.ascontiguousarray(st.s2, dtype=np.float64)).to(device)
+        for name, st in layers.items()
+    }
+    # The packed factors are frozen for the whole stage, so they are built ONCE
+    # here (on the device, at stage scope) rather than rebuilt from NumPy inside
+    # every step: the per-step rebuild was both the device mismatch and pure cost.
+    ub_params = {
+        name: torch.from_numpy(np.ascontiguousarray(st.Ub.astype(np.float64))).to(device)
+        for name, st in layers.items()
+    }
+    vb_params = {
+        name: torch.from_numpy(np.ascontiguousarray(st.Vb.astype(np.float64))).to(device)
         for name, st in layers.items()
     }
     # Pre-stage snapshots (trust-region references + restore sources).
-    pre_s1 = {n: t.numpy().copy() for n, t in s1_params.items()}
-    pre_s2 = {n: t.numpy().copy() for n, t in s2_params.items()}
+    # .detach()/.cpu() are no-ops on the host path and required once the tensors
+    # are device-resident (a bare .numpy() raises there).
+    pre_s1 = {n: t.detach().cpu().numpy().copy() for n, t in s1_params.items()}
+    pre_s2 = {n: t.detach().cpu().numpy().copy() for n, t in s2_params.items()}
     for t in (*s1_params.values(), *s2_params.values()):
         t.requires_grad_(True)
     # Per-tensor RELATIVE lr: an
@@ -138,7 +163,7 @@ def calibrate_scales(
     # Teacher logits materialize in 2-row slices: a full 8x512x152k batch
     # of bf16 logits is ~2.4GB at once; 2 rows is ~600MB. The cache write
     # below walks the same slice shape, so peak transient stays bounded.
-    probe = teacher(batches[0][:2])
+    probe = teacher(batches[0][:2].to(device))
     logit_shape = tuple(probe.shape)
     vocab = logit_shape[-1]
     rows_per_sample = logit_shape[1] if len(logit_shape) == 3 else 1
@@ -155,8 +180,11 @@ def calibrate_scales(
     row = 0
     with torch.no_grad():
         for b in batches:
+            b = b.to(device)
             for lo in range(0, b.shape[0], 2):
                 t = teacher(b[lo : lo + 2]).detach().reshape(-1, vocab)
+                # The cache itself stays on the host (memmap): only the teacher
+                # forward ran on the device, and .cpu() is what pages it back.
                 teacher_mm[row : row + t.shape[0]] = t.to(torch_cache_dt).cpu().numpy()
                 row += t.shape[0]
                 del t
@@ -167,7 +195,7 @@ def calibrate_scales(
     bs = max(1, min(cfg.stage_global.batch_size, n))
     total = max(cfg.stage_global.epochs * (n // bs or 1), 1)
     kl_trace: list[float] = []
-    inputs = torch.cat(batches, dim=0)
+    inputs = torch.cat(batches, dim=0).to(device)
     # Disk-backed cache: row-slices page in per step (bs x rows_per_sample
     # logits only), so KD-step RAM is O(batch), not O(dataset).
     all_logits = teacher_mm
@@ -176,14 +204,14 @@ def calibrate_scales(
         """Forward with the tuned scales applied at each quantized layer."""
         handles = []
         try:
-            for name, st in layers.items():
+            for name in layers:
                 linear = linears.get(name)
                 if linear is None:
                     continue
                 s1 = s1_params[name]
                 s2 = s2_params[name]
-                ub = torch.from_numpy(np.ascontiguousarray(st.Ub.astype(np.float64)))
-                vb = torch.from_numpy(np.ascontiguousarray(st.Vb.astype(np.float64)))
+                ub = ub_params[name]
+                vb = vb_params[name]
 
                 def scaled_forward(x_in, _ub=ub, _vb=vb, _s1=s1, _s2=s2, _lin=linear):
                     # W_q = (s1 ⊙ Ub) @ (s2 ⊙ Vb)ᵀ, shape (dout, din) — the
@@ -191,9 +219,12 @@ def calibrate_scales(
                     # Bias-free linears (every modern LLM's attention/MLP
                     # projections) skip the bias term entirely.
                     w = (_s1.unsqueeze(1) * _ub) @ (_s2.unsqueeze(1) * _vb).T
-                    out = x_in @ w.to(x_in.dtype).T
+                    # w is born wherever the factors live (the device); the
+                    # activation is the authority for BOTH device and dtype, so
+                    # coerce to it — a dtype-only cast leaves mat2 on the CPU.
+                    out = x_in @ w.to(x_in.device, x_in.dtype).T
                     if _lin.bias is not None:
-                        out = out + _lin.bias.to(x_in.dtype)
+                        out = out + _lin.bias.to(device=x_in.device, dtype=x_in.dtype)
                     return out
 
                 handles.append((linear, linear.forward))
@@ -223,9 +254,11 @@ def calibrate_scales(
             # also keep the KL-loss transient at bs x vocab, not n x vocab.
             row0 = lo * rows_per_sample
             row1 = hi * rows_per_sample
+            # Paged in from the host cache per step; the student's device and
+            # dtype are the authority for the loss, so both operands match.
             y_flat = torch.from_numpy(
                 np.ascontiguousarray(all_logits[row0:row1], dtype=cache_dt)
-            ).to(student.dtype)
+            ).to(device=student.device, dtype=student.dtype)
             y_bs = y_flat.view(hi - lo, rows_per_sample, -1) if rows_per_sample > 1 else y_flat
             loss = _kl_with_logits(y_bs, student, cfg.temperature)
             opt.zero_grad()
@@ -259,10 +292,11 @@ def calibrate_scales(
     s2_fin = {n: np.isfinite(t.detach().cpu().numpy()).all() for n, t in s2_params.items()}
     for name, st in layers.items():
         if not (s1_fin[name] and s2_fin[name]):
-            # Poisoned: restore the EXACT pre-stage snapshot. (s1_params
-            # share memory with the layer book via from_numpy, so the
-            # stale st.s1 arrays are themselves NaN — rebinding is not
-            # optional here.)
+            # Poisoned: restore the EXACT pre-stage snapshot. On the host path
+            # the tensors alias the layer book via from_numpy, so the stale
+            # st.s1 arrays are themselves NaN and rebinding is not optional; on
+            # the accelerator the .to(device) copy left them untouched and the
+            # rebind is simply idempotent.
             st.s1 = np.array(pre_s1[name], dtype=np.float64, copy=True)
             st.s2 = np.array(pre_s2[name], dtype=np.float64, copy=True)
             continue

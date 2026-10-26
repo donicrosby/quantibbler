@@ -13,6 +13,7 @@ accounting is computed from serialized bytes only (D5).
 from __future__ import annotations
 
 import copy
+import time
 from pathlib import Path
 
 import numpy as np
@@ -49,6 +50,19 @@ def _phase1_chunk_rows(model: nn.Module) -> int | None:
         if param.dtype.is_floating_point:
             return None if param.dtype == torch.float64 else _PHASE1_CHUNK_ROWS
     return None
+
+
+def _stage_device(model: nn.Module) -> str:
+    """Where the torch-autograd stages run, read off the model itself.
+
+    Activation-as-authority: the quantized layer's own weight names the device
+    (never a process-wide default), so a stage row states the numerics that
+    produced it instead of assuming them.
+    """
+    for module in model.modules():
+        if isinstance(module, nn.Linear) and getattr(module, "weight", None) is not None:
+            return str(module.weight.device)
+    return str(next(model.parameters()).device)
 
 
 def quantize_model(
@@ -169,7 +183,22 @@ def quantize_model(
         # are bit-frozen ([NQ] Sec 3.3, Algorithm 1 lines 26-27). The tuned
         # scales are then written back into the host model's frozen weights so
         # the host forward equals the artifact forward bit-for-bit.
+        #
+        # The stage's OWN row is measured at this call site: the stage's cost is
+        # the model forward/backward on its device, so only the caller knows the
+        # elapsed time and the device the port resolved. Emitting it here is
+        # what gives the stage map a measured row time instead of a null one,
+        # exactly as the STE/TuneFP rows carry theirs.
+        _kd_t0 = time.perf_counter()
         calibrate_scales(model, layers, teacher, batches, config)
+        if recorder is not None:
+            recorder(
+                "tune_scales_kd",
+                device=_stage_device(model),
+                elapsed_s=time.perf_counter() - _kd_t0,
+                factor_mode=config.factor_mode,
+                artifact=config.factor_mode != "fp",
+            )
 
     # Finalize the scales at their storage precision: the qpk1 container's
     # scale values ARE the canonical artifact scales, so rounding to the
