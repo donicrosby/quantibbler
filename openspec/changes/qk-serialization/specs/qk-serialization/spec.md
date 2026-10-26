@@ -57,11 +57,12 @@ pass as a good one.
 
 ### Requirement: Producers SHALL emit every surface through its model
 
-The solver-probe writer, the stage-journal writer, and the driver's launch line
-SHALL serialize through the model that owns their surface, and the stage-journal
-reader SHALL validate every line through `StageJournalEntry`: a line naming a
-`schema_version` this build does not read SHALL raise `ArtifactSchemaError`
-before any event is seeded into a resume.
+The solver-probe writer and the stage-journal writer SHALL serialize through the
+model that owns their surface; the driver's launch line SHALL be rendered FROM its
+`LaunchAttributionRecord` — every identity field is the record's own value — with
+its text and leading epoch byte-identical. The stage-journal reader SHALL validate
+every line through `StageJournalEntry`: a line naming an unread `schema_version`
+SHALL raise `ArtifactSchemaError` before any event is seeded into a resume.
 
 #### Scenario: producers_emit_through_their_model
 

@@ -481,11 +481,14 @@ def read_stage_log(ckpt_dir: Path, cfg, model) -> list[tuple[str, dict]]:
             event, info = stage_journal_record(record)
         except ValueError as exc:
             raise RuntimeError(f"{path}:{lineno}: {exc}") from exc
-        # The shape gate above decides with readable prose; the model adds the
-        # two things it cannot check -- the line's ``schema_version``, and a
-        # payload that grew a key no version of this journal declared. A version
-        # this build does not read refuses by NAME (``ArtifactSchemaError``),
-        # never parsed as the current shape.
+        # The shape gate above decides with readable prose and owns the
+        # non-finite refusal; the model adds the two things it cannot check --
+        # the line's ``schema_version``, and an undeclared TOP-LEVEL key
+        # (``extra="forbid"``). The payload key set stays OPEN on purpose:
+        # ``_STAGE_PAYLOAD_KEYS`` is a required-subset table, not a closed one,
+        # so a payload that grew a key is accepted here. A version this build
+        # does not read refuses by NAME (``ArtifactSchemaError``), never parsed
+        # as the current shape.
         try:
             StageJournalEntry.model_validate(record)
         except ArtifactSchemaError as exc:

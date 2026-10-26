@@ -191,13 +191,18 @@ move bytes, and neither moves a key a consumer reads:
   where the driver tripwire reads it.
 
 **The stage-journal reader keeps two gates, on purpose.** `stage_journal_record`
-decides the SHAPE and owns the refusal prose the forensics read; the model adds
-the two things that gate cannot check — the line's `schema_version`, and a
-payload that grew a key no version of this journal declared (`extra="forbid"`).
-Collapsing them into the model alone would replace "carries no payload object"
-with pydantic's "Field required", i.e. trade a diagnostic for a redundant parse.
-The version refusal is raised as `ArtifactSchemaError` (not wrapped into a plain
-`RuntimeError`), so a caller can catch the shape-version failure by name.
+decides the SHAPE and owns the refusal prose the forensics read — including the
+non-finite (MONOTONE-LEVERAGE) refusal, which the model only gets by delegating
+to it. The model adds the two things that gate cannot check — the line's
+`schema_version`, and an undeclared TOP-LEVEL key (`extra="forbid"`). The payload
+key set is deliberately OPEN: `_STAGE_PAYLOAD_KEYS` is a required-subset table,
+not a closed set, so an `info` carrying payload keys no version declared is
+accepted by both gates (measured: 22 of the 26 recorded `stage-events.jsonl`
+lines carry such keys). Collapsing the two gates into the model alone would
+replace "carries no payload object" with pydantic's "Field required", i.e. trade
+a diagnostic for a redundant parse. The version refusal is raised as
+`ArtifactSchemaError` (not wrapped into a plain `RuntimeError`), so a caller can
+catch the shape-version failure by name.
 
 **The writer refuses at the append too.** `append_stage_event` now builds the
 entry model before it opens the file: a line the reader would refuse is a run
@@ -216,4 +221,3 @@ hand during forensics and by `artifacts/lane0-fire-r3-20261024/rows.jsonl`-style
 inspection). A pre-change row that lacks `min_eigs` therefore refuses under the
 model rather than loading — the "load or refuse loudly" policy, and the reason
 the divergence was resolved in the writer rather than by an optional field.
->>>>>>> 48d192a (feat(qk-serialization): emit the journal/probe surfaces through their models)
