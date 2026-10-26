@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use quantibbler_qpk1::loader;
+use quantibbler_qpk1::{Blob, RemainderDtype};
 use serde::Deserialize;
 
 use crate::engine::AttentionFaceDecision;
@@ -402,30 +403,247 @@ pub struct LoadedModel {
     /// carry their own dims).
     pub vocab_size: usize,
     pub d_model: usize,
+    /// The byte source the blob loader used (BS-1); `None` for a directory
+    /// source, which is never mapped.
+    pub blob_load_method: Option<BlobLoadMethod>,
+    /// The model's own Jinja2 chat template, read from the artifact's
+    /// `tokenizer.json` `chat_template` field (BS-5). `None` = the artifact
+    /// declares none, and `/v1/chat/completions` refuses (400) rather than
+    /// guessing a prompt format.
+    pub chat_template: Option<String>,
+}
+
+/// Build the tokenizer from an artifact `tokenizer.json` AND take the model's
+/// chat template out of the same document (BS-5, design S5).
+///
+/// The document serves both purposes: it is the BPE definition the `tokenizers`
+/// crate consumes, and it carries the model's Jinja2 `chat_template` (the crate
+/// exposes no arbitrary metadata field).
+///
+/// The key must NOT reach the crate: `tokenizers` 0.23.x rejects any unknown
+/// top-level key outright — measured, a real HF `tokenizer.json` plus one extra
+/// key fails to parse at all ("expected `,` or `}`") — so the template is read
+/// here and removed from the document the tokenizer is built from. Only a
+/// document that actually declares the key is re-serialized; an artifact
+/// without one is handed over byte-for-byte. A blank or non-string declaration
+/// loads fine and yields `None`, so the chat endpoint refuses (BS-5.2) rather
+/// than inventing a prompt format.
+pub fn tokenizer_from_json(
+    bytes: &[u8],
+    label: &str,
+) -> Result<(tokenizers::Tokenizer, Option<String>), String> {
+    let mut parsed: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|e| format!("{label}: {e}"))?;
+    let declared = {
+        let object = parsed
+            .as_object_mut()
+            .ok_or_else(|| format!("{label}: the tokenizer document is not a JSON object"))?;
+        object.remove("chat_template")
+    };
+    let template = declared
+        .as_ref()
+        .and_then(serde_json::Value::as_str)
+        .filter(|t| !t.trim().is_empty())
+        .map(str::to_string);
+    let tokenizer = if declared.is_some() {
+        let stripped = serde_json::to_vec(&parsed).map_err(|e| format!("{label}: {e}"))?;
+        tokenizers::Tokenizer::from_bytes(&stripped).map_err(|e| format!("{label}: {e}"))?
+    } else {
+        tokenizers::Tokenizer::from_bytes(bytes).map_err(|e| format!("{label}: {e}"))?
+    };
+    Ok((tokenizer, template))
+}
+
+/// The byte source the blob loader used (BS-1): mmap where the platform and
+/// mount permit it, `std::fs::read` otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlobLoadMethod {
+    Mmap,
+    Read,
+}
+
+impl BlobLoadMethod {
+    /// The label the startup log carries (`load_method: "mmap"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mmap => "mmap",
+            Self::Read => "read",
+        }
+    }
+}
+
+/// Test-only hatch (BS-1.3): forces the read fallback so both byte sources can
+/// be compared on ONE fixture. Read by the loader; set only from
+/// `tests/common/mod.rs` — there is no production story for a forced fallback.
+pub const FORCE_READ_FALLBACK_ENV: &str = "QKB_TEST_FORCE_READ_FALLBACK";
+
+/// The engine's serving precision, resolved from the artifact's DECLARED
+/// remainder dtype (BS-2). Resolved once at load and stored on `ModelWeights`;
+/// never inferred from a byte size, extension, or default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServingDtype {
+    Fp32,
+    Bf16,
+}
+
+impl ServingDtype {
+    /// The `GET /v1/models` `dtype` spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fp32 => "fp32",
+            Self::Bf16 => "bf16",
+        }
+    }
+}
+
+impl From<RemainderDtype> for ServingDtype {
+    fn from(declared: RemainderDtype) -> Self {
+        match declared {
+            RemainderDtype::Float32 => Self::Fp32,
+            RemainderDtype::Bf16 => Self::Bf16,
+        }
+    }
+}
+
+/// The bytes a blob was read from, plus the access path that produced them.
+/// One `Deref` into `[u8]` so the two sources are interchangeable downstream.
+enum BlobBytes {
+    Mapped(memmap2::Mmap),
+    Owned(Vec<u8>),
+}
+
+impl std::ops::Deref for BlobBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Mapped(map) => map,
+            Self::Owned(bytes) => bytes,
+        }
+    }
 }
 
 /// Load a qpk1 model artifact — a directory (legacy) or a single-file blob —
-/// or fail with a diagnostic naming the file (qk-artifact-blob BL-1).
-pub fn load(model_dir: &Path) -> Result<LoadedModel, String> {
-    let dir = loader::ModelDirectory::load(model_dir)?;
+/// or fail with a diagnostic naming the file (qk-artifact-blob BL-1). The
+/// returned handle carries the blob byte source as a VALUE (not only a log
+/// line), so BS-1.1/BS-1.3 can be asserted without scraping stderr.
+pub fn load(model_path: &Path) -> Result<LoadedModel, String> {
+    let meta =
+        std::fs::metadata(model_path).map_err(|e| format!("{}: {e}", model_path.display()))?;
+    let (dir, method) = if meta.is_dir() {
+        (loader::load(model_path)?, None)
+    } else if meta.is_file() {
+        let (dir, method) = load_blob(model_path)?;
+        (dir, Some(method))
+    } else {
+        return Err(format!(
+            "model path {} is neither a directory nor a regular file",
+            model_path.display()
+        ));
+    };
+    compose(model_path, dir, method)
+}
+
+/// The blob load path (BS-1): validate the metadata prefix from the open file
+/// (no map requested yet — a blob whose header/table breaks a rule, including
+/// the 4096-alignment assert, is refused before any mmap call), then pick the
+/// byte source, then run the payload checks on those bytes. The composition
+/// itself is `quantibbler_qpk1::loader::build_from_blob` — one implementation
+/// of the section rules, shared with the crate's own mmap path.
+pub fn load_blob(artifact: &Path) -> Result<(loader::ModelDirectory, BlobLoadMethod), String> {
+    let file = std::fs::File::open(artifact).map_err(|e| format!("{}: {e}", artifact.display()))?;
+    let len = file
+        .metadata()
+        .map_err(|e| format!("{}: {e}", artifact.display()))?
+        .len();
+    if len == 0 {
+        return Err(format!(
+            "{}: an empty file is not a qpk1 blob",
+            artifact.display()
+        ));
+    }
+    let blob = {
+        let mut reader = std::io::BufReader::new(&file);
+        Blob::parse(&mut reader).map_err(|e| format!("{}: {e}", artifact.display()))?
+    };
+    let (bytes, method, fallback_reason) = blob_bytes(artifact, &file);
+    blob.validate_payload(&bytes)
+        .map_err(|e| format!("{}: {e}", artifact.display()))?;
+    let dir = loader::build_from_blob(artifact, &blob, &bytes)?;
+    match (method, fallback_reason) {
+        (BlobLoadMethod::Mmap, _) => tracing::info!(
+            artifact = %artifact.display(),
+            load_method = BlobLoadMethod::Mmap.as_str(),
+            "loaded blob via mmap"
+        ),
+        (BlobLoadMethod::Read, reason) => tracing::warn!(
+            artifact = %artifact.display(),
+            load_method = BlobLoadMethod::Read.as_str(),
+            reason = reason.as_deref().unwrap_or("unspecified"),
+            "blob load fell back to std::fs::read"
+        ),
+    }
+    Ok((dir, method))
+}
+
+/// Choose the blob's byte source, returning the fallback reason when the read
+/// path was taken (the WARN the spec requires). mmap failure is not fatal: the
+/// loaded model is identical either way.
+fn blob_bytes(
+    artifact: &Path,
+    file: &std::fs::File,
+) -> (BlobBytes, BlobLoadMethod, Option<String>) {
+    if std::env::var_os(FORCE_READ_FALLBACK_ENV).is_some() {
+        let reason = format!("forced by {FORCE_READ_FALLBACK_ENV} (test hatch)");
+        let read = std::fs::read(artifact)
+            .expect("the artifact was just opened; a read of it cannot fail");
+        return (BlobBytes::Owned(read), BlobLoadMethod::Read, Some(reason));
+    }
+    // SAFETY: a read-only map of a file opened read-only; the map lives no
+    // longer than `file`, and `validate_payload` bounds-checks every section
+    // range against the map's own length before any slice is taken from it.
+    match unsafe { memmap2::Mmap::map(file) } {
+        Ok(map) => (BlobBytes::Mapped(map), BlobLoadMethod::Mmap, None),
+        Err(e) => {
+            let reason = format!("mmap failed: {e}");
+            let read = std::fs::read(artifact)
+                .expect("the artifact was just opened; a read of it cannot fail");
+            (BlobBytes::Owned(read), BlobLoadMethod::Read, Some(reason))
+        }
+    }
+}
+
+/// The serving-side composition shared by both sources: tokenizer, the
+/// `gpu:sage` startup gate, the weights, and the resolved serving dtype.
+fn compose(
+    model_path: &Path,
+    dir: loader::ModelDirectory,
+    method: Option<BlobLoadMethod>,
+) -> Result<LoadedModel, String> {
     // Side files (the gate record) live beside the artifact: the model
     // directory for a directory source, the blob's own directory for a
     // single-file source.
-    let artifact_dir = if model_dir.is_dir() {
-        model_dir
+    let artifact_dir = if model_path.is_dir() {
+        model_path
     } else {
-        model_dir.parent().unwrap_or(model_dir)
+        model_path.parent().unwrap_or(model_path)
     };
 
     // The tokenizer arrives differently per source: a blob CARRIES it as a
     // required section (design B9), a directory names it beside the model.
-    let tokenizer = match &dir.tokenizer_json {
-        Some(bytes) => tokenizers::Tokenizer::from_bytes(bytes)
-            .map_err(|e| format!("{}: tokenizer.json section: {e}", model_dir.display()))?,
+    // Either way the SAME document also carries the model's chat template
+    // (BS-5), so both are taken out of it in one pass (see
+    // `tokenizer_from_json` for why the key must leave the tokenizer's view).
+    let (tokenizer, chat_template) = match &dir.tokenizer_json {
+        Some(bytes) => tokenizer_from_json(
+            bytes,
+            &format!("{}: tokenizer.json section", model_path.display()),
+        )?,
         None => {
-            let tokenizer_path = model_dir.join("tokenizer.json");
-            tokenizers::Tokenizer::from_file(&tokenizer_path)
-                .map_err(|e| format!("{}: {e}", tokenizer_path.display()))?
+            let tokenizer_path = model_path.join("tokenizer.json");
+            let bytes = std::fs::read(&tokenizer_path)
+                .map_err(|e| format!("{}: {e}", tokenizer_path.display()))?;
+            tokenizer_from_json(&bytes, &tokenizer_path.display().to_string())?
         }
     };
 
@@ -436,6 +654,17 @@ pub fn load(model_dir: &Path) -> Result<LoadedModel, String> {
     // refuses the face"). `Ok(None)` = the opt-in does not ask for sage and the
     // ordinary face decision stands.
     let sage = sage_face_from_env(artifact_dir, &dir.model_id).map_err(|e| e.to_string())?;
+
+    // BS-2: the DECLARATION selects the serving dtype. A directory never
+    // selects Bf16 — native bf16 serving is reachable only through the blob
+    // loader, because directory loading follows qk-artifact-dtype RD-1/RD-2
+    // (a bf16-declared directory widens; BS-2.5). A blob follows the
+    // `remainder_dtype` its parser already required and cross-checked against
+    // every section tag.
+    let serving_dtype = match method {
+        Some(_) => ServingDtype::from(dir.remainder_dtype),
+        None => ServingDtype::Fp32,
+    };
 
     let mut weights = ModelWeights::from_layers(
         dir.layers,
@@ -451,8 +680,9 @@ pub fn load(model_dir: &Path) -> Result<LoadedModel, String> {
         dir.rope_theta,
         dir.norm_slots.clone(),
         dir.norm_weights,
+        serving_dtype,
     )
-    .map_err(|e| format!("{}: {e}", model_dir.display()))?;
+    .map_err(|e| format!("{}: {e}", model_path.display()))?;
     // The gate admitted the face: install the frozen decision over the ordinary
     // opt-in one (which for `=sage` is the exact scalar fallback root).
     if let Some(decision) = sage {
@@ -466,5 +696,7 @@ pub fn load(model_dir: &Path) -> Result<LoadedModel, String> {
         bos_token_id: dir.bos_token_id,
         vocab_size: dir.vocab_size,
         d_model: dir.d_model,
+        blob_load_method: method,
+        chat_template,
     })
 }

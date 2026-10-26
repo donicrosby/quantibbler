@@ -264,6 +264,122 @@ equivalence (BS-9.1) plus the must-differ guard (BS-9.3).
 
 ## Implementation crystallization
 
-To be filled by the implementer (dated entries) as design-silent choices
-are resolved during implementation; replace this placeholder with the
-entries, per the landing conventions.
+### 2026-10-26 — loader/dtype/engine/prefill legs (coder, t_809b44f8, superseded card)
+
+1. **The requirement names the PyO3 face's symbols; the rlib face has other
+   names.** BS-3's text routes `PackedLayer.apply` through
+   `packed_matvec_dtype` / `packed_matmul_dtype` with `Dtype::Bf16`. Those are
+   the PyO3 (`lib.rs`) entry points. The server links the crate as an rlib and
+   must not link libpython (`binary_purity`), so the equivalent rlib entry
+   point is `dispatch::packed_matvec_dyn(packed, n_rows, n_bits,
+   DenseOperand::Bf16(v))`, which is where the dtype is carried as data and
+   `DenseOperand::dtype()` resolves to `Dtype::Bf16`. The engine calls that
+   one; no second name is introduced for the same instantiation.
+2. **The server owns the mmap; qpk1 owns the rules.** BS-1/Task 1 put the
+   mmap-with-fallback in `model::load_blob`. Rather than re-deriving the
+   section rules, `quantibbler_qpk1::loader::build_from_blob` became `pub`
+   (one visibility change) so the server composes the phases: metadata prefix
+   from the open file (BL-4.2 ordering intact — no map is requested until the
+   header, padding, table and 4096-alignment assertions pass), then the byte
+   source, then `validate_payload`, then the shared composition. `memmap2` is
+   therefore a server dependency (same `0.9` line as qpk1's).
+3. **S4's `Vec<half::bf16>` remainder storage is implemented as f32 storage
+   holding exactly the declared bf16 values, plus one operand rounding at each
+   bf16 call site.** The loader (qk-artifact-dtype RD-2) widens every remainder
+   section to f64 exactly; for a bf16-declared section the widened value IS the
+   bf16 value, so `from_layers` quantizing it to bf16-valued f32 changes no bit
+   and a second copy of every tensor buys nothing. The observable contract —
+   "bf16 operands, f32 accumulation" — is delivered at the operand boundary:
+   the packed matvec rounds `diag(s2)·x` once and passes `DenseOperand::Bf16`,
+   and the norms round their operand and cast the result back to bf16. The
+   logits head needs no change: both operands are already bf16-valued f32
+   words, and an f32 product of two bf16 words is exact (8 + 8 mantissa bits
+   < 24), so accumulating in f32 sums exactly the bf16 products BS-4 names.
+4. **The `.max(1)` on `prompt_ms` is a documented floor, measured.** BS-6.1
+   requires a POSITIVE integer; the fixture's prefill is sub-millisecond, so
+   `as_millis()` alone would report 0 and assert "no prefill happened". The
+   value is `elapsed.as_nanos().div_ceil(1_000_000).max(1)` — ceil to the next
+   millisecond, floored at 1.
+5. **The bytes-before-map ordering makes BS-1.2 unimplementable as a live
+   fault.** No mount is available to make `memmap2::Mmap::map` fail, so the
+   mmap-error branch is exercised by the test-only hatch
+   (`QKB_TEST_FORCE_READ_FALLBACK=1`) which takes the SAME read leg and logs
+   the fallback reason at WARN. The hatch is read only by the loader and set
+   only from `tests/common/mod.rs` (BS-1.3's own words).
+6. **BS-2.4's refusal comes from the SECTION TABLE, and the fixture must move
+   `weight_tying` with the header to reach it.** A crafted blob whose header
+   says `bf16` while `weight_tying` still says `@fp32` is refused by the
+   two-declarations rule FIRST (BL-3.1/BL-3.2 in the blob loader). The test
+   therefore rewrites both, so the refusal under test is
+   `read_remainder_section`'s header-vs-tag mismatch, naming the section and
+   both spellings.
+7. **`api_timings` bounds `prompt_ms` by `wall_ms + 1`, not `wall_ms`.** The
+   millisecond ceiling (entry 4) can legitimately report 1 for a request that
+   completed in under a millisecond; the strict inequality is unconstructible
+   at that granularity, and the scenario's testable core — a positive integer
+   that does not exceed the request — is what the test asserts.
+
+### 2026-10-26 — chat-template leg (coder, t_2b7e43f3)
+
+8. **`tokenizers` REJECTS any unknown top-level key in `tokenizer.json`, so the
+   template must leave the document before the BPE is built.** Design S5 embeds
+   the template in the artifact's `tokenizer.json` and reads it back with
+   serde_json, but it does not say whether the crate can still parse the file
+   the template was embedded in — measured against the vendored `tokenizers`
+   0.23.2 (and its Python face, 0.23.3): a REAL HF `tokenizer.json` plus ONE
+   extra top-level key fails outright ("expected `,` or `}`"; reproduced with a
+   key of any type and in any position), because the newtype `Tokenizer`
+   deserialization does not tolerate unknown fields.
+   `model::tokenizer_from_json` therefore parses the document once, takes
+   `chat_template` out of it, and hands the crate the same document MINUS that
+   key (re-serializing only when the key is present, so an artifact without one
+   is passed through byte-for-byte). The template still lives in
+   `tokenizer.json` and is still read via serde_json; only the view the crate
+   receives is narrowed. `tools/gen_chat_golden.py` performs the same removal so
+   the Python HF stack can load the same fixture.
+9. **minijinja ships no built-in string methods; the Qwen3 template needs
+   six.** The genuine template calls `content.startswith(...)`,
+   `.endswith(...)`, `.split(...)`, `.strip(...)`, `.lstrip(...)` and
+   `.rstrip(...)` — Python `str` methods Jinja2 gets from Python and minijinja
+   does not provide (`Value::_call_method` answers `UnknownMethod` for every
+   non-object receiver). They are registered through
+   `Environment::set_unknown_method_callback`, with Python's semantics (a
+   `strip` argument is a CHARACTER SET, not a substring), and every other name
+   stays refused — so a future template that needs an unimplemented method
+   fails loudly rather than rendering something subtly different.
+10. **The chat-template golden is `tests/fixtures/chat_golden.json`, generated
+    by `tools/gen_chat_golden.py`.** It pins the rendered prompt string
+    (transformers' `apply_chat_template`, cross-checked in the same run against
+    a direct jinja2 render) and the token ids (the Python face of the same
+    `tokenizers` the server links, `add_special_tokens=False` to mirror
+    `Engine::encode`'s `tokenizer.encode(text, false)`). No timestamp is
+    written, so regeneration is byte-stable and a diff is a real behavioural
+    change. The template's provenance — `Qwen/Qwen3-0.6B`
+    `tokenizer_config.json`:`chat_template`, revision
+    `c1899de289a04d12100db370d81485cdf75e47ca` — is recorded in
+    `tools/gen_server_fixtures.py` beside the string, and the fixture's
+    remainder tensors keep the not-bf16-representable values the must-differ
+    guard needs (`0.1`-class norms, `(i % 7 - 3) * 0.25` embedding). Committed
+    digests: `server-model/tokenizer.json`
+    `c4216adbb3fc8dd28c8a877530477cf2d7302328048561fc44933e706c6730ed`,
+    `server-model.qpk`
+    `5a72bfb0c90d529650e251104bd5d6c355769d69c9b1a62a56c5336775ed2ba7`,
+    `server-model-bf16.qpk`
+    `9ac15c5e17eb2155ac9b4c9c3f7dd79b06147553abe43164606317e801fcf1e2`,
+    `chat_golden.json`
+    `10e978ad59d43bb9b2f2e6385459f7ba2ad9aac1336762cd60a0698113304f43`.
+    Two consecutive generator passes reproduce the blobs and the golden
+    byte-for-byte (`cmp` identical).
+11. **The fixture generator's PRE-EXISTING drift is not part of this change.**
+    Regenerating `tests/fixtures/**` with the shipped
+    `tools/gen_server_fixtures.py` also rewrites four paths this change does
+    not own: `server-model/attention_gate.json` and
+    `server-model-bf16/attention_gate.json` (deleted — another generator
+    writes them), `server-model-bad/symlink_layer/layers/q_proj.qpk1` (an
+    ABSOLUTE symlink resolved against the generating checkout, hence
+    path-dependent by construction), and trailing-newline-only rewrites of
+    `server-model-bad/malformed_tokenizer/tokenizer.json` and
+    `server-model-bad/missing_sidecar_block/manifest.toml`. Those five paths
+    were restored to their committed bytes; the fixture diff for this change is
+    the tokenizer documents and the two blobs. Reported so whoever next needs a
+    full regeneration starts from a known state.

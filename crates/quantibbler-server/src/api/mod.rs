@@ -1,6 +1,7 @@
 //! API surface (design D1): axum routes, shared state, startup/shutdown.
 //! Every error response flows through [`error::ApiError`] (design D7).
 
+pub mod chat_template;
 pub mod delta;
 pub mod error;
 pub mod generate;
@@ -159,14 +160,25 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 /// listener binds; readiness flips only after that. Any load failure
 /// returns `Err` and the process exits non-zero without ever serving.
 pub async fn serve(cfg: Cli) -> Result<(), StartupError> {
-    let model_dir = PathBuf::from(&cfg.model_dir);
-    let loaded = crate::model::load(&model_dir)
+    if cfg.used_deprecated_model_dir() {
+        eprintln!(
+            "quantibbler-server: warning: --model-dir is deprecated in favour of --artifact \
+             (the loader auto-detects a blob or a directory)"
+        );
+    }
+    let artifact = PathBuf::from(cfg.artifact_path());
+    let loaded = crate::model::load(&artifact)
         .map_err(|e| StartupError(format!("model load failed: {e}")))?;
     tracing::info!(
         model_id = %loaded.id,
         vocab_size = loaded.vocab_size,
         d_model = loaded.d_model,
-        dir = %model_dir.display(),
+        artifact = %artifact.display(),
+        serving_dtype = loaded.weights.serving_dtype.as_str(),
+        load_method = loaded
+            .blob_load_method
+            .map(|m| m.as_str())
+            .unwrap_or("directory"),
         "model loaded"
     );
     let state = Arc::new(AppState::new(

@@ -100,9 +100,16 @@ fn validate_common(model: &str, state: &AppState, max_tokens: Option<u32>) -> Re
     Ok(())
 }
 
-/// Chat role validation + prompt text extraction (SR-7.1 leg: bad role is
-/// an invalid parameter).
-fn chat_prompt_text(messages: &[ChatMessage]) -> Result<String, ApiError> {
+/// Chat role validation (SR-7.1 leg: bad role is an invalid parameter) plus
+/// chat-template application (BS-5).
+///
+/// The prompt string is the model's OWN Jinja2 `chat_template` rendered over
+/// the request's messages with the pinned context — not a join of the message
+/// contents — so the prompt tokens match what the model was trained on. A
+/// message array the template cannot accept (empty, a role the template does
+/// not know) and a template render failure are both 400 (BS-5.2); no
+/// tokenization or generation is attempted.
+fn chat_prompt_text(state: &AppState, messages: &[ChatMessage]) -> Result<String, ApiError> {
     if messages.is_empty() {
         return Err(ApiError::bad_request(
             "messages must contain at least one message",
@@ -118,11 +125,13 @@ fn chat_prompt_text(messages: &[ChatMessage]) -> Result<String, ApiError> {
             }
         }
     }
-    Ok(messages
-        .iter()
-        .map(|m| m.content.as_str())
-        .collect::<Vec<_>>()
-        .join(" "))
+    let template = state.engine.chat_template.as_deref().ok_or_else(|| {
+        ApiError::bad_request(
+            "the loaded model declares no chat template; /v1/chat/completions is unavailable",
+        )
+    })?;
+    crate::api::chat_template::render(template, messages)
+        .map_err(|e| ApiError::bad_request(format!("chat template failed: {e}")))
 }
 
 fn usage_of(out: &GenerationOutput) -> Usage {
@@ -142,7 +151,7 @@ pub async fn chat_completions(
     check_auth(&state, &headers)?;
     let Json(req) = body.map_err(crate::api::json_rejection_error)?;
     validate_common(&req.model, &state, req.max_tokens)?;
-    let prompt_text = chat_prompt_text(&req.messages)?;
+    let prompt_text = chat_prompt_text(&state, &req.messages)?;
     let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
     let stop = req.stop.as_ref().and_then(StopSequence::as_list);
 
@@ -176,6 +185,9 @@ pub async fn chat_completions(
                 finish_reason: out.finish.as_str().into(),
             }],
             usage: usage_of(&out),
+            timings: Some(Timings {
+                prompt_ms: out.prompt_ms,
+            }),
         })
         .into_response())
     }
@@ -220,6 +232,9 @@ pub async fn completions(
                 finish_reason: out.finish.as_str().into(),
             }],
             usage: usage_of(&out),
+            timings: Some(Timings {
+                prompt_ms: out.prompt_ms,
+            }),
         })
         .into_response())
     }

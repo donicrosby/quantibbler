@@ -18,6 +18,8 @@ pub async fn list(State(state): State<Arc<AppState>>) -> Json<serde_json::Value>
                 "object": "model",
                 "created": state.created_at,
                 "owned_by": "quantibbler",
+                // BS-7: the artifact's DECLARED remainder dtype.
+                "dtype": state.engine.weights.serving_dtype.as_str(),
             }
         ],
     }))

@@ -38,6 +38,25 @@ pub fn bf16_fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/server-model-bf16")
 }
 
+/// The single-file blob twin of `fixture_dir()` (fp32 remainder): the canonical
+/// container form, committed beside the directory.
+pub fn blob_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/server-model.qpk")
+}
+
+/// The bf16-remainder BLOB twin: `tools/repack_remainder.py`'s blob→blob leg on
+/// [`blob_fixture()`], so every layer stream, the tokenizer and the metadata are
+/// byte-identical and only the remainder sections plus `remainder_dtype` moved.
+pub fn bf16_blob_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/server-model-bf16.qpk")
+}
+
+/// The BS-1.3 test-only hatch: forces the loader's `std::fs::read` fallback.
+/// Re-exported from the loader so the two cannot drift (most test crates do not
+/// reach for it, hence the allowance).
+#[allow(unused_imports)]
+pub use crate::model::FORCE_READ_FALLBACK_ENV;
+
 pub fn bad_fixture_dir(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/server-model-bad")
@@ -51,6 +70,7 @@ pub struct ServerProcess {
     pub child: std::process::Child,
     pub port: u16,
     stderr: Arc<Mutex<String>>,
+    stdout: Arc<Mutex<String>>,
 }
 
 impl Drop for ServerProcess {
@@ -66,27 +86,44 @@ impl ServerProcess {
         self.stderr.lock().expect("stderr mutex").clone()
     }
 
+    /// stdout accumulated so far — where the tracing fmt subscriber writes, so
+    /// the startup log lines (`load_method`, `model loaded`) are assertable.
+    pub fn startup_log(&self) -> String {
+        self.stdout.lock().expect("stdout mutex").clone()
+    }
+
     /// Exit status, if the child has exited (non-zero on failed load).
     pub fn try_wait(&mut self) -> Option<std::process::ExitStatus> {
         self.child.try_wait().unwrap_or_default()
     }
 }
 
-fn drain_pipes(child: &mut std::process::Child) -> Arc<Mutex<String>> {
-    let sink = Arc::new(Mutex::new(String::new()));
-    let err_sink = Arc::clone(&sink);
-    let mut err = child.stderr.take().expect("stderr piped");
+/// Accumulate a child's stream INCREMENTALLY: the startup log has to be
+/// readable while the server is still alive, so a read-to-EOF-then-publish
+/// drain would only ever expose it after the kill.
+fn drain_stream<R: Read + Send + 'static>(mut reader: R, sink: Arc<Mutex<String>>) {
     std::thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = Read::read_to_string(&mut err, &mut buf);
-        *err_sink.lock().expect("stderr mutex") = buf;
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => sink
+                    .lock()
+                    .expect("stream mutex")
+                    .push_str(&String::from_utf8_lossy(&buf[..n])),
+            }
+        }
     });
-    let mut out = child.stdout.take().expect("stdout piped");
-    std::thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = Read::read_to_string(&mut out, &mut buf);
-    });
-    sink
+}
+
+fn drain_pipes(child: &mut std::process::Child) -> (Arc<Mutex<String>>, Arc<Mutex<String>>) {
+    let err_sink = Arc::new(Mutex::new(String::new()));
+    let err = child.stderr.take().expect("stderr piped");
+    drain_stream(err, Arc::clone(&err_sink));
+    let out_sink = Arc::new(Mutex::new(String::new()));
+    let out = child.stdout.take().expect("stdout piped");
+    drain_stream(out, Arc::clone(&out_sink));
+    (err_sink, out_sink)
 }
 
 /// Spawn the built server binary with an explicit model dir and port.
@@ -108,11 +145,50 @@ pub fn spawn_server_with_dir(model_dir: &Path, port: Option<u16>) -> ServerProce
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("spawn server binary");
-    let stderr = drain_pipes(&mut child);
+    let (stderr, stdout) = drain_pipes(&mut child);
     ServerProcess {
         child,
         port,
         stderr,
+        stdout,
+    }
+}
+
+/// Spawn the built server binary against ANY artifact path and env, using the
+/// `--artifact` selector. `extra_env` carries the BS-1.3 fallback hatch.
+pub fn spawn_server_artifact(
+    artifact: &Path,
+    extra_args: &[&str],
+    extra_env: &[(&str, &str)],
+) -> ServerProcess {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind :0 for free port");
+    let port = listener.local_addr().expect("addr").port();
+    drop(listener);
+    let exe = env!("CARGO_BIN_EXE_quantibbler-server");
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args([
+        "--artifact",
+        &artifact.to_string_lossy(),
+        "--port",
+        &port.to_string(),
+        "--host",
+        "127.0.0.1",
+    ]);
+    cmd.args(extra_args);
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
+    let mut child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn server binary");
+    let (stderr, stdout) = drain_pipes(&mut child);
+    ServerProcess {
+        child,
+        port,
+        stderr,
+        stdout,
     }
 }
 
@@ -137,15 +213,17 @@ pub fn spawn_server(extra_args: &[&str]) -> ServerProcess {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("spawn server binary");
-    let stderr = drain_pipes(&mut child);
+    let (stderr, stdout) = drain_pipes(&mut child);
     ServerProcess {
         child,
         port,
         stderr,
+        stdout,
     }
 }
 
 /// Minimal HTTP/1.1 result.
+#[derive(Debug)]
 pub struct HttpResult {
     pub status: u16,
     pub headers: Vec<(String, String)>,
@@ -286,7 +364,14 @@ pub fn not_ready_router() -> (Arc<AppState>, axum::Router) {
 }
 
 fn ready_router() -> (Arc<AppState>, axum::Router) {
-    let loaded = model::load(&fixture_dir()).expect("fixture model loads");
+    ready_router_for(&fixture_dir())
+}
+
+/// A ready in-process router over ANY artifact path: the parametrization hook
+/// BS-8.1 asks for, so one assertion body runs against the directory fixture
+/// AND the fp32 blob fixture.
+pub fn ready_router_for(artifact: &Path) -> (Arc<AppState>, axum::Router) {
+    let loaded = model::load(artifact).unwrap_or_else(|e| panic!("{}: {e}", artifact.display()));
     let state = Arc::new(AppState::new(loaded, 4, None));
     state.set_ready();
     let router = build_router(Arc::clone(&state));

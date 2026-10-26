@@ -137,3 +137,16 @@ fn chat_rejects_malformed_body_400() {
         serde_json::json!("invalid_request_error")
     );
 }
+
+/// BS-7.1 / BS-7.2: `GET /v1/models` reports the artifact's DECLARED dtype.
+#[test]
+fn models_reports_the_serving_dtype_bs_7() {
+    for (artifact, expected) in [(blob_fixture(), "fp32"), (bf16_blob_fixture(), "bf16")] {
+        let server = spawn_server_artifact(&artifact, &[], &[]);
+        assert!(wait_ready(server.port, std::time::Duration::from_secs(30)));
+        let resp = get(server.port, "/v1/models").expect("models request");
+        assert_eq!(resp.status, 200);
+        let body: serde_json::Value = serde_json::from_str(&resp.body).expect("models JSON");
+        assert_eq!(body["data"][0]["dtype"], serde_json::json!(expected));
+    }
+}

@@ -29,6 +29,22 @@ quantibbler-kernels = { path = "../quantibbler-kernels", default-features = fals
 # one implementation (kept-together rule).
 quantibbler-qpk1 = { path = "../quantibbler-qpk1" }
 
+# The blob load path maps the artifact rather than slurping it (qk-serve-bf16
+# BS-1); mmap failure falls back to std::fs::read with a WARN. Pure Rust, same
+# version line as the qpk1 crate's own edge.
+memmap2 = "0.9"
+# bf16 operands for the dtype-aware kernel entry points (qk-serve-bf16
+# BS-3/BS-4): the same `half` the kernels crate instantiates its
+# `KernelScalar` impl on, so the two faces share one bf16 type.
+half = "2.7"
+
+# Chat-template rendering (qk-serve-bf16 BS-5): the model's own Qwen3
+# `chat_template` is Jinja2, and minijinja is its pure-Rust engine. Default
+# features only — every dependency of minijinja 3.0.3 is optional and stays
+# OFF, so its mandatory transitive set is empty and the C/C++ ban plus the
+# `binary_purity` gate are untouched.
+minijinja = "3.0.3"
+
 # Floors verified against the live crates.io sparse index 2026-10-17
 # (config freshness rule): tokio 1.53.3, axum 0.8.9, serde 1.0.229,
 # serde_json 1.0.154, tracing 0.1.44, tracing-subscriber 0.3.23,

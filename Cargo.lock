@@ -3027,6 +3027,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
+name = "minijinja"
+version = "3.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90086695417a271bc96e6cb50618555614ca48fa3bb0d9aa96e3468b0f84431e"
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3869,6 +3875,9 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
+ "half",
+ "memmap2",
+ "minijinja",
  "quantibbler-kernels",
  "quantibbler-qpk1",
  "serde",

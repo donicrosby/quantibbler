@@ -118,11 +118,15 @@ mod tests {
     use super::*;
 
     fn tokenizer() -> tokenizers::Tokenizer {
-        tokenizers::Tokenizer::from_file(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../tests/fixtures/server-model/tokenizer.json"),
-        )
-        .expect("fixture tokenizer loads")
+        // The fixture tokenizer json also carries the model's chat template,
+        // which the `tokenizers` crate refuses to parse (BS-5); the loader's
+        // own helper takes the template out and hands back the BPE.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/server-model/tokenizer.json");
+        let bytes = std::fs::read(&path).expect("read fixture tokenizer");
+        crate::model::tokenizer_from_json(&bytes, &path.display().to_string())
+            .expect("fixture tokenizer loads")
+            .0
     }
 
     /// NOTE on expectations: the fixture tokenizer decodes with an inserted

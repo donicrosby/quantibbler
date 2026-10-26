@@ -78,6 +78,13 @@ pub struct Usage {
     pub total_tokens: u32,
 }
 
+/// Prefill wall-clock (BS-6). Carried by NON-streaming responses only: the SSE
+/// chunk types below have no such field, so a stream cannot report one.
+#[derive(Debug, Serialize)]
+pub struct Timings {
+    pub prompt_ms: u64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ChatChoice {
     pub index: u32,
@@ -93,6 +100,8 @@ pub struct ChatCompletionResponse {
     pub model: String,
     pub choices: Vec<ChatChoice>,
     pub usage: Usage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timings: Option<Timings>,
 }
 
 #[derive(Debug, Serialize)]
@@ -110,6 +119,8 @@ pub struct CompletionResponse {
     pub model: String,
     pub choices: Vec<TextChoice>,
     pub usage: Usage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timings: Option<Timings>,
 }
 
 /// One streamed chunk (chat shape; also used for completions with `delta`

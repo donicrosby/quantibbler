@@ -1,15 +1,33 @@
 //! CLI (design D1): clap definitions for the `quantibbler-server` binary.
+//!
+//! One artifact selector is required (SR-1.5): `--artifact` names the qpk1
+//! model — a single-file `.qpk` blob or a legacy directory, auto-detected by
+//! the loader — and `--model-dir` is its deprecated spelling. The group makes
+//! "both" and "neither" parse-time usage errors, so no model load is ever
+//! attempted under an ambiguous selection.
 
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 
 /// Pure-Rust OpenAI-compatible inference server for qpk1 models.
 #[derive(Debug, Parser)]
 #[command(name = "quantibbler-server", version, about)]
+#[command(group(
+    ArgGroup::new("source")
+        .required(true)
+        .multiple(false)
+        .args(["artifact", "model_dir"])
+))]
 pub struct Cli {
-    /// Path to the qpk1 model directory (manifest.toml + tokenizer.json +
-    /// config.toml + layers/*.qpk1).
-    #[arg(long = "model-dir", required = true)]
-    pub model_dir: String,
+    /// Path to the qpk1 model artifact: a single-file `.qpk` blob (loaded via
+    /// mmap) or a legacy model directory (`manifest.toml` + `config.toml` +
+    /// layers). The format is auto-detected.
+    #[arg(long = "artifact")]
+    pub artifact: Option<String>,
+
+    /// Deprecated alias for `--artifact` (the legacy directory spelling).
+    /// Supplying it beside `--artifact` is refused at parse.
+    #[arg(long = "model-dir")]
+    pub model_dir: Option<String>,
 
     /// TCP port to bind.
     #[arg(long = "port", required = true)]
@@ -33,4 +51,22 @@ pub struct Cli {
     /// `--serve-api-key`. Recommended over the inline flag.
     #[arg(long = "serve-api-key-file")]
     pub serve_api_key_file: Option<String>,
+}
+
+impl Cli {
+    /// The resolved artifact path. The clap `source` group guarantees exactly
+    /// one selector is present, so this cannot be reached with both or
+    /// neither.
+    pub fn artifact_path(&self) -> &str {
+        self.artifact
+            .as_deref()
+            .or(self.model_dir.as_deref())
+            .expect("clap's `source` group requires --artifact or --model-dir")
+    }
+
+    /// True when the legacy spelling was used (the caller emits the
+    /// deprecation notice).
+    pub fn used_deprecated_model_dir(&self) -> bool {
+        self.model_dir.is_some()
+    }
 }

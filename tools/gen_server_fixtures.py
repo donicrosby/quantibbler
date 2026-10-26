@@ -47,6 +47,11 @@ BF16_DIR = REPO_ROOT / "tests" / "fixtures" / "server-model-bf16"
 #: directory stays committed beside it (dual-read, design B7), so both loader
 #: paths keep an artifact and the two loads are compared field-for-field.
 BLOB_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "server-model.qpk"
+#: The bf16-remainder BLOB twin (change qk-serve-bf16, BS-9): the repack
+#: utility's blob->blob leg on BLOB_FIXTURE, so every layer stream, the
+#: tokenizer and the metadata are byte-identical and only the remainder
+#: sections plus their `bf16` declaration move.
+BF16_BLOB_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "server-model-bf16.qpk"
 
 QPK1_MAGIC = b"QPK1"
 #: Version of the committed pre-bias fixture.
@@ -119,7 +124,123 @@ def write_norms_sidecar(root: Path) -> None:
     (root / "norms.f32.bin").write_bytes(norms.tobytes())
 
 
+#: The model's OWN chat template (qk-serve-bf16 BS-5), the genuine Qwen3
+#: artifact carried verbatim into the fixture tokenizer.json. This is MODEL
+#: DATA, not implementation-sourced (clean-room rule). Provenance:
+#: Qwen/Qwen3-0.6B tokenizer_config.json `chat_template`, HF revision
+#: c1899de289a04d12100db370d81485cdf75e47ca (fetched 2026-10-26).
+CHAT_TEMPLATE = (
+    "{%- if tools %}\n    {{- '<|im_start|>sys"
+    "tem\\n' }}\n    {%- if messages[0].role =="
+    " 'system' %}\n        {{- messages[0].con"
+    "tent + '\\n\\n' }}\n    {%- endif %}\n    {{"
+    '- "# Tools\\n\\nYou may call one or more f'
+    "unctions to assist with the user query.\\"
+    "n\\nYou are provided with function signat"
+    "ures within <tools></tools> XML tags:\\n<"
+    'tools>" }}\n    {%- for tool in tools %}\n'
+    '        {{- "\\n" }}\n        {{- tool | t'
+    'ojson }}\n    {%- endfor %}\n    {{- "\\n</'
+    "tools>\\n\\nFor each function call, return"
+    " a json object with function name and ar"
+    "guments within <tool_call></tool_call> X"
+    'ML tags:\\n<tool_call>\\n{\\"name\\": <funct'
+    'ion-name>, \\"arguments\\": <args-json-obj'
+    'ect>}\\n</tool_call><|im_end|>\\n" }}\n{%- '
+    "else %}\n    {%- if messages[0].role == '"
+    "system' %}\n        {{- '<|im_start|>syst"
+    "em\\n' + messages[0].content + '<|im_end|"
+    ">\\n' }}\n    {%- endif %}\n{%- endif %}\n{%"
+    "- set ns = namespace(multi_step_tool=tru"
+    "e, last_query_index=messages|length - 1)"
+    " %}\n{%- for message in messages[::-1] %}"
+    "\n    {%- set index = (messages|length - "
+    "1) - loop.index0 %}\n    {%- if ns.multi_"
+    'step_tool and message.role == "user" and'
+    " message.content is string and not(messa"
+    "ge.content.startswith('<tool_response>')"
+    " and message.content.endswith('</tool_re"
+    "sponse>')) %}\n        {%- set ns.multi_s"
+    "tep_tool = false %}\n        {%- set ns.l"
+    "ast_query_index = index %}\n    {%- endif"
+    " %}\n{%- endfor %}\n{%- for message in mes"
+    "sages %}\n    {%- if message.content is s"
+    "tring %}\n        {%- set content = messa"
+    "ge.content %}\n    {%- else %}\n        {%"
+    "- set content = '' %}\n    {%- endif %}\n "
+    '   {%- if (message.role == "user") or (m'
+    'essage.role == "system" and not loop.fir'
+    "st) %}\n        {{- '<|im_start|>' + mess"
+    "age.role + '\\n' + content + '<|im_end|>'"
+    " + '\\n' }}\n    {%- elif message.role == "
+    '"assistant" %}\n        {%- set reasoning'
+    "_content = '' %}\n        {%- if message."
+    "reasoning_content is string %}\n         "
+    "   {%- set reasoning_content = message.r"
+    "easoning_content %}\n        {%- else %}\n"
+    "            {%- if '</think>' in content"
+    " %}\n                {%- set reasoning_co"
+    "ntent = content.split('</think>')[0].rst"
+    "rip('\\n').split('<think>')[-1].lstrip('\\"
+    "n') %}\n                {%- set content ="
+    " content.split('</think>')[-1].lstrip('\\"
+    "n') %}\n            {%- endif %}\n        "
+    "{%- endif %}\n        {%- if loop.index0 "
+    "> ns.last_query_index %}\n            {%-"
+    " if loop.last or (not loop.last and reas"
+    "oning_content) %}\n                {{- '<"
+    "|im_start|>' + message.role + '\\n<think>"
+    "\\n' + reasoning_content.strip('\\n') + '\\"
+    "n</think>\\n\\n' + content.lstrip('\\n') }}"
+    "\n            {%- else %}\n               "
+    " {{- '<|im_start|>' + message.role + '\\n"
+    "' + content }}\n            {%- endif %}\n"
+    "        {%- else %}\n            {{- '<|i"
+    "m_start|>' + message.role + '\\n' + conte"
+    "nt }}\n        {%- endif %}\n        {%- i"
+    "f message.tool_calls %}\n            {%- "
+    "for tool_call in message.tool_calls %}\n "
+    "               {%- if (loop.first and co"
+    "ntent) or (not loop.first) %}\n          "
+    "          {{- '\\n' }}\n                {%"
+    "- endif %}\n                {%- if tool_c"
+    "all.function %}\n                    {%- "
+    "set tool_call = tool_call.function %}\n  "
+    "              {%- endif %}\n             "
+    '   {{- \'<tool_call>\\n{"name": "\' }}\n    '
+    "            {{- tool_call.name }}\n      "
+    '          {{- \'", "arguments": \' }}\n    '
+    "            {%- if tool_call.arguments i"
+    "s string %}\n                    {{- tool"
+    "_call.arguments }}\n                {%- e"
+    "lse %}\n                    {{- tool_call"
+    ".arguments | tojson }}\n                {"
+    "%- endif %}\n                {{- '}\\n</to"
+    "ol_call>' }}\n            {%- endfor %}\n "
+    "       {%- endif %}\n        {{- '<|im_en"
+    "d|>\\n' }}\n    {%- elif message.role == \""
+    'tool" %}\n        {%- if loop.first or (m'
+    'essages[loop.index0 - 1].role != "tool")'
+    " %}\n            {{- '<|im_start|>user' }"
+    "}\n        {%- endif %}\n        {{- '\\n<t"
+    "ool_response>\\n' }}\n        {{- content "
+    "}}\n        {{- '\\n</tool_response>' }}\n "
+    "       {%- if loop.last or (messages[loo"
+    'p.index0 + 1].role != "tool") %}\n       '
+    "     {{- '<|im_end|>\\n' }}\n        {%- e"
+    "ndif %}\n    {%- endif %}\n{%- endfor %}\n{"
+    "%- if add_generation_prompt %}\n    {{- '"
+    "<|im_start|>assistant\\n' }}\n    {%- if e"
+    "nable_thinking is defined and enable_thi"
+    "nking is false %}\n        {{- '<think>\\n"
+    "\\n</think>\\n\\n' }}\n    {%- endif %}\n{%- "
+    "endif %}"
+)
+
 TOKENIZER_JSON = {
+    # The chat template rides in the tokenizer JSON (the tokenizers crate
+    # exposes no arbitrary metadata; qk-serve-bf16 design S5).
+    "chat_template": CHAT_TEMPLATE,
     "version": "1.0",
     "truncation": None,
     "padding": None,
@@ -661,6 +782,19 @@ def build_blob_fixture() -> None:
     )
 
 
+def build_bf16_blob_fixture() -> None:
+    """The bf16-remainder BLOB twin, produced by the shipped repack utility's
+    blob->blob leg on the committed fp32 blob (qk-serve-bf16 BS-9). Emitted by
+    the same generator so the parity pair cannot drift from the fp32 blob.
+    """
+    sys.path.insert(0, str(REPO_ROOT / "tools"))
+    import repack_remainder
+
+    if BF16_BLOB_FIXTURE.exists():
+        BF16_BLOB_FIXTURE.unlink()
+    repack_remainder.repack(BLOB_FIXTURE, BF16_BLOB_FIXTURE, remainder_dtype="bf16")
+
+
 def main() -> None:
     build_valid_model(FIXTURE_DIR)
     print(f"wrote {FIXTURE_DIR}")
@@ -670,6 +804,8 @@ def main() -> None:
     print(f"wrote {BIAS_DIR}")
     build_bf16_model(BF16_DIR)
     print(f"wrote {BF16_DIR}")
+    build_bf16_blob_fixture()
+    print(f"wrote {BF16_BLOB_FIXTURE}")
     variants = build_bad_variants(BAD_DIR)
     for _name, path in sorted(variants.items()):
         print(f"wrote {path}")

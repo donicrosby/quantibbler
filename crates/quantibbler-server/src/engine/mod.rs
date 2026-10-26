@@ -5,14 +5,19 @@
 //! kernels-rlib packed primitives.
 
 use std::sync::Arc;
+use std::time::Instant;
 
+use half::bf16;
 use tokio::sync::Semaphore;
 
+use quantibbler_kernels::dispatch::{self, DenseOperand, DenseResult};
 #[cfg(feature = "gpu")]
 use quantibbler_kernels::gpu::GpuContext;
 #[cfg(feature = "gpu")]
 use quantibbler_kernels::gpu_attention::AttentionShape;
 use quantibbler_qpk1::{Layer, NormSlot, inventory_block_floats};
+
+use crate::model::ServingDtype;
 
 /// Which face computes the packed matvecs (qk-attention 3.4). Selected ONCE
 /// per process at engine construction — never mid-stream, so a served model's
@@ -385,7 +390,12 @@ impl PackedLayer {
     /// the kernels rlib by default, or the CubeCL HIP face under
     /// `gpu` + QUANTIBBLER_GPU=1 — both float64 accumulation in
     /// row-element order (E-3.1 hardware parity); scales and I/O are f32.
-    fn apply(&self, face: &MatvecFace, x: &[f32]) -> Result<Vec<f32>, EngineError> {
+    fn apply(
+        &self,
+        face: &MatvecFace,
+        x: &[f32],
+        dtype: ServingDtype,
+    ) -> Result<Vec<f32>, EngineError> {
         if x.len() != self.din {
             return Err(EngineError(format!(
                 "layer {} expects input dim {}, got {}",
@@ -393,6 +403,9 @@ impl PackedLayer {
                 self.din,
                 x.len()
             )));
+        }
+        if dtype == ServingDtype::Bf16 {
+            return self.apply_bf16(x);
         }
         let mut z = vec![0.0f64; self.din];
         for (j, zj) in z.iter_mut().enumerate() {
@@ -421,6 +434,49 @@ impl PackedLayer {
             .zip(&self.bias_f32)
             .map(|((&u_i, &s1_i), &b_i)| (u_i as f32) * s1_i + b_i)
             .collect())
+    }
+
+    /// `ServingDtype::Bf16`'s `apply` (BS-3.2): the same factorized product,
+    /// but the bitplane matvecs go through the DTYPE-AWARE kernel entry point
+    /// (`dispatch::packed_matvec_dyn` with `DenseOperand::Bf16` — the rlib face
+    /// of the PyO3 `packed_matvec_dtype` the requirement names), which
+    /// accumulates in f32 and yields bf16. Scales and bias stay f32, as the
+    /// requirement pins; the operand is rounded ONCE to bf16 on the way in.
+    ///
+    /// The device matvec face is deliberately not extended here: this change's
+    /// non-goals scope serving to the CPU path, so a `gpu` build serves Bf16
+    /// artifacts through this same scalar dtype-aware entry point.
+    fn apply_bf16(&self, x: &[f32]) -> Result<Vec<f32>, EngineError> {
+        let z: Vec<bf16> = (0..self.din)
+            .map(|j| bf16::from_f32(self.s2_f32[j] * x[j]))
+            .collect();
+        let t = self.kernel_matvec(&self.vb_t_rows, self.r, self.din, &z)?;
+        let u = self.kernel_matvec(&self.ub_rows, self.dout, self.r, &t)?;
+        Ok(u.iter()
+            .zip(&self.s1_f32)
+            .zip(&self.bias_f32)
+            .map(|((&u_i, &s1_i), &b_i)| u_i.to_f32() * s1_i + b_i)
+            .collect())
+    }
+
+    /// One bf16 packed matvec through the dtype-aware entry point.
+    fn kernel_matvec(
+        &self,
+        packed: &[u8],
+        n_rows: usize,
+        n_bits: usize,
+        v: &[bf16],
+    ) -> Result<Vec<bf16>, EngineError> {
+        let out = dispatch::packed_matvec_dyn(packed, n_rows, n_bits, DenseOperand::Bf16(v))
+            .map_err(|e| EngineError(format!("layer {}: bf16 matvec: {e}", self.name)))?;
+        match out {
+            DenseResult::Bf16(values) => Ok(values),
+            other => Err(EngineError(format!(
+                "layer {}: bf16 matvec returned a {} result",
+                self.name,
+                other.dtype().name()
+            ))),
+        }
     }
 }
 
@@ -550,6 +606,11 @@ pub struct ModelWeights {
     #[allow(dead_code)]
     pub norm_slots: Vec<NormSlot>,
     pub norm_weights: Vec<f32>,
+    /// The serving precision resolved from the artifact's declaration (BS-2).
+    /// `ServingDtype::Fp32` is byte-for-byte the pre-change engine; `Bf16`
+    /// switches the packed matvecs, the norms, and the logits head to bf16
+    /// operands with f32 accumulation.
+    pub serving_dtype: ServingDtype,
     /// Absolute sidecar offset of the model-final norm (last `d_model`
     /// floats).
     final_norm_at: usize,
@@ -589,6 +650,7 @@ impl ModelWeights {
         rope_theta: f64,
         norm_slots: Vec<NormSlot>,
         norm_weights: Vec<f64>,
+        serving_dtype: ServingDtype,
     ) -> Result<Self, EngineError> {
         if embedding.len() != d_model * vocab_size {
             return Err(EngineError(format!(
@@ -628,7 +690,21 @@ impl ModelWeights {
                 norm_slots.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             )));
         }
-        let norm_weights_f32 = f32ify(norm_weights);
+        // BS-4: under `ServingDtype::Bf16` the remainder tensors ARE their
+        // declared bf16 values. The loader widened bf16 -> f64 exactly, so
+        // rounding here changes no bit of a genuine bf16 artifact; it makes
+        // the invariant explicit (every operand the bf16 paths read is a bf16
+        // value held in f32) instead of relying on the loader's honesty.
+        let quantize = |v: Vec<f32>| -> Vec<f32> {
+            if serving_dtype == ServingDtype::Bf16 {
+                v.into_iter().map(|x| bf16::from_f32(x).to_f32()).collect()
+            } else {
+                v
+            }
+        };
+        let embedding = quantize(f32ify(embedding));
+        let lm_head = lm_head.map(|h| quantize(f32ify(h)));
+        let norm_weights_f32 = quantize(f32ify(norm_weights));
         let final_norm_at = norm_weights_f32
             .len()
             .checked_sub(d_model)
@@ -643,8 +719,8 @@ impl ModelWeights {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             layers: packed,
-            embedding: f32ify(embedding),
-            lm_head: lm_head.map(f32ify),
+            embedding,
+            lm_head,
             d_model,
             vocab_size,
             n_layers,
@@ -655,6 +731,7 @@ impl ModelWeights {
             rope_theta,
             norm_slots,
             norm_weights: norm_weights_f32,
+            serving_dtype,
             final_norm_at,
             blocks,
             // Face selection happens once, here (task 3.4): default builds
@@ -699,21 +776,34 @@ impl ModelWeights {
         Ok(self.embedding[t * self.d_model..(t + 1) * self.d_model].to_vec())
     }
 
-    /// Logits for one position: transformer forward (qk-attention E-2.2).
-    /// One decode step over the session's KV cache.
-    pub fn forward(&self, x: &[f32], cache: &mut KvCache) -> Result<Vec<f32>, EngineError> {
-        let logits_row = self.transformer(x, cache)?;
+    /// The head dot-product for one hidden row (`vocab_size` logits, f32).
+    ///
+    /// Under `ServingDtype::Bf16` this IS the required bf16-multiply,
+    /// f32-accumulate contract (BS-4) with no second copy of the head:
+    /// `from_layers` holds the head rows at their declared bf16 values and the
+    /// hidden row arrives already cast to bf16 by the final norm, so both
+    /// operands are bf16 words — and an f32 product of two bf16-valued words is
+    /// exact (8 + 8 mantissa bits < 24), which makes the f32 accumulator sum
+    /// exactly the bf16 products the requirement names.
+    pub fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         let head = self.lm_head.as_ref().unwrap_or(&self.embedding);
         let mut logits = vec![0.0f32; self.vocab_size];
         for (v, logit) in logits.iter_mut().enumerate() {
             let row = &head[v * self.d_model..(v + 1) * self.d_model];
             let mut acc = 0.0f32;
             for t in 0..self.d_model {
-                acc += logits_row[t] * row[t];
+                acc += hidden[t] * row[t];
             }
             *logit = acc;
         }
-        Ok(logits)
+        logits
+    }
+
+    /// Logits for one position: transformer forward (qk-attention E-2.2).
+    /// One decode step over the session's KV cache.
+    pub fn forward(&self, x: &[f32], cache: &mut KvCache) -> Result<Vec<f32>, EngineError> {
+        let hidden = self.transformer(x, cache)?;
+        Ok(self.logits(&hidden))
     }
 
     /// Prefill over a token prefix: transformer forward for ALL positions,
@@ -728,26 +818,63 @@ impl ModelWeights {
         cache: &mut KvCache,
     ) -> Result<Vec<f32>, EngineError> {
         let mut all = Vec::with_capacity(tokens.len() * self.vocab_size);
-        let head = self.lm_head.as_ref().unwrap_or(&self.embedding);
         for &tok in tokens {
             let h = self.embed(tok)?;
-            let row = self.transformer(&h, cache)?;
-            for v in 0..self.vocab_size {
-                let mut acc = 0.0f32;
-                let row_v = &head[v * self.d_model..(v + 1) * self.d_model];
-                for t in 0..self.d_model {
-                    acc += row[t] * row_v[t];
-                }
-                all.push(acc);
-            }
+            let hidden = self.transformer(&h, cache)?;
+            all.extend(self.logits(&hidden));
         }
         Ok(all)
+    }
+
+    /// RMSNorm at one inventory offset, into `out`, at the DECLARED serving
+    /// dtype (BS-4). `ServingDtype::Fp32` is the pre-change f32 pass, byte for
+    /// byte. `ServingDtype::Bf16` rounds the operand and the weight to their
+    /// bf16 values first (both are stored at their declared bf16 values, so the
+    /// weight round is an identity and the operand round is the contract's "take
+    /// bf16 operands"), computes the statistics and the weighted output in f32,
+    /// and casts the result back to bf16 — one output rounding, the kernel's own
+    /// accumulator convention.
+    fn norm_apply(&self, x: &[f32], at: usize, len: usize, out: &mut Vec<f32>) {
+        let weight = &self.norm_weights[at..at + len];
+        match self.serving_dtype {
+            ServingDtype::Fp32 => rms_norm_into(x, weight, self.rms_norm_eps, out),
+            ServingDtype::Bf16 => {
+                let rounded: Vec<f32> = x.iter().map(|&v| bf16::from_f32(v).to_f32()).collect();
+                rms_norm_into(&rounded, weight, self.rms_norm_eps, out);
+                for v in out.iter_mut() {
+                    *v = bf16::from_f32(*v).to_f32();
+                }
+            }
+        }
+    }
+
+    /// Per-head RMSNorm at one inventory offset (the q/k norms), at the
+    /// declared serving dtype; the weight is one `head_dim` vector broadcast
+    /// across every head.
+    fn per_head_norm(&self, v: &mut [f32], at: usize, eps: f64) {
+        let weight = &self.norm_weights[at..at + self.head_dim];
+        let mut buf = Vec::with_capacity(self.head_dim);
+        for head in v.chunks_mut(self.head_dim) {
+            match self.serving_dtype {
+                ServingDtype::Fp32 => rms_norm_into(head, weight, eps, &mut buf),
+                ServingDtype::Bf16 => {
+                    let rounded: Vec<f32> =
+                        head.iter().map(|&x| bf16::from_f32(x).to_f32()).collect();
+                    rms_norm_into(&rounded, weight, eps, &mut buf);
+                    for b in buf.iter_mut() {
+                        *b = bf16::from_f32(*b).to_f32();
+                    }
+                }
+            }
+            head.copy_from_slice(&buf);
+        }
     }
 
     /// The transformer trunk for ONE position: all blocks over the KV
     /// cache, final norm, hidden out. Norm application points follow the
     /// DECLARED inventory (E-2.0/E-2.3); packed matvecs keep the kernels
-    /// rlib's f64 accumulation semantics.
+    /// rlib's f64 accumulation semantics under `ServingDtype::Fp32` and use
+    /// the dtype-aware bf16 entry points under `ServingDtype::Bf16`.
     fn transformer(&self, x: &[f32], cache: &mut KvCache) -> Result<Vec<f32>, EngineError> {
         if x.len() != self.d_model {
             return Err(EngineError(format!(
@@ -758,7 +885,6 @@ impl ModelWeights {
         }
         let pos = cache.len(0);
         let eps = self.rms_norm_eps;
-        let norm_w = |at: usize, len: usize| &self.norm_weights[at..at + len];
         let mut h = x.to_vec();
         let mut scratch = Vec::with_capacity(self.d_model);
 
@@ -769,23 +895,19 @@ impl ModelWeights {
                 "KV cache blocks must advance in lockstep"
             );
             // --- attention sublayer ---
-            rms_norm_into(
-                &h,
-                norm_w(block.input_norm_at, self.d_model),
-                eps,
-                &mut scratch,
-            );
+            self.norm_apply(&h, block.input_norm_at, self.d_model, &mut scratch);
             let normed = scratch.clone();
+            let dtype = self.serving_dtype;
             let apply_proj = |layer_idx: usize, input: &[f32]| -> Result<Vec<f32>, EngineError> {
-                self.layers[layer_idx].apply(&self.matvec.face, input)
+                self.layers[layer_idx].apply(&self.matvec.face, input, dtype)
             };
             let q = apply_proj(block.q, &normed)?;
             let k = apply_proj(block.k, &normed)?;
             let v = apply_proj(block.v, &normed)?;
             let (mut qh, mut kh) = (q, k);
             if let (Some(at), Some(kw_at)) = (block.q_norm_at, block.k_norm_at) {
-                per_head_rms_norm(&mut qh, self.head_dim, norm_w(at, self.head_dim), eps);
-                per_head_rms_norm(&mut kh, self.head_dim, norm_w(kw_at, self.head_dim), eps);
+                self.per_head_norm(&mut qh, at, eps);
+                self.per_head_norm(&mut kh, kw_at, eps);
             }
             rope_rotate(&mut qh, self.head_dim, pos, self.rope_theta);
             rope_rotate(&mut kh, self.head_dim, pos, self.rope_theta);
@@ -795,40 +917,30 @@ impl ModelWeights {
             // position (cache held pos+1 rows incl. this step after push).
             let n_groups = self.n_heads / self.n_kv_heads;
             let attn_out = self.gqa_attention(&qh, b, cache, n_groups, pos)?;
-            let mut attn = self.layers[block.o].apply(&self.matvec.face, &attn_out)?;
+            let mut attn = self.layers[block.o].apply(&self.matvec.face, &attn_out, dtype)?;
             for (hh, &r) in attn.iter_mut().zip(&h) {
                 *hh += r;
             }
             h = attn;
 
             // --- MLP sublayer ---
-            rms_norm_into(
-                &h,
-                norm_w(block.post_attention_norm_at, self.d_model),
-                eps,
-                &mut scratch,
-            );
+            self.norm_apply(&h, block.post_attention_norm_at, self.d_model, &mut scratch);
             let normed = scratch.clone();
-            let gate = self.layers[block.gate].apply(&self.matvec.face, &normed)?;
-            let up = self.layers[block.up].apply(&self.matvec.face, &normed)?;
+            let gate = self.layers[block.gate].apply(&self.matvec.face, &normed, dtype)?;
+            let up = self.layers[block.up].apply(&self.matvec.face, &normed, dtype)?;
             let hidden = gate
                 .iter()
                 .zip(&up)
                 .map(|(&g, &u)| g * u / (1.0 + (-g).exp()))
                 .collect::<Vec<f32>>();
-            let mut mlp = self.layers[block.down].apply(&self.matvec.face, &hidden)?;
+            let mut mlp = self.layers[block.down].apply(&self.matvec.face, &hidden, dtype)?;
             for (hh, &r) in mlp.iter_mut().zip(&h) {
                 *hh += r;
             }
             h = mlp;
         }
 
-        rms_norm_into(
-            &h,
-            norm_w(self.final_norm_at, self.d_model),
-            eps,
-            &mut scratch,
-        );
+        self.norm_apply(&h, self.final_norm_at, self.d_model, &mut scratch);
         Ok(scratch)
     }
 
@@ -1014,7 +1126,7 @@ impl ModelWeights {
     pub fn forward_packed_legacy(&self, x: &[f32]) -> Result<Vec<f32>, EngineError> {
         let mut h = x.to_vec();
         for layer in &self.layers {
-            h = layer.apply(&self.matvec.face, &h)?;
+            h = layer.apply(&self.matvec.face, &h, self.serving_dtype)?;
         }
         let head = self.lm_head.as_ref().unwrap_or(&self.embedding);
         if h.len() != self.d_model {
@@ -1045,17 +1157,6 @@ fn rms_norm_into(x: &[f32], weight: &[f32], eps: f64, out: &mut Vec<f32>) {
     let inv = 1.0 / (ss + eps as f32).sqrt();
     out.clear();
     out.extend(x.iter().zip(weight).map(|(&v, &w)| v * inv * w));
-}
-
-/// Per-head RMSNorm over `head_dim` slices (Qwen3 q/k-norm: ONE weight
-/// vector broadcast across every head; each head normalizes over its own
-/// head_dim slice), in place.
-fn per_head_rms_norm(v: &mut [f32], head_dim: usize, weight: &[f32], eps: f64) {
-    let mut buf = Vec::with_capacity(head_dim);
-    for head in v.chunks_mut(head_dim) {
-        rms_norm_into(head, weight, eps, &mut buf);
-        head.copy_from_slice(&buf);
-    }
 }
 
 /// RoPE rotation, HF rotate_half convention (Llama/Qwen line): the head
@@ -1191,6 +1292,9 @@ pub struct GenerationOutput {
     pub prompt_tokens: usize,
     pub completion_tokens: Vec<u32>,
     pub finish: FinishReason,
+    /// Wall-clock of the prefill trunk passes (BS-6): first prefill forward
+    /// through the end of the last, tokenization and decode excluded.
+    pub prompt_ms: u64,
 }
 
 /// Per-request decode state (design D6's plain per-request state; held for
@@ -1204,6 +1308,8 @@ pub struct DecodeSession {
     /// contains any of them.
     stop: Option<Vec<String>>,
     finish: Option<FinishReason>,
+    /// Prefill wall-clock captured in `decode_start` (BS-6).
+    prompt_ms: u64,
 }
 
 impl DecodeSession {
@@ -1221,6 +1327,9 @@ pub struct Engine {
     /// for the config contract and future scheduler use.
     #[allow(dead_code)]
     pub bos_token_id: u32,
+    /// The model's own chat template (BS-5); `None` = the artifact declares
+    /// none and the chat endpoint refuses.
+    pub chat_template: Option<String>,
     permits: Arc<Semaphore>,
     /// Test-only fault injection for the SR-7.3 envelope scenario (the
     /// `#[cfg(test)]` gate keeps it out of the shipped binary).
@@ -1235,6 +1344,7 @@ impl Engine {
             tokenizer: model.tokenizer,
             eos_token_id: model.eos_token_id,
             bos_token_id: model.bos_token_id,
+            chat_template: model.chat_template,
             permits: Arc::new(Semaphore::new(max_concurrency)),
             #[cfg(test)]
             fail_generate: Arc::new(AtomicBool::new(false)),
@@ -1280,6 +1390,12 @@ impl Engine {
             self.weights.n_layers,
             self.weights.n_kv_heads * self.weights.head_dim,
         );
+        // BS-6: `prompt_ms` spans the FIRST prefill forward through the END of
+        // the LAST one. Tokenization and template application happen in the
+        // caller, before this fn; the head projection on the last position and
+        // every decode step happen after the span — llama.cpp's
+        // `timings.prompt_ms` inclusion set, so PP t/s is comparable across legs.
+        let prefill_start = Instant::now();
         for &tok in &prompt_tokens[..prompt_tokens.len() - 1] {
             let h = self.weights.embed(tok)?;
             self.weights.transformer(&h, &mut cache)?;
@@ -1287,13 +1403,22 @@ impl Engine {
         let h_last = self
             .weights
             .embed(*prompt_tokens.last().expect("non-empty"))?;
-        let logits = self.weights.forward(&h_last, &mut cache)?;
+        let hidden_last = self.weights.transformer(&h_last, &mut cache)?;
+        // A served prefill is a positive span: ceiling to the next millisecond
+        // so a sub-millisecond trunk pass reports 1 rather than 0 (a 0 would
+        // read as "no prefill happened" and break BS-6.1's positive-integer
+        // contract).
+        let prompt_ms = (prefill_start.elapsed().as_nanos() as u64)
+            .div_ceil(1_000_000)
+            .max(1);
+        let logits = self.weights.logits(&hidden_last);
         let mut session = DecodeSession {
             cache,
             out: Vec::new(),
             max_tokens,
             stop: stop.map(<[String]>::to_vec),
             finish: None,
+            prompt_ms,
         };
         self.push_token(&mut session, crate::sampler::greedy(&logits))?;
         Ok(session)
@@ -1370,6 +1495,7 @@ impl Engine {
             prompt_tokens: prompt_tokens.len(),
             completion_tokens: session.out,
             finish: session.finish.unwrap_or(FinishReason::Length),
+            prompt_ms: session.prompt_ms,
         })
     }
 }
@@ -1495,7 +1621,9 @@ mod tests {
                 .sum();
             *y_i = u_i * s1_i;
         }
-        let got = packed.apply(&MatvecFace::Cpu, &x).expect("apply ok");
+        let got = packed
+            .apply(&MatvecFace::Cpu, &x, ServingDtype::Fp32)
+            .expect("apply ok");
         for (g, expected) in got.iter().zip(&y) {
             assert!(
                 (f64::from(*g) - expected).abs() < 1e-4,
@@ -1514,8 +1642,12 @@ mod tests {
         assert_eq!(legacy.bias_f32, vec![0.0f32; 4], "legacy reads as zeros");
         assert_eq!(biased.bias_f32, vec![0.5f32, -1.5, 2.0, -0.25]);
 
-        let y0 = legacy.apply(&MatvecFace::Cpu, &x).expect("apply ok");
-        let y1 = biased.apply(&MatvecFace::Cpu, &x).expect("apply ok");
+        let y0 = legacy
+            .apply(&MatvecFace::Cpu, &x, ServingDtype::Fp32)
+            .expect("apply ok");
+        let y1 = biased
+            .apply(&MatvecFace::Cpu, &x, ServingDtype::Fp32)
+            .expect("apply ok");
         assert_eq!(y0.len(), y1.len());
         for ((a, b), &bias) in y0.iter().zip(&y1).zip(&biased.bias_f32) {
             // The ONLY difference between the two layers is the bias vector.
@@ -1581,6 +1713,7 @@ mod tests {
                 quantibbler_qpk1::NormSlot::PostAttention,
             ],
             vec![0.0; 3 * d_model],
+            ServingDtype::Fp32,
         )
         .expect("transformer fixture resolves")
     }
@@ -1610,6 +1743,8 @@ mod tests {
             bos_token_id: 1,
             vocab_size: vocab,
             d_model,
+            blob_load_method: None,
+            chat_template: None,
         };
         let engine = Engine::new(model, 2);
         let permit = engine.acquire().await;
@@ -1656,6 +1791,8 @@ mod tests {
             bos_token_id: 1,
             vocab_size: vocab,
             d_model,
+            blob_load_method: None,
+            chat_template: None,
         };
         let engine = Engine::new(model, 1);
         let permit = engine.acquire().await;
@@ -1666,11 +1803,207 @@ mod tests {
         assert_eq!(out.completion_tokens, Vec::<u32>::new());
     }
 
-    fn test_tokenizer() -> tokenizers::Tokenizer {
-        tokenizers::Tokenizer::from_file(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../tests/fixtures/server-model/tokenizer.json"),
+    /// The seven projections of the one-block transformer fixture, in the
+    /// manifest names the engine resolves.
+    fn block_layers() -> Vec<(String, Layer)> {
+        [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+            "self_attn.o_proj",
+            "mlp.gate_proj",
+            "mlp.up_proj",
+            "mlp.down_proj",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, suffix)| {
+            (
+                format!("layers.0.inner.{suffix}"),
+                layer_fixture_with_seed(i as u64),
+            )
+        })
+        .collect()
+    }
+
+    /// A one-block fixture at the requested serving dtype. Every remainder
+    /// value is bf16-exact, so the fp32 and bf16 runs read the SAME values —
+    /// which is what BS-4.1's "fp32 reference on the same values widened to
+    /// f32" demands.
+    fn bf16_exact_weights(serving: ServingDtype) -> ModelWeights {
+        let d_model = 4usize;
+        let vocab = 32usize;
+        let norms: Vec<f64> = (0..(3 * d_model))
+            .map(|i| ((i % 5) as f64 - 2.0) * 0.25)
+            .collect();
+        ModelWeights::from_layers(
+            block_layers(),
+            fixture_embedding(vocab, d_model),
+            None,
+            d_model,
+            vocab,
+            1,
+            2,
+            2,
+            2,
+            1e-6,
+            10_000.0,
+            vec![
+                quantibbler_qpk1::NormSlot::Input,
+                quantibbler_qpk1::NormSlot::PostAttention,
+            ],
+            norms,
+            serving,
         )
-        .expect("fixture tokenizer loads")
+        .expect("bf16-exact fixture resolves")
+    }
+
+    /// BS-3.1 — the fp32 matvec path is the pre-change path, byte for byte.
+    /// The expected values are built by the documented v0.1 algorithm
+    /// (f64 `z`, the f64-accumulating kernel, f32 scale/bias) independent of
+    /// `apply`, and compared bitwise.
+    #[test]
+    fn fp32_matvec_is_byte_identical_to_the_pre_change_path_bs_3_1() {
+        let layer = layer_fixture();
+        let packed = PackedLayer::from_layer("l0".into(), &layer).expect("layer ok");
+        let x = [0.5f32, -1.25, 2.0, 0.0];
+        let z: Vec<f64> = (0..packed.din)
+            .map(|j| f64::from(packed.s2_f32[j] * x[j]))
+            .collect();
+        let t: Vec<f64> =
+            quantibbler_kernels::core::packed_matvec(&packed.vb_t_rows, packed.r, packed.din, &z)
+                .expect("Vb^T");
+        let u: Vec<f64> =
+            quantibbler_kernels::core::packed_matvec(&packed.ub_rows, packed.dout, packed.r, &t)
+                .expect("Ub");
+        let expected: Vec<f32> = u
+            .iter()
+            .zip(&packed.s1_f32)
+            .zip(&packed.bias_f32)
+            .map(|((&u_i, &s1_i), &b_i)| (u_i as f32) * s1_i + b_i)
+            .collect();
+        let got = packed
+            .apply(&MatvecFace::Cpu, &x, ServingDtype::Fp32)
+            .expect("apply ok");
+        let got_bits: Vec<u32> = got.iter().map(|v| v.to_bits()).collect();
+        let want_bits: Vec<u32> = expected.iter().map(|v| v.to_bits()).collect();
+        assert_eq!(got_bits, want_bits, "fp32 path is not the pre-change bytes");
+    }
+
+    /// BS-3.2 — the bf16 matvec goes through the dtype-aware kernel with
+    /// `Dtype::Bf16` (f32 accumulation), and its per-output-element backward
+    /// error against the EXACT f64 product is within 1e-2 of the row term scale
+    /// `Σ_k |v_k|` (qk-kernels-dtype-generic D6).
+    #[test]
+    fn bf16_matvec_within_declared_tolerance_bs_3_2() {
+        let layer = layer_fixture();
+        let packed = PackedLayer::from_layer("l0".into(), &layer).expect("layer ok");
+        let x = [0.5f32, -1.25, 2.0, 0.0];
+        // The operand the engine rounds on the way in.
+        let z: Vec<bf16> = (0..packed.din)
+            .map(|j| bf16::from_f32(packed.s2_f32[j] * x[j]))
+            .collect();
+        let got = match dispatch::packed_matvec_dyn(
+            &packed.vb_t_rows,
+            packed.r,
+            packed.din,
+            DenseOperand::Bf16(&z),
+        )
+        .expect("bf16 kernel")
+        {
+            DenseResult::Bf16(v) => v,
+            other => panic!("expected a bf16 result, got {}", other.dtype().name()),
+        };
+        assert_eq!(got.len(), packed.r);
+        // The exact f64 product over the ±1 rows: the row term scale is the
+        // operand's own Σ_k |v_k|.
+        let row_words = packed.din.div_ceil(8);
+        let term_scale: f64 = z.iter().map(|v| f64::from(v.to_f32().abs())).sum();
+        assert!(
+            term_scale > 0.0,
+            "a zero operand would make the bound vacuous"
+        );
+        for (i, g) in got.iter().enumerate() {
+            let mut acc = 0.0f64;
+            for (j, value) in z.iter().enumerate() {
+                let bit = (packed.vb_t_rows[i * row_words + (j >> 3)] >> (j & 7)) & 1;
+                let sign = if bit == 1 { 1.0 } else { -1.0 };
+                acc += sign * f64::from(value.to_f32());
+            }
+            let err = (f64::from(g.to_f32()) - acc).abs();
+            assert!(
+                err <= 1e-2 * term_scale,
+                "output {i}: |Δ|={err} exceeds 1e-2 x row term scale {}",
+                1e-2 * term_scale
+            );
+        }
+        // Non-vacuity: the bf16 path must not be the f64 path in disguise.
+        let fp32 = packed
+            .apply(&MatvecFace::Cpu, &x, ServingDtype::Fp32)
+            .expect("apply ok");
+        assert_ne!(
+            got.iter().map(|v| v.to_f32().to_bits()).collect::<Vec<_>>(),
+            fp32.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "bf16 dispatch produced the fp32 bytes"
+        );
+    }
+
+    /// BS-4.1 — a bf16 RMSNorm (bf16 weight, bf16 operand, f32 statistics and
+    /// weighted output, result cast back to bf16) agrees with an fp32 reference
+    /// norm on the same values widened to f32 within |Δ| ≤ 1e-2 · max(|ref|, 1e-6).
+    #[test]
+    fn bf16_norm_within_declared_bound_bs_4_1() {
+        let weights = bf16_exact_weights(ServingDtype::Bf16);
+        assert_eq!(weights.serving_dtype, ServingDtype::Bf16);
+        let x = [0.1f32, -0.3, 0.7, -1.1];
+        let mut got = Vec::new();
+        weights.norm_apply(&x, 0, weights.d_model, &mut got);
+        // The reference: f32 RMSNorm over the bf16-ROUNDED operand, which is
+        // the same values the bf16 path consumes.
+        let rounded: Vec<f32> = x.iter().map(|&v| bf16::from_f32(v).to_f32()).collect();
+        let w = &weights.norm_weights[0..weights.d_model];
+        let ss: f32 = rounded.iter().map(|v| v * v).sum::<f32>() / rounded.len() as f32;
+        let inv = 1.0 / (ss + weights.rms_norm_eps as f32).sqrt();
+        for (t, (g, r)) in got.iter().zip(rounded.iter().zip(w)).enumerate() {
+            let reference = r.0 * inv * r.1;
+            let bound = 1e-2 * reference.abs().max(1e-6);
+            assert!(
+                (g - reference).abs() <= bound,
+                "element {t}: |{} - {reference}| exceeds {bound}",
+                g
+            );
+        }
+    }
+
+    /// BS-4.2 — the fp32 norm path is the pre-change f32 pass, byte for byte.
+    #[test]
+    fn fp32_norm_is_unchanged_bs_4_2() {
+        let weights = bf16_exact_weights(ServingDtype::Fp32);
+        let x = [0.1f32, -0.3, 0.7, -1.1];
+        let mut got = Vec::new();
+        weights.norm_apply(&x, 0, weights.d_model, &mut got);
+        let mut want = Vec::new();
+        rms_norm_into(
+            &x,
+            &weights.norm_weights[0..weights.d_model],
+            1e-6,
+            &mut want,
+        );
+        assert_eq!(
+            got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            want.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+    }
+
+    fn test_tokenizer() -> tokenizers::Tokenizer {
+        // The fixture tokenizer json also carries the model's chat template,
+        // which the `tokenizers` crate refuses to parse (BS-5); the loader's
+        // own helper takes the template out and hands back the BPE.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/server-model/tokenizer.json");
+        let bytes = std::fs::read(&path).expect("read fixture tokenizer");
+        crate::model::tokenizer_from_json(&bytes, &path.display().to_string())
+            .expect("fixture tokenizer loads")
+            .0
     }
 }

@@ -409,8 +409,13 @@ where
 }
 
 /// Every section-against-header validation of BL-2/BL-3, then the
-/// `ModelDirectory` composition.
-fn build_from_blob(path: &Path, blob: &Blob, bytes: &[u8]) -> Result<ModelDirectory, String> {
+/// `ModelDirectory` composition. Public so a caller that owns its own byte
+/// source (the server's mmap-with-read-fallback loader) reuses this single
+/// validation/composition instead of re-deriving it: `blob` must be the
+/// result of `Blob::parse` on `bytes`, and `bytes` must already have passed
+/// `Blob::validate_payload` — the caller composes the phases, this fn owns
+/// the rules.
+pub fn build_from_blob(path: &Path, blob: &Blob, bytes: &[u8]) -> Result<ModelDirectory, String> {
     let header = &blob.header;
     // The header's geometry is validated by the SAME rules as config.toml
     // (qk-attention N-2), so a blob cannot declare a shape a directory could

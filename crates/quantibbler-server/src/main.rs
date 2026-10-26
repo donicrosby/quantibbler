@@ -1,11 +1,11 @@
 //! `quantibbler-server` — pure-Rust OpenAI-compatible inference server for
 //! qpk1 models (qk-server capability, v0.1).
 //!
-//! Thin composition root: parse the CLI, load the model directory
+//! Thin composition root: parse the CLI, load the model artifact
 //! fail-closed, then serve until shutdown. All behavior lives in the
-//! `cli` / `model` / `engine` / `api` / `sampler` modules, which the
-//! integration tests include directly (design D1: one binary, no lib
-//! target in v0.1).
+//! `cli` / `model` / `engine` / `api` (incl. `api::chat_template`) /
+//! `sampler` modules, which the integration tests include directly
+//! (design D1: one binary, no lib target in v0.1).
 
 mod api;
 mod cli;
