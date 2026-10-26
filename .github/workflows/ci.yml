@@ -25,6 +25,15 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# One suite at a time: a new push to main cancels the still-running run for the
+# previous push instead of stacking half-hour suites behind it. Nightly-queue
+# churn from rapid landing cadence is worse than a cancelled superseded run —
+# every cancelled commit is either superseded on main or re-landed with a
+# fresh run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -45,6 +54,7 @@ env:
 jobs:
   product-floor:
     name: product floor (the shipped deps install and import; the harness is not in the product)
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -86,6 +96,7 @@ jobs:
 
   full-python:
     name: full python (the locked dev environment, zero skips)
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -108,6 +119,7 @@ jobs:
 
   rust-kernels:
     name: rust kernels (test, clippy -D warnings, fmt, maturin build)
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     env:
       MANIFEST: crates/quantibbler-kernels/Cargo.toml
@@ -147,6 +159,7 @@ jobs:
 
   openspec:
     name: openspec (every active change, strict, one id per invocation)
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -180,6 +193,7 @@ jobs:
 
   driver-smoke:
     name: driver smoke (plumbing only, offline tiny fixture)
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     env:
       HF_HUB_OFFLINE: "1"
@@ -214,6 +228,14 @@ jobs:
     # condition-skip (a `needs:` on a skipped job would silently turn the leg
     # into a green no-run). On a run with a cold cache it waits for the seed's
     # one download; on a hit the seed is a no-op and this proceeds at once.
+    #
+    # timeout-minutes: the leg's quiet baseline is ~60s end-to-end (abort before
+    # block 3 on a minimal-shape run: rank 1, 1 ADMM iter, seq 64, 8 cal seqs).
+    # 15 minutes is ~15x that baseline — a hard ceiling so a regressed leg fails
+    # the job loud and fast instead of silently grinding a hosted runner for
+    # half an hour. The in-script 3600s backstop stays as the recorded-contract
+    # ceiling; this job-level timeout is the CI churn fence.
+    timeout-minutes: 15
     needs: seed-weights
     runs-on: ubuntu-latest
     env:
@@ -261,6 +283,7 @@ jobs:
     # unconditional so a PR run can READ main's cache but can never write one.
     # On a push (or dispatch) with a cold cache this fetches the pinned snapshots
     # once and saves them; on a hit it is a pure no-op.
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
