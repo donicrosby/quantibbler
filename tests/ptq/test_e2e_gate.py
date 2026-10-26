@@ -1,7 +1,7 @@
 """Tasks 7.1: end-to-end tiny-model gate (scenarios e2e_tiny_gate_passes,
 e2e_bpw_and_parity, e2e_gate_detects_corruption).
 
-Seeded tiny transformer (d=32, wide MLP 128, 2 blocks), 8 calibration
+Seeded tiny transformer (d=64, wide MLP 192, 2 blocks), 8 calibration
 samples x 64 tokens (OQ-4 proposal), quantize -> serialize qpk1 -> reload
 -> forward on the probe batch. Assertions:
 

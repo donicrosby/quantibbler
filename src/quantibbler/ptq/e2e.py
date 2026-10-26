@@ -9,12 +9,16 @@ qk-representation accounting (never parameter counts), and (c) pack/unpack
 bit identity across the round trip.
 
 Gate model shape note (recorded arithmetic, not hand-waving): the qpk1
-container carries a fixed per-layer overhead of 24 header bytes plus 2
-bytes per scale entry, so a square d x d layer can never go below 1.0 BPW
-(at d = 32 the floor is 8 * (24 + 128) / 1024 = 1.19 bits at ANY rank).
-The gate model therefore makes each block's first linear wide-but-shallow
-(fc1: 32 -> 128, fc2: 128 -> 32) so the wide layers dominate the byte
-budget; run_e2e_gate asserts the measured aggregate, so if the arithmetic
+container charges a fixed per-layer overhead on top of the rank-r
+bitplanes -- a 24-byte header, the two scale vectors (dout + din float16
+entries) and the ``(dout,)`` bias vector, i.e. ``2*dout + din`` float
+entries in all -- and at the fixture's small widths that
+overhead, not the bitplanes, dominates a square layer's byte budget. The
+gate model therefore makes each block's first linear wide-but-shallow
+(fc1: d -> wide, fc2: wide -> d) so the WIDE layers dominate the total
+byte count; ``TinyGateModel``'s docstring records the shipped geometry
+(d = 64, wide = 192) and the measured delta table that chose it.
+``run_e2e_gate`` asserts the measured aggregate, so if the arithmetic
 fails the gate fails (that is the point of a gate). Weights are low-rank
 by construction (seeded ``a @ b``) so a rank-4 factorization can represent
 them at negligible error, and the residual scale keeps activations in a
