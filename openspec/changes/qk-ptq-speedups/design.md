@@ -384,6 +384,33 @@ the same quantity the row names, measured where it is actually paid.
    not shrink while the GEMMs around it do (the `min_eigs` field's own comment), on all 196
    linears of a fire — which is what the row exists to establish.
 5. **Optional follow-up (never blocking, per the ruling):** the production
-   (interpreter × device) pair — `quantibbler-ptq:rocm-official` + `/dev/kfd` — is the only
-   configuration in which this row's number is a production number; the dev CPU wheel cannot
-   reach the accelerated path at all.
+  (interpreter × device) pair — `quantibbler-ptq:rocm-official` + `/dev/kfd` — is the only
+  configuration in which this row's number is a production number; the dev CPU wheel cannot
+  reach the accelerated path at all.
+
+## Implementation crystallization (planner, 2026-10-26) — Phase 3 spec delta (task t_c78611dc)
+
+**Decision: amend the existing requirement, do not author a new one.** The
+requirement header *"Torch-autograd stages SHALL run on the accelerator device"*
+covers the class. Phase 3's `TuneScalesKD` is a torch-autograd stage (forward and
+backward both flow through PyTorch autograd), and the coder's audit plus the v6
+fire (`qk-pertarget-v6-20261026T0030Z`) confirm it is the only remaining stage in
+the class that is device-incompatible. One ADDED requirement covering all three
+stages keeps the enumeration tight and prevents further drift.
+
+The body now enumerates STE, TuneFP, and TuneScalesKD; Phase 3's distinguishing
+feature (disk-backed teacher cache stays on the host — it is an I/O path, not a
+compute path) is stated in both the requirement body and its dedicated scenario
+(`tunescaleskd_gpu_zero_algorithm_change`).
+
+**Task row added:** Task 6 (`tasks.md`) carries the acceptance contract the coder
+specified: RED-first in the container lane (device-mismatch error at
+`scale_calib.py:194`, confirmed by the v6 fire), GREEN with
+activation-as-authority device plumbing, packed bits bit-identical, KL trace
+within campaign tolerance.
+
+**Why not a separate requirement:** TuneScalesKD's port shares every invariant
+with the existing requirement — activation-as-authority device resolution, no
+algorithm change, fp32 tolerance class, no globals. A separate requirement would
+duplicate those invariants and invite drift. The one differentiator (host-resident
+teacher cache) is narrow enough for a scenario-level carve-out.

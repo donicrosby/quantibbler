@@ -28,13 +28,19 @@ The per-iteration `min_eigs` eigenvalue computation SHALL run only when the solv
 
 ### Requirement: Torch-autograd stages SHALL run on the accelerator device
 
-The STE and TuneFP stages are pure torch autograd with zero device references; they SHALL execute on the accelerator resolved by the existing device plumbing with no algorithm change — same loss construction, optimizer, scheduler, and batch sizes. Tensors SHALL move via `.to(device)` on the activation-as-authority path, never globals. fp32 on the accelerator SHALL meet the campaign tolerance class against the fp64 CPU reference.
+The STE, TuneFP, and TuneScalesKD stages SHALL execute on the accelerator with no algorithm change — same per-stage loss, optimizer, scheduler, and batch sizes. Tensors SHALL move via `.to(device)` on the activation-as-authority path, never globals. TuneScalesKD's disk-backed teacher cache SHALL remain on the host; only the model forward/backward moves. fp32 on the accelerator SHALL meet the campaign tolerance class against the fp64 CPU reference.
 
 #### Scenario: ste_tunefp_gpu_zero_algorithm_change
 
 - **WHEN** a run selects an accelerator device
 - **THEN** the STE and TuneFP stages execute on that device with the identical loss, optimizer, scheduler, and batch configuration as the CPU reference
 - **AND** per-stage row-time is reported, translating the measured ~133 s/TuneFP-fire and ~154 s/STE-linear costs
+
+#### Scenario: tunescaleskd_gpu_zero_algorithm_change
+
+- **WHEN** a run selects an accelerator device
+- **THEN** the TuneScalesKD stage executes its model forward/backward on that device with the identical KL loss, optimizer, scheduler, and batch configuration as the CPU reference
+- **AND** the disk-backed teacher cache and post-stage scale readback stay on the host; only the per-step model forward/backward and paged teacher logits move to the device
 
 #### Scenario: fp32_gpu_within_tolerance_class
 
