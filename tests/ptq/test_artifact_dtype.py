@@ -371,3 +371,36 @@ def test_scn_repack_deterministic_rdp1_5(tmp_path):
     assert _tree_digest(first) == _tree_digest(second)
     # And the source was never written to.
     assert not (FIXTURE / "e1.bf16.bin").exists()
+
+
+def test_repack_refuses_nested_out_without_touching_source(tmp_path):
+    # `--out` inside `--in` is operator error: the copy would land in the source
+    # tree and mutate it, against RDP-1's "never mutating the source". The guard
+    # refuses before any write, so the source tree digest is byte-for-byte
+    # unchanged and the output subtree is never created (H1 hardening).
+    src = tmp_path / "model"
+    shutil.copytree(FIXTURE, src)
+    nested = src / "nested-bf16"
+    before = _tree_digest(src)
+    with pytest.raises(repack_remainder.RepackError, match="inside the source artifact"):
+        repack_remainder.repack(src, nested)
+    assert not nested.exists(), "a nested-out refusal must create no output subtree"
+    assert _tree_digest(src) == before, "the source tree must be byte-for-byte unchanged"
+
+
+def test_repack_refuses_malformed_weight_tying_before_write(tmp_path):
+    # A suffix-less weight_tying token (`lm_head=e1`) is a source the loader
+    # itself refuses (RD-1.4). It must be caught BEFORE the copy: the old path
+    # copied the whole tree, rewrote the manifest, and only then refused,
+    # leaving a complete but unloadable output dir behind (H2 hardening).
+    src = tmp_path / "model"
+    shutil.copytree(FIXTURE, src)
+    cfg = src / "config.toml"
+    cfg.write_text(
+        cfg.read_text(encoding="utf-8").replace("lm_head=e1@fp32", "lm_head=e1"),
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+    with pytest.raises(repack_remainder.RepackError, match="carries no"):
+        repack_remainder.repack(src, out)
+    assert not out.exists(), "a refusal must write no output directory"

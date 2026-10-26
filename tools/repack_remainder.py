@@ -14,7 +14,9 @@ Rules the artifact contract imposes, mirrored from
 - the source dtype is the one the source manifest DECLARES — never inferred
   from a byte length — and a source that is already bf16 is refused (the tool's
   direction is fp32 -> bf16 only);
-- the output is a NEW directory: in-place mutation and overwriting are refused;
+- the output is a NEW directory OUTSIDE the source: in-place mutation, nesting
+  the output inside the source tree, and overwriting are all refused, so the
+  source is never mutated;
 - the conversion is lossy by declaration (bf16 carries 8 mantissa bits), so the
   output manifest records its source artifact and the conversion under
   ``[repack]`` and carries no wall-clock time — identical sources produce
@@ -152,6 +154,11 @@ def repack(source: Path, out: Path) -> dict:
     out = Path(out).resolve()
     if out == source:
         raise RepackError(f"{out}: refusing to repack in place; name a new directory")
+    if source in out.parents:
+        raise RepackError(
+            f"{out}: refusing to write inside the source artifact {source}; "
+            f"the output must be a new directory outside it"
+        )
     if out.exists():
         raise RepackError(f"{out}: already exists; this tool never overwrites an artifact")
 
@@ -161,6 +168,16 @@ def repack(source: Path, out: Path) -> dict:
             f"{source}: remainder already declares dtype = {declared!r}; the conversion "
             f"is {DEFAULT_REMAINDER_DTYPE} -> {_TARGET_DTYPE} only"
         )
+
+    # Parse + validate the source's declarative ``weight_tying`` token BEFORE any
+    # write: a suffix-less token is a source this tool cannot faithfully convert
+    # (the loader refuses it), and the refusal must leave no output directory
+    # behind — the same no-output-on-refusal discipline the non-finite check
+    # follows (RDP-1.3). The retargeted text is reused post-copy.
+    source_config = source / "config.toml"
+    retargeted_config: str | None = None
+    if source_config.is_file():
+        retargeted_config = _retarget_weight_tying(source_config.read_text(encoding="utf-8"))
 
     # Resolve each distinct source file to its role-based target name (a tied
     # head shares the embedding's file, and the two entries must keep naming ONE
@@ -207,12 +224,11 @@ def repack(source: Path, out: Path) -> dict:
     )
     manifest.write_text(text, encoding="utf-8")
 
-    config = out / "config.toml"
-    if config.is_file():
-        config.write_text(
-            _retarget_weight_tying(config.read_text(encoding="utf-8")),
-            encoding="utf-8",
-        )
+    # ``retargeted_config`` is None exactly when the source carried no
+    # config.toml (validated pre-write above), so this writes only when the copy
+    # placed one, and never re-parses a token the refusal path already checked.
+    if retargeted_config is not None:
+        (out / "config.toml").write_text(retargeted_config, encoding="utf-8")
 
     return {
         "source": str(source),
