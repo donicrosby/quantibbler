@@ -239,25 +239,31 @@ def main(argv: list[str] | None = None) -> int:
         return report_checks.report_findings(problems, "abort leg (cache)")
 
     cmd = recorded_command(out_dir)
-    print(f"recorded abort command: {' '.join(cmd)}\n")
+    print(f"recorded abort command: {' '.join(cmd)}\n", flush=True)
     load_start = _runner_load()
     nproc = os.cpu_count()
     start = time.monotonic()
-    proc = subprocess.run(
+    # Stream the driver's output live instead of capturing it. Captured output
+    # turned a slow run into a black box: the job log showed nothing until the
+    # process exited, so a 27-minute leg had no visible stage breakdown. With
+    # inherited stdio the GH log shows every driver line as it happens, and the
+    # job-level timeout-minutes fence still bounds a hang.
+    proc = subprocess.Popen(
         cmd,
         cwd=REPO_ROOT,
         env=_offline_env(cache, out_dir),
-        capture_output=True,
         text=True,
-        timeout=args.timeout,
     )
+    try:
+        proc.wait(timeout=args.timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        print(f"::error::abort leg: driver exceeded {args.timeout}s — killed", flush=True)
+        return 1
     elapsed = time.monotonic() - start
     load_post = _runner_load()
-    print(f"driver exit code: {proc.returncode}  (wall {elapsed:.1f}s)")
-    print(_tail(proc.stdout))
-    if proc.stderr.strip():
-        print("driver stderr (tail):")
-        print(_tail(proc.stderr, 20))
+    print(f"driver exit code: {proc.returncode}  (wall {elapsed:.1f}s)", flush=True)
 
     report_path = out_dir / "quantize_report.json"
     if not report_path.is_file():
