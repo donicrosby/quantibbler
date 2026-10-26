@@ -1516,16 +1516,20 @@ def main() -> int:
             )
         ppl_ratio = ppl_quant / ppl_base
         status = verdict(ppl_ratio)
-        # Phase 3 (Algorithm 1 lines 26-27) runs inside quantize_model; the
-        # driver records its execution here so the stage map covers every
-        # stage of lines 0-28 without threading a recorder into scale_calib.
-        # Through the recorder (not a bare append) so the record and the journal
-        # beside the checkpoints carry the same event set.
-        _record(
-            "tune_scales_kd",
-            factor_mode=args.factor_mode,
-            artifact=measured_artifact,
-        )
+        # Phase 3 (Algorithm 1 lines 26-27) runs inside quantize_model, and a
+        # real fire now records its own row (device + elapsed_s) from the
+        # calibrate_scales call site in api.py. Only the factor_mode='fp'
+        # MEASUREMENT, which skips the stage entirely, is recorded here, so the
+        # stage map still names the skip without a second row for a fire that
+        # already measured itself. Through the recorder (not a bare append) so
+        # the record and the journal beside the checkpoints carry the same
+        # event set.
+        if not measured_artifact:
+            _record(
+                "tune_scales_kd",
+                factor_mode=args.factor_mode,
+                artifact=measured_artifact,
+            )
         # The fidelity label is a COMPUTED verdict over the run's own record:
         # the flag AND an empty deviation list AND no mechanism-class deviation.
         # Every condition is recorded beside it, so a reader can see which one
