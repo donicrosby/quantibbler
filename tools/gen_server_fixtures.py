@@ -29,13 +29,19 @@ fixture drift is a reviewable diff.
 from __future__ import annotations
 
 import json
+import shutil
 import struct
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "server-model"
 BAD_DIR = REPO_ROOT / "tests" / "fixtures" / "server-model-bad"
 BIAS_DIR = REPO_ROOT / "tests" / "fixtures" / "server-model-bias"
+#: The bf16-remainder twin, produced by tools/repack_remainder.py from
+#: FIXTURE_DIR: same layer streams and tokenizer, sidecars re-encoded at bf16
+#: and declared @bf16.
+BF16_DIR = REPO_ROOT / "tests" / "fixtures" / "server-model-bf16"
 
 QPK1_MAGIC = b"QPK1"
 #: Version of the committed pre-bias fixture.
@@ -322,8 +328,6 @@ def build_model(root: Path, *, model_id: str, version: int) -> None:
     artifact, 2 for the bias-carrying twin, whose every projection carries a
     deterministic non-zero bias.
     """
-    import shutil
-
     if root.exists():
         shutil.rmtree(root)  # regenerate clean: no stale layer files
     (root / "layers").mkdir(parents=True, exist_ok=True)
@@ -401,13 +405,27 @@ def build_bias_model(root: Path) -> None:
     build_model(root, model_id="server-model-bias-fixture", version=REPRESENTATION_VERSION)
 
 
+def build_bf16_model(root: Path) -> None:
+    """The bf16-remainder twin, produced BY THE REPACK UTILITY.
+
+    Generating it through the shipped conversion (rather than a second,
+    independent writer of the same bytes) means the committed fixture is the
+    utility's own output: a drift between the two is a diff here, and the
+    fixture cannot prove a contract the utility does not implement.
+    """
+    sys.path.insert(0, str(REPO_ROOT / "tools"))
+    import repack_remainder
+
+    if root.exists():
+        shutil.rmtree(root)
+    repack_remainder.repack(FIXTURE_DIR, root)
+
+
 def build_bad_variants(base: Path) -> dict[str, str]:
     """One corrupted model dir per SR-1.2 rejection class.
 
     Returns {variant_name: expected diagnostic substring}.
     """
-    import shutil
-
     if base.exists():
         shutil.rmtree(base)
     variants: dict[str, str] = {}
@@ -627,6 +645,8 @@ def main() -> None:
     print(f"wrote {FIXTURE_DIR}")
     build_bias_model(BIAS_DIR)
     print(f"wrote {BIAS_DIR}")
+    build_bf16_model(BF16_DIR)
+    print(f"wrote {BF16_DIR}")
     variants = build_bad_variants(BAD_DIR)
     for _name, path in sorted(variants.items()):
         print(f"wrote {path}")

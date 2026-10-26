@@ -1,9 +1,9 @@
 //! qpk1 model-directory loader (qk-server design D3, hardened).
 //!
 //! Loads `<model-dir>` end to end: `manifest.toml`, per-layer qpk1 streams
-//! via the fail-closed reader, `config.toml`, and the fp32 sidecar
-//! matrices. Every rule below is a hard rejection — no partial model is
-//! ever returned.
+//! via the fail-closed reader, `config.toml`, and the remainder sidecar
+//! matrices (embedding / lm_head / norms). Every rule below is a hard
+//! rejection — no partial model is ever returned.
 //!
 //! Hardening rules (added 2026-10-17 after independent review):
 //!
@@ -23,24 +23,33 @@
 //!    crafted config can neither wrap the expected-length equality nor
 //!    drive multi-GB allocations at request time.
 //! 4. **Fail-closed `weight_tying`.** The field is validated against the
-//!    documented forms (`unset` or `"lm_head=<path>@fp32"`; the tied
-//!    sentinel `"lm_head=e1@fp32"` reuses the embedding sidecar, an untied
-//!    head names its own fp32 matrix); unknown values abort startup
-//!    instead of being silently ignored.
+//!    documented forms (`unset` or `"lm_head=<path>@<dtype>"`; the tied
+//!    sentinel `"lm_head=e1@<dtype>"` reuses the embedding sidecar, an untied
+//!    head names its own matrix); unknown values abort startup instead of
+//!    being silently ignored.
+//!
+//! 5. **Declared remainder dtype.** The `[sidecar]` block declares the dtype
+//!    its three files hold in an optional `dtype` key (`fp32` / `bf16`); the
+//!    key's ABSENCE is the fp32 reading, which is the meaning every
+//!    pre-existing artifact already has. The declaration alone selects the
+//!    itemsize — a byte length is never used to infer a dtype. An unknown
+//!    token, a `weight_tying` suffix that disagrees with the key, and a file
+//!    whose length is not the declared element count times the declared
+//!    itemsize are all hard rejections naming the offending declaration.
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::Layer;
+use crate::{Layer, RemainderDtype};
 
 /// Hard cap on one qpk1 layer stream (bytes). A legitimate layer for a
 /// 100B-class model at r=256 is tens of MB; 4 GiB leaves two orders of
 /// magnitude of headroom while still refusing multi-GB pathological reads.
 const MAX_LAYER_BYTES: u64 = 4 << 30;
-/// Hard cap on one sidecar fp32 matrix file (bytes). At vocab*d_model for
-/// any v0.1-served model this is orders of magnitude above need; same
+/// Hard cap on one sidecar remainder matrix file (bytes). At vocab*d_model
+/// for any v0.1-served model this is orders of magnitude above need; same
 /// rationale as MAX_LAYER_BYTES.
 const MAX_SIDECAR_BYTES: u64 = 4 << 30;
 /// Cap on either model dimension (config.toml). Bounds the embedding
@@ -72,13 +81,18 @@ pub struct ModelDirectory {
     pub rope_theta: f64,
     /// Declared norm inventory (config.toml `norm_slots`), in file order.
     pub norm_slots: Vec<NormSlot>,
-    /// fp32 embedding, `vocab_size x d_model`, widened to f64.
+    /// The dtype the remainder sidecars declared — informational: the loaded
+    /// vectors below are always widened to f64, so a consumer never branches
+    /// on it, but a reader of this struct can tell an fp32 artifact from bf16.
+    pub remainder_dtype: RemainderDtype,
+    /// Embedding, `vocab_size x d_model`, read at its declared dtype and
+    /// widened to f64.
     pub embedding: Vec<f64>,
-    /// fp32 lm_head when not weight-tied, same layout.
+    /// lm_head when not weight-tied, same layout.
     pub lm_head: Option<Vec<f64>>,
     /// Norm sidecar, `norm_slots.total_floats() * n_layers + d_model`
-    /// floats widened to f64: per block, every declared slot's vector in
-    /// inventory order; then the model-final norm. Layout is fully
+    /// floats read at its declared dtype and widened to f64: per block, every
+    /// declared slot's vector in inventory order; then the model-final norm. Layout is fully
     /// derived from the declared inventory — no architecture is
     /// hard-coded (qk-attention N-1, amended).
     pub norm_weights: Vec<f64>,
@@ -207,51 +221,55 @@ pub fn load(model_dir: &Path) -> Result<ModelDirectory, String> {
     }
 
     // Sidecars: same containment discipline on the manifest-controlled
-    // paths; fp32 matrices are exact-size by construction, so the stat
-    // length must equal the declared element count * 4 before any read.
+    // paths, plus the dtype the [sidecar] block DECLARES; the matrices are
+    // exact-size by construction, so the stat length must equal the declared
+    // element count * the declared itemsize before any read.
     let sidecar = manifest.sidecar.ok_or_else(|| {
         format!(
             "{}: missing [sidecar] block (embedding/lm_head/norms weights)",
             manifest_path.display()
         )
     })?;
+    let remainder_dtype = sidecar.declared_dtype(&manifest_path)?;
+    // `weight_tying`'s own suffix is a SECOND declaration of the same bytes.
+    // A remainder set cannot hold two widths, and honouring either one would
+    // make the other a lie in the shipped manifest — so disagreement is a
+    // refusal, not a precedence rule.
+    if let Some(tying_dtype) = config.tying_dtype(&config_path)? {
+        if tying_dtype != remainder_dtype {
+            return Err(format!(
+                "{}: weight_tying declares @{} but the manifest [sidecar] block declares \
+                 dtype = \"{}\"; a remainder set cannot hold two dtypes",
+                config_path.display(),
+                tying_dtype.as_str(),
+                remainder_dtype.as_str()
+            ));
+        }
+    }
     let expected_floats = config
         .vocab_size
         .checked_mul(config.d_model)
         .ok_or_else(|| format!("{}: vocab_size * d_model overflows", config_path.display()))?;
-    let expected_bytes = checked_bytes(expected_floats, &config_path)?;
-    let emb_path = contained_join(model_dir, &sidecar.embedding).map_err(|why| {
-        format!(
-            "{}: sidecar embedding path {:?} rejected: {why}",
-            manifest_path.display(),
-            sidecar.embedding
-        )
-    })?;
-    let head_path = contained_join(model_dir, &sidecar.lm_head).map_err(|why| {
-        format!(
-            "{}: sidecar lm_head path {:?} rejected: {why}",
-            manifest_path.display(),
-            sidecar.lm_head
-        )
-    })?;
-    let embedding = read_f32_bin_exact(&emb_path, expected_bytes)?;
+    let emb_path = resolve_sidecar(model_dir, &manifest_path, "embedding", &sidecar.embedding)?;
+    let head_path = resolve_sidecar(model_dir, &manifest_path, "lm_head", &sidecar.lm_head)?;
+    let embedding =
+        read_remainder_exact(&emb_path, expected_floats, remainder_dtype, &config_path)?;
     let lm_head = if head_path == emb_path {
         None // weight-tied
     } else {
-        Some(read_f32_bin_exact(&head_path, expected_bytes)?)
+        Some(read_remainder_exact(
+            &head_path,
+            expected_floats,
+            remainder_dtype,
+            &config_path,
+        )?)
     };
 
     // Norm sidecar (qk-attention N-1, amended): per block the input
     // layernorm + post-attention layernorm (d_model each) and the
     // attention q/k norms (head_dim each, one shared vector per
     // projection), plus the model-final norm.
-    let norms_path = contained_join(model_dir, &sidecar.norms).map_err(|why| {
-        format!(
-            "{}: sidecar norms path {:?} rejected: {why}",
-            manifest_path.display(),
-            sidecar.norms
-        )
-    })?;
+    let norms_path = resolve_sidecar(model_dir, &manifest_path, "norms", &sidecar.norms)?;
     let slots: Vec<NormSlot> = config
         .norm_slots
         .iter()
@@ -268,8 +286,8 @@ pub fn load(model_dir: &Path) -> Result<ModelDirectory, String> {
                 config.norm_slots
             )
         })?;
-    let norm_bytes = checked_bytes(norm_floats, &config_path)?;
-    let norm_weights = read_f32_bin_exact(&norms_path, norm_bytes)?;
+    let norm_weights =
+        read_remainder_exact(&norms_path, norm_floats, remainder_dtype, &config_path)?;
 
     Ok(ModelDirectory {
         model_id: manifest.model_id,
@@ -285,6 +303,7 @@ pub fn load(model_dir: &Path) -> Result<ModelDirectory, String> {
         rms_norm_eps: config.rms_norm_eps,
         rope_theta: config.rope_theta,
         norm_slots: slots,
+        remainder_dtype,
         embedding,
         lm_head,
         norm_weights,
@@ -345,31 +364,56 @@ fn read_regular_capped(path: &Path, cap: u64) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Read an fp32 sidecar matrix of EXACTLY `expected_bytes`: the stat length
-/// must match before the read (the read itself is then exact by stat).
-fn read_f32_bin_exact(path: &Path, expected_bytes: usize) -> Result<Vec<f64>, String> {
+/// Resolve one `[sidecar]` entry to a path inside the model directory. The
+/// entry is a plain relative path: the dtype is declared ONCE for the whole
+/// remainder set (the `[sidecar] dtype` key), never spelled per file, so this
+/// is the containment discipline alone and a rejection names the manifest key.
+fn resolve_sidecar(
+    model_dir: &Path,
+    manifest_path: &Path,
+    key: &str,
+    raw: &str,
+) -> Result<PathBuf, String> {
+    contained_join(model_dir, raw).map_err(|why| {
+        format!(
+            "{}: [sidecar] {key} = {raw:?} rejected: {why}",
+            manifest_path.display()
+        )
+    })
+}
+
+/// Read a remainder sidecar of EXACTLY `floats * dtype.itemsize()` bytes at
+/// the DECLARED dtype: the stat length must match before the read (the read is
+/// then exact by stat). A length that contradicts the declaration is refused —
+/// a file is never re-interpreted at another dtype to make it fit.
+fn read_remainder_exact(
+    path: &Path,
+    floats: usize,
+    dtype: RemainderDtype,
+    config_path: &Path,
+) -> Result<Vec<f64>, String> {
+    let expected_bytes = floats.checked_mul(dtype.itemsize()).ok_or_else(|| {
+        format!(
+            "{}: remainder byte size overflows ({floats} elements at {} bytes declared @{})",
+            config_path.display(),
+            dtype.itemsize(),
+            dtype.as_str()
+        )
+    })?;
     let len = stat_regular_capped(path, MAX_SIDECAR_BYTES, "sidecar matrix")?;
     if len != expected_bytes as u64 {
         return Err(format!(
-            "{}: {len} bytes; expected exactly {expected_bytes} bytes (a vocab_size x d_model little-endian float32 matrix)",
-            path.display()
+            "{}: {len} bytes; expected exactly {expected_bytes} bytes (a {floats}-element \
+             remainder declared @{})",
+            path.display(),
+            dtype.as_str()
         ));
     }
     let raw = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(raw
-        .chunks_exact(4)
-        .map(|p| f64::from(f32::from_le_bytes([p[0], p[1], p[2], p[3]])))
+        .chunks_exact(dtype.itemsize())
+        .map(|p| dtype.widen_le(p))
         .collect())
-}
-
-/// `floats * 4` with an explicit overflow diagnostic naming the config.
-fn checked_bytes(floats: usize, config_path: &Path) -> Result<usize, String> {
-    floats.checked_mul(4).ok_or_else(|| {
-        format!(
-            "{}: sidecar byte size overflows (vocab_size * d_model * 4)",
-            config_path.display()
-        )
-    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -385,15 +429,38 @@ struct Manifest {
 
 #[derive(Debug, Deserialize)]
 struct Sidecar {
-    /// Path (relative to the model dir) of the fp32 embedding matrix,
-    /// `vocab_size x d_model`, row-major, little-endian float32.
+    /// Declared storage dtype of the three remainder files below: `fp32` or
+    /// `bf16`. ABSENT is the fp32 reading — the byte contract every artifact
+    /// written before this key existed already has — so a pre-change manifest
+    /// keeps its exact meaning. A present-but-unknown token fails the load: a
+    /// reader never guesses a width from anything but this declaration.
+    #[serde(default)]
+    dtype: Option<String>,
+    /// Relative path of the embedding matrix, `vocab_size x d_model`,
+    /// row-major, LE at the declared dtype.
     embedding: String,
-    /// Path of the fp32 lm_head matrix; when equal to `embedding` the head
-    /// is weight-tied.
+    /// Same layout for the lm_head matrix; when its resolved path equals
+    /// `embedding`'s the head is weight-tied.
     lm_head: String,
-    /// Path of the fp32 norm-weights sidecar (qk-attention N-1):
-    /// inventory-derived floats, row-major, LE float32.
+    /// The norm-weights sidecar (qk-attention N-1): inventory-derived floats,
+    /// row-major, LE at the declared dtype.
     norms: String,
+}
+
+impl Sidecar {
+    /// The remainder dtype this block declares, or the fp32 legacy reading.
+    fn declared_dtype(&self, manifest_path: &Path) -> Result<RemainderDtype, String> {
+        match self.dtype.as_deref() {
+            None => Ok(RemainderDtype::Float32),
+            Some(token) => RemainderDtype::from_token(token).ok_or_else(|| {
+                format!(
+                    "{}: [sidecar] dtype = {token:?} is not a declared remainder dtype \
+                     (fp32 or bf16); an absent key reads as fp32",
+                    manifest_path.display()
+                )
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -414,8 +481,9 @@ struct ModelConfig {
     /// sidecar byte length is derived from this — no architecture is
     /// hard-coded here.
     norm_slots: Vec<String>,
-    /// Documented forms (qk-server C5): unset, or `"lm_head=e1@fp32"`
-    /// (weight-tied fp32 head). Anything else is a config error.
+    /// Documented forms (qk-server C5): unset, or `"lm_head=<path>@<dtype>"`
+    /// with a declared dtype (weight-tied: `"lm_head=e1@fp32"`). Anything
+    /// else — including an undeclared dtype token — is a config error.
     #[serde(default)]
     weight_tying: Option<String>,
 }
@@ -544,25 +612,57 @@ impl ModelConfig {
         match self.weight_tying.as_deref() {
             None => {}
             Some(wt) => {
-                // Documented forms: "lm_head=<relative-path>@fp32". The
-                // tied sentinel "lm_head=e1@fp32" reuses the embedding
-                // sidecar; any other path names its own fp32 head matrix
-                // (resolved from the manifest's [sidecar] lm_head, which
-                // must agree at load). Only fp32 is a declared dtype.
-                let valid = wt
-                    .strip_prefix("lm_head=")
-                    .and_then(|rest| rest.strip_suffix("@fp32"))
-                    .is_some_and(|path| !path.is_empty());
-                if !valid {
+                // Documented forms: "lm_head=<relative-path>@<dtype>". The
+                // tied sentinel "lm_head=e1@<dtype>" reuses the embedding
+                // sidecar; any other path names its own head matrix (resolved
+                // from the manifest's [sidecar] lm_head, which declares the
+                // dtype the bytes actually hold). A dtype token is REQUIRED
+                // here — every shipped artifact writes one — and an undeclared
+                // token is named rather than defaulted to fp32.
+                let declared = wt.strip_prefix("lm_head=").and_then(|rest| {
+                    rest.rsplit_once('@').and_then(|(path, token)| {
+                        (!path.is_empty() && RemainderDtype::from_token(token).is_some())
+                            .then_some((path, token))
+                    })
+                });
+                if declared.is_none() {
                     return Err(format!(
                         "{}: unknown weight_tying {wt:?}; documented forms: \
-                         unset or \"lm_head=<path>@fp32\" (tied: \"lm_head=e1@fp32\")",
+                         unset or \"lm_head=<path>@<dtype>\" with dtype fp32 or bf16 \
+                         (tied: \"lm_head=e1@fp32\")",
                         config_path.display()
                     ));
                 }
             }
         }
         Ok(())
+    }
+
+    /// The dtype `weight_tying` declares in its own suffix, or `None` when the
+    /// field is unset. Its suffix is a SECOND declaration of the same bytes as
+    /// the manifest's `[sidecar] dtype`, so `load` compares the two.
+    fn tying_dtype(&self, config_path: &Path) -> Result<Option<RemainderDtype>, String> {
+        let Some(wt) = self.weight_tying.as_deref() else {
+            return Ok(None);
+        };
+        let token = wt
+            .strip_prefix("lm_head=")
+            .and_then(|rest| rest.rsplit_once('@'))
+            .map(|(_, token)| token)
+            .ok_or_else(|| {
+                format!(
+                    "{}: unknown weight_tying {wt:?}; documented forms: unset or \
+                     \"lm_head=<path>@<dtype>\" with dtype fp32 or bf16",
+                    config_path.display()
+                )
+            })?;
+        RemainderDtype::from_token(token).map(Some).ok_or_else(|| {
+            format!(
+                "{}: weight_tying {wt:?} declares an undeclared dtype token {token:?}; \
+                     declared dtypes are fp32 and bf16",
+                config_path.display()
+            )
+        })
     }
 }
 
@@ -572,6 +672,344 @@ mod tests {
 
     fn dir() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/server-model")
+    }
+
+    fn copy_rec(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).expect("mkdir");
+        for entry in std::fs::read_dir(src).expect("read_dir") {
+            let entry = entry.expect("dir entry");
+            let to = dst.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy_rec(&entry.path(), &to);
+            } else {
+                std::fs::copy(entry.path(), &to).expect("copy file");
+            }
+        }
+    }
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "qpk1-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).expect("mkdir");
+        path
+    }
+
+    /// The committed bf16-remainder twin (produced by `tools/repack_remainder.py`).
+    fn bf16_fixture_dir() -> PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/server-model-bf16")
+    }
+
+    /// bf16 round-to-nearest-even of an f32 word — the encoding the Python
+    /// writer emits (a rounding bias into the low 16 bits before truncating;
+    /// the LSB term makes exact ties land even). The loader only ever WIDENS a
+    /// declared bf16 word; the tests use this to BUILD the bytes a
+    /// declared-bf16 directory holds and to derive the exactly-widened values.
+    fn bf16_word(value: f32) -> u16 {
+        let bits = value.to_bits();
+        let lsb = (bits >> 16) & 1;
+        (bits.wrapping_add(0x7FFF + lsb) >> 16) as u16
+    }
+
+    fn bf16_bytes(floats: &[f32]) -> Vec<u8> {
+        floats
+            .iter()
+            .flat_map(|v| bf16_word(*v).to_le_bytes())
+            .collect()
+    }
+
+    fn f32_floats(path: &Path) -> Vec<f32> {
+        std::fs::read(path)
+            .expect("sidecar bytes")
+            .chunks_exact(4)
+            .map(|p| f32::from_le_bytes([p[0], p[1], p[2], p[3]]))
+            .collect()
+    }
+
+    /// The exactly-widened values a bf16-declared sidecar must yield: bf16 is
+    /// the high half of the f32 word, so bf16 -> f32 -> f64 invents no bit.
+    fn widened_f32_floats(path: &Path) -> Vec<f64> {
+        f32_floats(path)
+            .iter()
+            .map(|v| f64::from(f32::from_bits(u32::from(bf16_word(*v)) << 16)))
+            .collect()
+    }
+
+    fn rewrite(path: &Path, from: &str, to: &str) {
+        let text = std::fs::read_to_string(path).expect("read");
+        let swapped = text.replace(from, to);
+        assert_ne!(text, swapped, "{from:?} must exist to be swapped");
+        std::fs::write(path, swapped).expect("write");
+    }
+
+    /// A copy of the committed fixture whose remainder sidecars are re-encoded
+    /// at bf16 and DECLARED through the `[sidecar] dtype` key, with
+    /// `weight_tying`'s suffix agreeing — the shape a bf16 export produces.
+    fn bf16_twin(tag: &str) -> PathBuf {
+        let root = tmp_dir(tag);
+        copy_rec(&dir(), &root);
+        for (src_name, out_name) in [
+            ("e1.f32.bin", "e1.bf16.bin"),
+            ("norms.f32.bin", "norms.bf16.bin"),
+        ] {
+            let bytes = bf16_bytes(&f32_floats(&root.join(src_name)));
+            std::fs::write(root.join(out_name), bytes).expect("write bf16 sidecar");
+            std::fs::remove_file(root.join(src_name)).expect("drop the fp32 sidecar");
+        }
+        let manifest = root.join("manifest.toml");
+        rewrite(&manifest, "[sidecar]", "[sidecar]\ndtype = \"bf16\"");
+        rewrite(
+            &manifest,
+            "embedding = \"e1.f32.bin\"",
+            "embedding = \"e1.bf16.bin\"",
+        );
+        rewrite(
+            &manifest,
+            "lm_head = \"e1.f32.bin\"",
+            "lm_head = \"e1.bf16.bin\"",
+        );
+        rewrite(
+            &manifest,
+            "norms = \"norms.f32.bin\"",
+            "norms = \"norms.bf16.bin\"",
+        );
+        rewrite(&root.join("config.toml"), "@fp32", "@bf16");
+        root
+    }
+
+    // --- RD-1: declaration, agreement, refusals ----------------------------
+
+    #[test]
+    fn loads_declared_bf16_sidecar_rd1_1() {
+        // `[sidecar] dtype = "bf16"` and a matching `@bf16` weight_tying
+        // suffix: the embedding and norms resolve bf16 (the tied head shares
+        // the embedding file).
+        let root = bf16_twin("rd1-1");
+        let m = load(&root).expect("a declared bf16 directory loads");
+        assert_eq!(m.remainder_dtype, RemainderDtype::Bf16);
+        assert_eq!(m.embedding, widened_f32_floats(&dir().join("e1.f32.bin")));
+        assert_eq!(
+            m.norm_weights,
+            widened_f32_floats(&dir().join("norms.f32.bin"))
+        );
+        assert!(m.lm_head.is_none(), "the fixture's head is weight-tied");
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn absent_dtype_reads_fp32_rd1_2() {
+        // A pre-change-shaped manifest (no `dtype` key) reads fp32 exactly:
+        // the values are the raw LE f32s, not a widened reading.
+        let m = load(&dir()).expect("the legacy manifest loads");
+        assert_eq!(m.remainder_dtype, RemainderDtype::Float32);
+        let want: Vec<f64> = std::fs::read(dir().join("e1.f32.bin"))
+            .expect("embedding bytes")
+            .chunks_exact(4)
+            .map(|p| f64::from(f32::from_le_bytes([p[0], p[1], p[2], p[3]])))
+            .collect();
+        assert_eq!(m.embedding, want);
+    }
+
+    #[test]
+    fn rejects_suffix_field_mismatch_rd1_3() {
+        // Declared bf16, weight_tying says @fp32: two declarations of one byte
+        // set that cannot both be true.
+        let root = bf16_twin("rd1-3-bf16-field");
+        rewrite(&root.join("config.toml"), "@bf16", "@fp32");
+        let err = load(&root).expect_err("suffix/key mismatch must refuse");
+        assert!(
+            err.contains("bf16") && err.contains("fp32"),
+            "the refusal must name both declarations: {err}"
+        );
+        std::fs::remove_dir_all(&root).expect("cleanup");
+
+        // The other direction: declared fp32, weight_tying says @bf16.
+        let root = bf16_twin("rd1-3-fp32-field");
+        rewrite(
+            &root.join("manifest.toml"),
+            "dtype = \"bf16\"",
+            "dtype = \"fp32\"",
+        );
+        let err = load(&root).expect_err("suffix/key mismatch must refuse");
+        assert!(
+            err.contains("bf16") && err.contains("fp32"),
+            "the refusal must name both declarations: {err}"
+        );
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn rejects_unknown_dtype_token_rd1_4() {
+        // The `dtype` key with any value outside fp32/bf16.
+        for token in ["f8", "fp16", "b16", ""] {
+            let root = bf16_twin("rd1-4-key");
+            rewrite(
+                &root.join("manifest.toml"),
+                "dtype = \"bf16\"",
+                &format!("dtype = {token:?}"),
+            );
+            let err = load(&root).expect_err("an unknown dtype token must refuse");
+            assert!(
+                err.contains(&format!("{token:?}")),
+                "the refusal must name the offending token: {err}"
+            );
+            std::fs::remove_dir_all(&root).expect("cleanup");
+        }
+
+        // The weight_tying suffix with an unknown token, and with NO suffix.
+        let config_path = Path::new("config.toml");
+        for (bad, needle) in [
+            ("lm_head=e1@fp16", "fp16"),
+            ("lm_head=e1@b16", "b16"),
+            ("lm_head=e1", "unknown weight_tying"),
+        ] {
+            let cfg = ModelConfig {
+                weight_tying: Some(bad.into()),
+                ..valid_config()
+            };
+            let err = cfg
+                .validate(config_path)
+                .expect_err("an undeclared weight_tying suffix must refuse");
+            assert!(err.contains(needle), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn unset_tying_bf16_sidecar_rd1_5() {
+        // No weight_tying line at all: the head is untied and read at the
+        // declared dtype like the other two remainder files.
+        let root = bf16_twin("rd1-5");
+        std::fs::copy(root.join("e1.bf16.bin"), root.join("head.bf16.bin")).expect("head copy");
+        rewrite(
+            &root.join("manifest.toml"),
+            "lm_head = \"e1.bf16.bin\"",
+            "lm_head = \"head.bf16.bin\"",
+        );
+        let cfg_path = root.join("config.toml");
+        let text = std::fs::read_to_string(&cfg_path).expect("config");
+        let stripped: String = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("weight_tying"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        std::fs::write(&cfg_path, stripped).expect("rewrite config");
+
+        let m = load(&root).expect("an unset weight_tying with a bf16 sidecar must load");
+        assert_eq!(m.remainder_dtype, RemainderDtype::Bf16);
+        let head = m.lm_head.expect("the untied head is read, not tied");
+        assert_eq!(head, widened_f32_floats(&dir().join("e1.f32.bin")));
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    // --- RD-2: reading at the declared itemsize ----------------------------
+
+    #[test]
+    fn loads_bf16_fixture_exact_values_rd2_1() {
+        let m = load(&bf16_fixture_dir()).expect("the committed bf16 twin loads");
+        assert_eq!(m.remainder_dtype, RemainderDtype::Bf16);
+        // Half the fp32 byte count on disk: no fp32-sized read can have occurred.
+        let bf16_emb = bf16_fixture_dir().join("e1.bf16.bin");
+        let fp32_emb = dir().join("e1.f32.bin");
+        assert_eq!(
+            std::fs::metadata(&bf16_emb).expect("stat bf16").len() * 2,
+            std::fs::metadata(&fp32_emb).expect("stat fp32").len()
+        );
+        // Every loaded value is the exactly-widened source value.
+        assert_eq!(m.embedding, widened_f32_floats(&fp32_emb));
+        assert_eq!(
+            m.norm_weights,
+            widened_f32_floats(&dir().join("norms.f32.bin"))
+        );
+        // And the widening is exact: the low 16 bits of every f32 word are zero.
+        for v in m.embedding.iter().chain(m.norm_weights.iter()) {
+            assert_eq!(
+                (*v as f32).to_bits() & 0xFFFF,
+                0,
+                "a widened bf16 value must have a zero low mantissa half"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_bf16_declared_wrong_len_rd2_2() {
+        // bf16 declared over an fp32-sized file: the stat gate must reject it
+        // rather than fall back to fp32 (a silent misparse).
+        let root = bf16_twin("rd2-2-long");
+        let fp32_len = std::fs::metadata(dir().join("norms.f32.bin"))
+            .expect("stat fp32 norms")
+            .len();
+        std::fs::write(root.join("norms.bf16.bin"), vec![0u8; fp32_len as usize])
+            .expect("resize to the fp32 width");
+        let err = load(&root).expect_err("a bf16 declaration over fp32 bytes must refuse");
+        assert!(err.contains("norms.bf16.bin"), "{err}");
+        assert!(err.contains("bf16"), "must name the declared dtype: {err}");
+        assert!(
+            err.contains(&format!("expected exactly {} bytes", fp32_len / 2)),
+            "must name the expected byte count: {err}"
+        );
+        std::fs::remove_dir_all(&root).expect("cleanup");
+
+        // The reverse: fp32 declared (absent key) over a bf16-sized file.
+        let root = tmp_dir("rd2-2-short");
+        copy_rec(&dir(), &root);
+        let bf16_norms = bf16_bytes(&f32_floats(&dir().join("norms.f32.bin")));
+        std::fs::write(root.join("norms.f32.bin"), bf16_norms).expect("resize");
+        let err = load(&root).expect_err("an fp32 declaration over bf16 bytes must refuse");
+        assert!(err.contains("norms.f32.bin"), "{err}");
+        assert!(err.contains("fp32"), "must name the declared dtype: {err}");
+        assert!(
+            err.contains(&format!("expected exactly {fp32_len} bytes")),
+            "must name the expected byte count: {err}"
+        );
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn fp32_fixture_unchanged_rd2_3() {
+        // The fp32 path's byte math is untouched: the committed pre-change
+        // fixture loads to the raw LE f32 values, at 4 bytes per element.
+        let m = load(&dir()).expect("the committed fp32 fixture loads");
+        assert_eq!(m.remainder_dtype, RemainderDtype::Float32);
+        assert_eq!(
+            std::fs::metadata(dir().join("e1.f32.bin"))
+                .expect("stat")
+                .len(),
+            m.embedding.len() as u64 * 4
+        );
+        assert_eq!(
+            m.embedding,
+            std::fs::read(dir().join("e1.f32.bin"))
+                .expect("bytes")
+                .chunks_exact(4)
+                .map(|p| f64::from(f32::from_le_bytes([p[0], p[1], p[2], p[3]])))
+                .collect::<Vec<f64>>()
+        );
+    }
+
+    #[test]
+    fn weight_tying_accepts_only_declared_dtypes() {
+        let cfg = |wt: &str| ModelConfig {
+            weight_tying: Some(wt.into()),
+            ..valid_config()
+        };
+        let config_path = Path::new("config.toml");
+        assert!(cfg("lm_head=e1@fp32").validate(config_path).is_ok());
+        assert!(cfg("lm_head=e1@bf16").validate(config_path).is_ok());
+        assert!(
+            cfg("lm_head=head.bf16.bin@bf16")
+                .validate(config_path)
+                .is_ok()
+        );
+        for bad in ["lm_head=e1@fp8", "lm_head=e1", "lm_head=@bf16", "banana"] {
+            let err = cfg(bad).validate(config_path).expect_err(bad);
+            assert!(err.contains("unknown weight_tying"), "{bad}: {err}");
+        }
     }
 
     #[test]
@@ -593,28 +1031,8 @@ mod tests {
         // fixture (Qwen3-class inventory, 16-float sidecar) must FAIL with a
         // Llama-class inventory (expects 12 floats), proving the count is
         // inventory-derived, not baked into the loader.
-        let src = dir();
-        let tmp = std::env::temp_dir().join(format!(
-            "qpk1-n13-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        fn copy_rec(src: &Path, dst: &Path) {
-            std::fs::create_dir_all(dst).expect("mkdir");
-            for entry in std::fs::read_dir(src).expect("read_dir") {
-                let entry = entry.expect("dir entry");
-                let to = dst.join(entry.file_name());
-                if entry.path().is_dir() {
-                    copy_rec(&entry.path(), &to);
-                } else {
-                    std::fs::copy(entry.path(), &to).expect("copy file");
-                }
-            }
-        }
-        copy_rec(&src, &tmp);
+        let tmp = tmp_dir("n13");
+        copy_rec(&dir(), &tmp);
         let cfg_path = tmp.join("config.toml");
         let cfg = std::fs::read_to_string(&cfg_path).expect("config");
         let llama_cfg = cfg.replace(

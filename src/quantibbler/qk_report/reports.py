@@ -174,6 +174,7 @@ def provenance(
     solver: str,
     scale_dtype: str,
     *,
+    remainder_dtype: str = "fp32",
     rho_end: float | None = None,
     rho_end_source: str | None = None,
     rho_start: float | None = None,
@@ -214,8 +215,18 @@ def provenance(
         "solver_backend_source": solver_backend_source,
         "solver_device": solver_device,
         "scale_dtype": scale_dtype,
-        "regime_artifact": f"qpk1: +-1 bitplanes + {scale_dtype} scales",
-        "dtype_note": (f"solver {solver} (float64 compute) / scales {scale_dtype} / artifact qpk1"),
+        # The container declares TWO storage dtypes: the per-layer scales and
+        # the FP remainder. Naming only the scales under-identifies the bytes —
+        # the same run can ship an fp32 or a bf16 remainder — so both are
+        # recorded from the run's arguments, never from a literal.
+        "remainder_dtype": remainder_dtype,
+        "regime_artifact": (
+            f"qpk1: +-1 bitplanes + {scale_dtype} scales + {remainder_dtype} remainder"
+        ),
+        "dtype_note": (
+            f"solver {solver} (float64 compute) / scales {scale_dtype} / "
+            f"remainder {remainder_dtype} / artifact qpk1"
+        ),
     }
 
 

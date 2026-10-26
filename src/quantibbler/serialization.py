@@ -172,6 +172,9 @@ class QuantizeReport(ArtifactModel):
     rank: int | None = None
     solver: str | None = None
     scale_dtype: str | None = None
+    # The container's OTHER storage dtype: the FP remainder sidecars
+    # (embedding / untied lm_head / norms), `fp32` or `bf16`.
+    remainder_dtype: str | None = None
     seq_len: int | None = None
     tune_seq_len: int | None = None
     factor_mode: str | None = None

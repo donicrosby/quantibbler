@@ -54,6 +54,67 @@ impl ScaleDtype {
     }
 }
 
+/// Declared storage dtype of the model-directory remainder tensors — the FP
+/// tensors the per-layer qpk1 streams do not carry: the embedding, an untied
+/// `lm_head`, and the norm weights.
+///
+/// One dtype covers the whole remainder set; the manifest's `[sidecar]` block
+/// declares it (optional `dtype` key, absent = fp32, the meaning every
+/// pre-existing artifact already has), and `weight_tying`'s own suffix must
+/// agree with it. The declaration ALONE selects the itemsize — a byte length
+/// is never used to infer a dtype. bf16 carries 8 mantissa bits, so a bf16
+/// remainder is lossy by declaration and is never compared against its fp32
+/// original as if the two were the same dtype.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemainderDtype {
+    /// IEEE binary32 LE: 4 bytes per element.
+    Float32,
+    /// bfloat16 LE: 2 bytes per element, the high half of an f32 word.
+    Bf16,
+}
+
+impl RemainderDtype {
+    /// Itemsize of one remainder element in bytes.
+    pub fn itemsize(self) -> usize {
+        match self {
+            RemainderDtype::Float32 => 4,
+            RemainderDtype::Bf16 => 2,
+        }
+    }
+
+    /// The spelling a declaration carries (`fp32` / `bf16`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RemainderDtype::Float32 => "fp32",
+            RemainderDtype::Bf16 => "bf16",
+        }
+    }
+
+    /// Resolve a declaration token; `None` for anything undeclared.
+    pub fn from_token(token: &str) -> Option<Self> {
+        match token {
+            "fp32" => Some(RemainderDtype::Float32),
+            "bf16" => Some(RemainderDtype::Bf16),
+            _ => None,
+        }
+    }
+
+    /// Widen one little-endian word to f64. bf16 -> f32 is exact (the value is
+    /// the high half of the f32 word, low bits zero) and f32 -> f64 is exact,
+    /// so no widening step invents a bit.
+    pub fn widen_le(self, bytes: &[u8]) -> f64 {
+        match self {
+            RemainderDtype::Float32 => {
+                f64::from(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            }
+            RemainderDtype::Bf16 => {
+                let word = u32::from(u16::from_le_bytes([bytes[0], bytes[1]])) << 16;
+                f64::from(f32::from_bits(word))
+            }
+        }
+    }
+}
+
 /// One deserialized qpk1 layer, in serialized layout.
 #[derive(Debug, Clone)]
 pub struct Layer {

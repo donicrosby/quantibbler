@@ -115,6 +115,7 @@ _ABORT_IDENTITY_VALUES: dict[str, object] = {
     "rank": 1,
     "solver": "svd",
     "scale_dtype": "float32",
+    "remainder_dtype": "fp32",
     "seq_len": 64,
     "tune_seq_len": 64,
     "calibration_rows": 8,

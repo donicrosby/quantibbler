@@ -1,0 +1,33 @@
+# qk-server fixture manifest (design D3)
+model_id = "server-model-fixture"
+layers = [
+  "layers.0.inner.self_attn.q_proj",
+  "layers.0.inner.self_attn.k_proj",
+  "layers.0.inner.self_attn.v_proj",
+  "layers.0.inner.self_attn.o_proj",
+  "layers.0.inner.mlp.gate_proj",
+  "layers.0.inner.mlp.up_proj",
+  "layers.0.inner.mlp.down_proj",
+]
+
+[layer_files]
+# quoted keys: TOML bare keys with dots would nest tables
+"layers.0.inner.self_attn.q_proj" = "layers/q_proj.qpk1"
+"layers.0.inner.self_attn.k_proj" = "layers/k_proj.qpk1"
+"layers.0.inner.self_attn.v_proj" = "layers/v_proj.qpk1"
+"layers.0.inner.self_attn.o_proj" = "layers/o_proj.qpk1"
+"layers.0.inner.mlp.gate_proj" = "layers/gate_proj.qpk1"
+"layers.0.inner.mlp.up_proj" = "layers/up_proj.qpk1"
+"layers.0.inner.mlp.down_proj" = "layers/down_proj.qpk1"
+
+[sidecar]
+# remainder tensors, raw LE at the declared dtype (see [repack] below)
+dtype = "bf16"
+embedding = "e1.bf16.bin"
+lm_head = "e1.bf16.bin"
+norms = "norms.bf16.bin"
+
+[repack]
+source_model_id = "server-model-fixture"
+conversion = "remainder fp32 -> bf16"
+source_remainder_sha256 = "05b3b6344e23afb8d84af0e1ac3b85a6033ae35bb025cffbdcac7287cbab2ae3"

@@ -30,6 +30,14 @@ pub fn bias_fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/server-model-bias")
 }
 
+/// The bf16-remainder twin of `fixture_dir()`: the same layer streams and
+/// tokenizer with the remainder sidecars re-encoded at bf16 and declared
+/// `[sidecar] dtype = "bf16"` (`tools/repack_remainder.py`), so loading it
+/// exercises the declared-dtype read path.
+pub fn bf16_fixture_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/server-model-bf16")
+}
+
 pub fn bad_fixture_dir(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/server-model-bad")
