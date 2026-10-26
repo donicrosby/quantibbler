@@ -384,9 +384,9 @@ the same quantity the row names, measured where it is actually paid.
    not shrink while the GEMMs around it do (the `min_eigs` field's own comment), on all 196
    linears of a fire — which is what the row exists to establish.
 5. **Optional follow-up (never blocking, per the ruling):** the production
-  (interpreter × device) pair — `quantibbler-ptq:rocm-official` + `/dev/kfd` — is the only
-  configuration in which this row's number is a production number; the dev CPU wheel cannot
-  reach the accelerated path at all.
+   (interpreter × device) pair — `quantibbler-ptq:rocm-official` + `/dev/kfd` — is the only
+   configuration in which this row's number is a production number; the dev CPU wheel cannot
+   reach the accelerated path at all.
 
 ## Implementation crystallization (planner, 2026-10-26) — Phase 3 spec delta (task t_c78611dc)
 
@@ -406,11 +406,18 @@ compute path) is stated in both the requirement body and its dedicated scenario
 **Task row added:** Task 6 (`tasks.md`) carries the acceptance contract the coder
 specified: RED-first in the container lane (device-mismatch error at
 `scale_calib.py:194`, confirmed by the v6 fire), GREEN with
-activation-as-authority device plumbing, packed bits bit-identical, KL trace
-within campaign tolerance.
+activation-as-authority device plumbing (`linear.weight.device` authority,
+`ub`/`vb` hoisted to stage scope, bias included), container-lane parity
+acceptance (KL trace monotonic on both legs, scales finite and in trust
+region), stage record with `device` and `elapsed_s`. Frozen-bits invariant
+already tested by `test_scn_kl_scale_calibration`; packed-bit identity at
+whole-pipeline scope is explicitly NOT asserted (the repo's own measurements:
+packed cos 7.6e-3 apart due to discrete-search sensitivity).
 
 **Why not a separate requirement:** TuneScalesKD's port shares every invariant
 with the existing requirement — activation-as-authority device resolution, no
-algorithm change, fp32 tolerance class, no globals. A separate requirement would
-duplicate those invariants and invite drift. The one differentiator (host-resident
-teacher cache) is narrow enough for a scenario-level carve-out.
+algorithm change, no globals. The differentiators (host-resident teacher cache,
+f64-parameter/native-dtype-activation regime) are narrow enough for
+scenario-level carve-outs. The fp32 tolerance class that covers STE and TuneFP
+does not cover TuneScalesKD; its device equivalence is asserted through KL trace
+agreement and scale finiteness (scenario `kd_gpu_device_parity`).

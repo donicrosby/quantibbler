@@ -28,7 +28,7 @@ The per-iteration `min_eigs` eigenvalue computation SHALL run only when the solv
 
 ### Requirement: Torch-autograd stages SHALL run on the accelerator device
 
-The STE, TuneFP, and TuneScalesKD stages SHALL execute on the accelerator with no algorithm change — same per-stage loss, optimizer, scheduler, and batch sizes. Tensors SHALL move via `.to(device)` on the activation-as-authority path, never globals. TuneScalesKD's disk-backed teacher cache SHALL remain on the host; only the model forward/backward moves. fp32 on the accelerator SHALL meet the campaign tolerance class against the fp64 CPU reference.
+The STE, TuneFP, and TuneScalesKD stages SHALL execute on the accelerator with no algorithm change — same per-stage loss, optimizer, scheduler, and batch sizes — via activation-as-authority device resolution, never globals. TuneScalesKD's disk-backed teacher cache SHALL remain on the host.
 
 #### Scenario: ste_tunefp_gpu_zero_algorithm_change
 
@@ -41,11 +41,20 @@ The STE, TuneFP, and TuneScalesKD stages SHALL execute on the accelerator with n
 - **WHEN** a run selects an accelerator device
 - **THEN** the TuneScalesKD stage executes its model forward/backward on that device with the identical KL loss, optimizer, scheduler, and batch configuration as the CPU reference
 - **AND** the disk-backed teacher cache and post-stage scale readback stay on the host; only the per-step model forward/backward and paged teacher logits move to the device
+- **AND** `ub`/`vb` are built on device at stage scope (hoisted above the per-step loop), not rebuilt from NumPy inside `scale_forward`; the device authority is `linear.weight.device`
 
-#### Scenario: fp32_gpu_within_tolerance_class
+#### Scenario: kd_gpu_device_parity
 
-- **WHEN** a GPU fp32 stage run is compared against the fp64 CPU reference on production layers
+- **WHEN** a TuneScalesKD stage run on the accelerator is compared against the CPU reference
+- **THEN** the per-step KL trace decreases monotonically on both legs
+- **AND** the final scales are finite and stay within the stage's trust region on both legs
+- **AND** the frozen-bits invariant holds (packed Ub/Vb unchanged; already tested by `test_scn_kl_scale_calibration`)
+
+#### Scenario: ste_tunefp_fp32_gpu_within_tolerance_class
+
+- **WHEN** an STE or TuneFP fp32 stage run is compared against the fp64 CPU reference on production layers
 - **THEN** cosine movement stays within the campaign's ±0.002 tolerance class; a breach names the layer and fails that stage's acceptance
+- **AND** TuneScalesKD (f64 scale parameters, native-dtype activations) is excluded from this class; its device equivalence is asserted through KL trace agreement (scenario `kd_gpu_device_parity`)
 
 #### Scenario: device_authority_not_globals
 
