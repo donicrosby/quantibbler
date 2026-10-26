@@ -6,6 +6,26 @@ rust-version = "1.85"
 license = "Apache-2.0"
 description = "qpk1 container: stream reader and model-directory loader (qk-representation contract)"
 
+[lib]
+name = "quantibbler_qpk1"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# PyO3 extension face (design B10): the blob reader is exposed to Python so
+# tests can pin cross-face byte identity. Opt-in, never default — the server
+# consumes this crate as an rlib and must link no libpython (SR-8.2, asserted
+# by crates/quantibbler-server/tests/binary_purity.rs).
+extension-module = ["dep:pyo3", "pyo3/extension-module"]
+default = []
+
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
+# The blob header is length-prefixed JSON (design B2); same floor as the
+# server's own serde_json edge.
+serde_json = "1.0.154"
 toml = "1.1.8"
+# The blob load path maps the file rather than slurping it (BL-4).
+memmap2 = "0.9"
+# Only reachable through the opt-in `extension-module` feature, so a default
+# build (the server's rlib edge) never compiles it.
+pyo3 = { version = "0.30", features = ["abi3-py311"], optional = true }

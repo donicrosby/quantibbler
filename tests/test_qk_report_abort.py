@@ -155,6 +155,9 @@ _ABORT_IDENTITY_VALUES: dict[str, object] = {
         selection_fingerprint="0123456789abcdef",
     ),
     "wall_seconds": 69.6,
+    # The emitted container (qk-artifact-blob BW-1). An aborted run exports
+    # nothing, so the record carries the requested format with nulls.
+    "container": {"format": "blob", "path": None, "sha256": None},
 }
 
 

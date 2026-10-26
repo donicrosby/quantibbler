@@ -64,16 +64,21 @@ dev = [
     "maturin>=1.14,<2",
     "pyyaml>=6,<7",
     "quantibbler-kernels==0.1.0",
+    # The qpk1 crate's PyO3 face (design B10): the blob READER Python tests
+    # and the repack utility consume is built here, so `uv sync` yields it and
+    # a missing one is a sync error rather than a silently-skipped tier.
+    "quantibbler-qpk1==0.1.0",
 ]
 
 [tool.uv]
 required-version = ">=0.12"
 
 [tool.uv.workspace]
-members = ["crates/quantibbler-kernels"]
+members = ["crates/quantibbler-kernels", "crates/quantibbler-qpk1"]
 
 [tool.uv.sources]
 quantibbler-kernels = { workspace = true }
+quantibbler-qpk1 = { workspace = true }
 # Host lanes are CPU-only (AMD box; the GPU substrate is the container image),
 # so torch resolves to the CPU wheel — no nvidia-* dependency chain.
 # Per the uv PyTorch guide: explicit index. Unscoped, because torch is now a

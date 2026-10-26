@@ -542,6 +542,11 @@ def _run_identity(
         # geometry is not the protocol's would make "paper-faithful" a green
         # label over a deviant artifact.
         "runtime_deviations": geometry_deviations(args.seq_len, tune_seq_len, calibration_rows),
+        # The emitted container (qk-artifact-blob BW-1): the format asked for,
+        # and — once the blob is written — its path and external sha256 (design
+        # B6 records the hash OUTSIDE the container). Present on every exit
+        # path, initialised here so an abort carries the same key set.
+        "container": {"format": args.container_format, "path": None, "sha256": None},
         # The evaluation verdict, on every exit path: what the pedestal covered
         # and which harness produced it. Sits beside the method verdict rather
         # than inside it — see `evaluation_record`.
@@ -1114,6 +1119,14 @@ def main() -> int:
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path, default=Path("artifacts") / "model-qpk1")
+    parser.add_argument(
+        "--container-format",
+        choices=("blob", "dir"),
+        default="blob",
+        help="exported container: blob (a single .qpk beside the working "
+        "directory, the canonical form) or dir (directory only). Spec "
+        "qk-artifact-blob BW-1; the report records the blob's sha256.",
+    )
     args = parser.parse_args()
 
     # Ownership BEFORE anything is written: a run that cannot name its owner is
@@ -1477,6 +1490,25 @@ def main() -> int:
                 remainder_dtype=args.remainder_dtype,
             )
             artifact_exported = True
+            if args.container_format == "blob":
+                # The single-file container (BW-1). Packed from the directory
+                # just written, which stays as the build scratch the report
+                # lives in; the hash is recorded in the report, never inside
+                # the blob (design B6).
+                from quantibbler import blob as _blob_writer
+
+                blob_path = out_dir.with_suffix(".qpk")
+                sha = _blob_writer.write_blob_from_directory(
+                    out_dir,
+                    blob_path,
+                    remainder_dtype=args.remainder_dtype,
+                    created_by="quantibbler-quantize-hf-model",
+                )
+                identity["container"] = {
+                    "format": "blob",
+                    "path": str(blob_path),
+                    "sha256": sha,
+                }
         else:
             print(
                 "[6/6] export SKIPPED: factor_mode='fp' is a measurement — no artifact is written",
@@ -1544,6 +1576,9 @@ def main() -> int:
             },
             "probe_abort": None,  # no abort: the key exists on both paths
             "artifact_exported": artifact_exported,
+            # The container record: `path`/`sha256` filled by the blob export
+            # above (null in dir mode — no single-file container was emitted).
+            "container": identity["container"],
             # Stage record + Algorithm 1 map: every
             # executed stage resolved against lines 0-28 with its deviations
             # named, so "paper-faithful" is auditable from the report alone.

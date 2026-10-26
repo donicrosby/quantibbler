@@ -21,8 +21,9 @@ exercising the declared legacy reading (no bias field; the zero map).
 deterministic non-zero bias on every projection, so the loader and the
 engine's forward are exercised on bias-carrying bytes.
 
-Pure Python stdlib (struct + manual bit packing); the Rust crate is never
-imported. Deterministic (fixed seeds); regenerating is idempotent, and
+Pure Python byte packing (struct + manual bit packing, plus the repo's own
+``quantibbler.blob`` writer for the single-file form); the Rust extension is
+never imported. Deterministic (fixed seeds); regenerating is idempotent, and
 fixture drift is a reviewable diff.
 """
 
@@ -42,6 +43,10 @@ BIAS_DIR = REPO_ROOT / "tests" / "fixtures" / "server-model-bias"
 #: FIXTURE_DIR: same layer streams and tokenizer, sidecars re-encoded at bf16
 #: and declared @bf16.
 BF16_DIR = REPO_ROOT / "tests" / "fixtures" / "server-model-bf16"
+#: The single-file blob form of FIXTURE_DIR (change qk-artifact-blob). The
+#: directory stays committed beside it (dual-read, design B7), so both loader
+#: paths keep an artifact and the two loads are compared field-for-field.
+BLOB_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "server-model.qpk"
 
 QPK1_MAGIC = b"QPK1"
 #: Version of the committed pre-bias fixture.
@@ -640,9 +645,27 @@ def build_bad_variants(base: Path) -> dict[str, str]:
     return variants
 
 
+def build_blob_fixture() -> None:
+    """Pack the committed directory fixture into the single-file blob form.
+
+    The blob is the canonical container (design B7); the directory is kept so
+    the dual-read path keeps a fixture of each shape. The header carries every
+    declared field, the ``[sidecar]`` dtype rides as ``remainder_dtype``, and
+    the layer streams / tokenizer are carried verbatim.
+    """
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+    from quantibbler import blob as blob_writer
+
+    blob_writer.write_blob_from_directory(
+        FIXTURE_DIR, BLOB_FIXTURE, created_by="quantibbler-gen-server-fixtures"
+    )
+
+
 def main() -> None:
     build_valid_model(FIXTURE_DIR)
     print(f"wrote {FIXTURE_DIR}")
+    build_blob_fixture()
+    print(f"wrote {BLOB_FIXTURE}")
     build_bias_model(BIAS_DIR)
     print(f"wrote {BIAS_DIR}")
     build_bf16_model(BF16_DIR)

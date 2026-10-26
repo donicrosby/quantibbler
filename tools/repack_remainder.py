@@ -22,9 +22,16 @@ Rules the artifact contract imposes, mirrored from
   ``[repack]`` and carries no wall-clock time — identical sources produce
   identical output bytes.
 
-Usage:
+Usage (the container format follows the INPUT unless ``--container-format``
+names one; a blob input is never written back as a directory):
 
     python tools/repack_remainder.py --in <model-dir> --out <new-dir>
+    python tools/repack_remainder.py --in <model-dir> --out <new.qpk> --container-format blob
+    python tools/repack_remainder.py --in <model.qpk> --out <new.qpk> --remainder-dtype bf16
+
+``--remainder-dtype`` defaults to the tool's historical directory conversion
+(``fp32 -> bf16``) for a directory output, and to the source's declared dtype
+for a blob output — a dir->blob repack carries the remainder as declared.
 """
 
 from __future__ import annotations
@@ -40,12 +47,17 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from quantibbler import blob as blob_writer  # noqa: E402
 from quantibbler.remainder_dtype import (  # noqa: E402
     DEFAULT_REMAINDER_DTYPE,
     RemainderDtypeError,
     decode,
     encode,
 )
+
+#: Blob dtype tags (design B3), mirrored in crates/quantibbler-qpk1/src/blob.rs.
+_FLOAT_TAGS = {"fp32": blob_writer.TAG_FP32_LE, "bf16": blob_writer.TAG_BF16_LE}
+_TAG_DTYPES = {blob_writer.TAG_FP32_LE: "fp32", blob_writer.TAG_BF16_LE: "bf16"}
 
 #: Sidecar key -> the file stem the repacked output uses. Keyed by ROLE, so the
 #: output name depends only on what the file is, not on the source's spelling.
@@ -147,8 +159,8 @@ def _rewrite_sidecar(text: str, entries: dict[str, str], preamble: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def repack(source: Path, out: Path) -> dict:
-    """Write a bf16-remainder copy of ``source`` at ``out``; ``source`` is never
+def _repack_directory(source: Path, out: Path) -> dict:
+    """Write a bf16-remainder copy of a DIRECTORY source; ``source`` is never
     written to. Raises :class:`RepackError` (nothing written) on any refusal."""
     source = Path(source).resolve()
     out = Path(out).resolve()
@@ -240,15 +252,152 @@ def repack(source: Path, out: Path) -> dict:
     }
 
 
+def _is_blob_file(path: Path) -> bool:
+    """True for a regular file whose first four bytes are the blob magic."""
+    if not path.is_file():
+        return False
+    with path.open("rb") as fh:
+        return fh.read(4) == blob_writer.BLOB_MAGIC
+
+
+def _blob_reader():
+    """The qpk1 crate's PyO3 blob reader (design B10) — the ONLY blob reader."""
+    try:
+        import quantibbler_qpk1
+    except ImportError as exc:  # the extension is a dev dependency; name it
+        raise RepackError(
+            "the qpk1 blob reader is not importable; run `uv sync` so the "
+            "quantibbler-qpk1 extension is built"
+        ) from exc
+    return quantibbler_qpk1
+
+
+def _repack_blob(
+    source: Path, out: Path, *, source_is_blob: bool, remainder_dtype: str | None
+) -> dict:
+    """dir->blob (carry verbatim) or blob->blob (dtype conversion) legs."""
+    if out.exists():
+        raise RepackError(f"{out}: already exists; this tool never overwrites an artifact")
+    if remainder_dtype not in (None, "fp32", "bf16"):
+        raise RepackError(
+            f"unknown remainder dtype {remainder_dtype!r}; declared dtypes are fp32 and bf16"
+        )
+    if not source_is_blob:
+        sha = blob_writer.write_blob_from_directory(
+            source, out, remainder_dtype=remainder_dtype, created_by="quantibbler-repack"
+        )
+        return {
+            "source": str(source),
+            "out": str(out),
+            "to": remainder_dtype or "declared",
+            "sha256": sha,
+        }
+
+    parsed = _blob_reader().read_blob(str(source))
+    header = dict(parsed["header"])
+    source_dtype = header["remainder_dtype"]
+    target = remainder_dtype or source_dtype
+    if target not in ("fp32", "bf16"):
+        raise RepackError(f"unknown remainder dtype {target!r}; declared dtypes are fp32 and bf16")
+    if target == source_dtype:
+        raise RepackError(
+            f"{source}: the remainder already declares {source_dtype!r}; ask for the other dtype"
+        )
+    sections = []
+    for entry in parsed["sections"]:
+        tag = entry["tag"]
+        data = entry["data"]
+        if tag in _TAG_DTYPES:
+            data = encode(decode(data, _TAG_DTYPES[tag]), target)
+            tag = _FLOAT_TAGS[target]
+        sections.append(blob_writer.Section(name=entry["name"], tag=tag, data=data))
+    header["remainder_dtype"] = target
+    weight_tying = header.get("weight_tying")
+    if weight_tying is not None:
+        if not isinstance(weight_tying, str) or "@" not in weight_tying:
+            raise RepackError(f"unknown weight_tying {weight_tying!r}")
+        header["weight_tying"] = f"{weight_tying.rsplit('@', 1)[0]}@{target}"
+    header.pop("created_by", None)
+    blob = blob_writer.pack(sections, header, created_by="quantibbler-repack")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(blob)
+    return {
+        "source": str(source),
+        "out": str(out),
+        "to": target,
+        "sha256": blob_writer.blob_sha256(blob),
+    }
+
+
+def repack(
+    source: Path,
+    out: Path,
+    *,
+    container_format: str | None = None,
+    remainder_dtype: str | None = None,
+) -> dict:
+    """Repack ``source`` at ``out``; ``source`` is never touched.
+
+    ``container_format`` selects the OUTPUT container (``"blob"`` single-file /
+    ``"dir"`` legacy directory); absent, it follows the INPUT — a blob source is
+    never written back as a directory. ``remainder_dtype`` selects the output
+    remainder dtype; absent, a directory output keeps the tool's historical
+    ``fp32 -> bf16`` conversion and a blob output carries the source's declared
+    dtype (or converts, when named).
+    """
+    source = Path(source).resolve()
+    out = Path(out).resolve()
+    if out == source:
+        raise RepackError(f"{out}: refusing to repack in place; name a new artifact")
+    if container_format not in (None, "blob", "dir"):
+        raise RepackError(f"unknown container format {container_format!r}; blob or dir")
+    source_is_blob = _is_blob_file(source)
+    fmt = container_format or ("blob" if source_is_blob else "dir")
+    if fmt == "blob":
+        return _repack_blob(
+            source, out, source_is_blob=source_is_blob, remainder_dtype=remainder_dtype
+        )
+    if source_is_blob:
+        raise RepackError(
+            f"{source}: a blob source is not written back as a directory; ask for "
+            f"--container-format blob"
+        )
+    if remainder_dtype not in (None, "bf16"):
+        raise RepackError(
+            f"a directory output only performs the historical fp32 -> bf16 conversion; got "
+            f"--remainder-dtype {remainder_dtype!r}"
+        )
+    return _repack_directory(source, out)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--in", dest="source", type=Path, required=True, help="the artifact to convert"
     )
-    parser.add_argument("--out", type=Path, required=True, help="the new artifact directory")
+    parser.add_argument("--out", type=Path, required=True, help="the new artifact path")
+    parser.add_argument(
+        "--container-format",
+        choices=("blob", "dir"),
+        default=None,
+        help="output container: blob (single .qpk file) or dir (legacy directory); "
+        "default follows the input (a blob stays a blob)",
+    )
+    parser.add_argument(
+        "--remainder-dtype",
+        choices=("fp32", "bf16"),
+        default=None,
+        help="output remainder dtype; default is the historical fp32 -> bf16 for a "
+        "directory output and the source's declared dtype for a blob output",
+    )
     args = parser.parse_args(argv)
     try:
-        record = repack(args.source, args.out)
+        record = repack(
+            args.source,
+            args.out,
+            container_format=args.container_format,
+            remainder_dtype=args.remainder_dtype,
+        )
     except RepackError as exc:
         print(f"repack REFUSED: {exc}", file=sys.stderr)
         return 2

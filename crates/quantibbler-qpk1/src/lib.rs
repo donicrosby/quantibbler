@@ -31,8 +31,14 @@
 //! exposes the parsed header so the caller can name the file in that
 //! diagnostic.
 
+pub mod blob;
 pub mod loader;
+// The PyO3 face (design B10) is compiled only under `extension-module`, so a
+// default build never links an interpreter.
+#[cfg(feature = "extension-module")]
+mod python;
 
+pub use blob::{BLOB_MAGIC, BLOB_VERSION, Blob, BlobHeader, BlobSection, BlobTag};
 pub use loader::{ModelDirectory, NormSlot, inventory_block_floats};
 
 /// Parsed scale dtype tag.

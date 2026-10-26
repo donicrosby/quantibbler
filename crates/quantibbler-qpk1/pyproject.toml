@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.14,<2"]
+build-backend = "maturin"
+
+[project]
+name = "quantibbler-qpk1"
+version = "0.1.0"
+description = "qpk1 container: stream reader and blob reader (qk-representation contract)"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+
+[tool.maturin]
+# The PyO3 face is opt-in (design B10): without this feature the crate is a
+# plain rlib for the server, with no interpreter in the build graph.
+features = ["extension-module"]

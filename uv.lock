@@ -12,6 +12,7 @@ resolution-markers = [
 members = [
     "quantibbler",
     "quantibbler-kernels",
+    "quantibbler-qpk1",
 ]
 
 [[package]]
@@ -995,6 +996,7 @@ dev = [
     { name = "pytest-xdist" },
     { name = "pyyaml" },
     { name = "quantibbler-kernels" },
+    { name = "quantibbler-qpk1" },
 ]
 
 [package.metadata]
@@ -1018,12 +1020,18 @@ dev = [
     { name = "pytest-xdist", specifier = ">=3.6,<4" },
     { name = "pyyaml", specifier = ">=6,<7" },
     { name = "quantibbler-kernels", editable = "crates/quantibbler-kernels" },
+    { name = "quantibbler-qpk1", editable = "crates/quantibbler-qpk1" },
 ]
 
 [[package]]
 name = "quantibbler-kernels"
 version = "0.1.0"
 source = { editable = "crates/quantibbler-kernels" }
+
+[[package]]
+name = "quantibbler-qpk1"
+version = "0.1.0"
+source = { editable = "crates/quantibbler-qpk1" }
 
 [[package]]
 name = "regex"

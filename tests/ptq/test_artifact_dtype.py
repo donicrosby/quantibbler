@@ -236,6 +236,9 @@ def _identity_args(remainder_dtype: str) -> types.SimpleNamespace:
         seed=0,
         paper_faithful=False,
         ste_flip_pass_budget=0,
+        # The emitted container (qk-artifact-blob BW-1): the identity record
+        # carries the requested format on every exit path.
+        container_format="blob",
     )
 
 

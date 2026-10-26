@@ -404,13 +404,30 @@ pub struct LoadedModel {
     pub d_model: usize,
 }
 
-/// Load a qpk1 model directory, or fail with a diagnostic naming the file.
+/// Load a qpk1 model artifact — a directory (legacy) or a single-file blob —
+/// or fail with a diagnostic naming the file (qk-artifact-blob BL-1).
 pub fn load(model_dir: &Path) -> Result<LoadedModel, String> {
-    let dir = loader::load(model_dir)?;
+    let dir = loader::ModelDirectory::load(model_dir)?;
+    // Side files (the gate record) live beside the artifact: the model
+    // directory for a directory source, the blob's own directory for a
+    // single-file source.
+    let artifact_dir = if model_dir.is_dir() {
+        model_dir
+    } else {
+        model_dir.parent().unwrap_or(model_dir)
+    };
 
-    let tokenizer_path = model_dir.join("tokenizer.json");
-    let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
-        .map_err(|e| format!("{}: {e}", tokenizer_path.display()))?;
+    // The tokenizer arrives differently per source: a blob CARRIES it as a
+    // required section (design B9), a directory names it beside the model.
+    let tokenizer = match &dir.tokenizer_json {
+        Some(bytes) => tokenizers::Tokenizer::from_bytes(bytes)
+            .map_err(|e| format!("{}: tokenizer.json section: {e}", model_dir.display()))?,
+        None => {
+            let tokenizer_path = model_dir.join("tokenizer.json");
+            tokenizers::Tokenizer::from_file(&tokenizer_path)
+                .map_err(|e| format!("{}: {e}", tokenizer_path.display()))?
+        }
+    };
 
     // The `gpu:sage` startup gate (qk-sage-attention 3.2): checked HERE, before
     // any device is touched and before the weights exist, so a model whose
@@ -418,7 +435,7 @@ pub fn load(model_dir: &Path) -> Result<LoadedModel, String> {
     // instead of serving degraded attention (spec delta `qk-server`, "Gate fail
     // refuses the face"). `Ok(None)` = the opt-in does not ask for sage and the
     // ordinary face decision stands.
-    let sage = sage_face_from_env(model_dir, &dir.model_id).map_err(|e| e.to_string())?;
+    let sage = sage_face_from_env(artifact_dir, &dir.model_id).map_err(|e| e.to_string())?;
 
     let mut weights = ModelWeights::from_layers(
         dir.layers,
@@ -435,7 +452,7 @@ pub fn load(model_dir: &Path) -> Result<LoadedModel, String> {
         dir.norm_slots.clone(),
         dir.norm_weights,
     )
-    .map_err(|e| format!("{}: {e}", model_dir.join("manifest.toml").display()))?;
+    .map_err(|e| format!("{}: {e}", model_dir.display()))?;
     // The gate admitted the face: install the frozen decision over the ordinary
     // opt-in one (which for `=sage` is the exact scalar fallback root).
     if let Some(decision) = sage {

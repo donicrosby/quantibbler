@@ -42,6 +42,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::blob::{Blob, BlobSection, BlobTag};
 use crate::{Layer, RemainderDtype};
 
 /// Hard cap on one qpk1 layer stream (bytes). A legitimate layer for a
@@ -96,6 +97,10 @@ pub struct ModelDirectory {
     /// derived from the declared inventory — no architecture is
     /// hard-coded (qk-attention N-1, amended).
     pub norm_weights: Vec<f64>,
+    /// The `tokenizer.json` bytes when the source was a BLOB (the section is
+    /// required there, design B9); `None` for a directory source, where the
+    /// server reads `tokenizer.json` beside the model.
+    pub tokenizer_json: Option<Vec<u8>>,
 }
 
 /// One declared norm slot and the width of its vector per block.
@@ -307,7 +312,343 @@ pub fn load(model_dir: &Path) -> Result<ModelDirectory, String> {
         embedding,
         lm_head,
         norm_weights,
+        tokenizer_json: None,
     })
+}
+
+impl ModelDirectory {
+    /// Load a model from EITHER source (BL-1, design B7): a directory path runs
+    /// the legacy directory loader, a regular file is detected by its `QKPB`
+    /// magic and runs the blob loader, and a regular file without the magic is
+    /// refused — never a directory attempt, never a partial parse.
+    pub fn load(path: &Path) -> Result<ModelDirectory, String> {
+        let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if meta.is_dir() {
+            return load(path);
+        }
+        if !meta.is_file() {
+            return Err(format!(
+                "model path {} is neither a directory nor a regular file",
+                path.display()
+            ));
+        }
+        if detect_blob_magic(path)? {
+            load_blob(path)
+        } else {
+            Err(format!(
+                "model file {} is not a qpk1 blob: its first four bytes are not {:?}. A regular \
+                 file is only ever read as a blob; the legacy directory format is read from a \
+                 directory path",
+                path.display(),
+                crate::BLOB_MAGIC
+            ))
+        }
+    }
+}
+
+/// Does the file begin with the blob magic? A file shorter than four bytes
+/// answers `false` (it cannot be a blob).
+fn detect_blob_magic(path: &Path) -> Result<bool, String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut magic = [0u8; 4];
+    match file.read_exact(&mut magic) {
+        Ok(()) => Ok(magic == crate::BLOB_MAGIC),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Load a single-file blob in two phases (BL-4.2 ordering): first read and
+/// validate the metadata prefix from the open file with pread — magic, header,
+/// header padding, and section table, including the 4096-alignment assert —
+/// and only after that passes map the file (BL-4) and run the payload checks
+/// on the map. A misaligned blob is refused by name before any mmap call.
+/// Every refusal names the file.
+pub fn load_blob(path: &Path) -> Result<ModelDirectory, String> {
+    load_blob_with(path, |file| unsafe { memmap2::Mmap::map(file) })
+}
+
+/// The body of [`load_blob`] with an injectable mapper. The mapper is called
+/// only after the metadata prefix passes every rule — in particular BL-4.2's
+/// 4096-alignment assert — so a misaligned blob refuses with zero map calls.
+/// Tests inject a probe that counts calls to prove the ordering.
+fn load_blob_with<F>(path: &Path, map: F) -> Result<ModelDirectory, String>
+where
+    F: FnOnce(&std::fs::File) -> std::io::Result<memmap2::Mmap>,
+{
+    let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let len = file
+        .metadata()
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .len();
+    if len == 0 {
+        return Err(format!(
+            "{}: an empty file is not a qpk1 blob",
+            path.display()
+        ));
+    }
+    // Phase 1: read and validate the metadata prefix from the file. This is a
+    // pread/read of the magic, header JSON, header padding, and section table;
+    // no mmap has been requested yet. BL-4.2's alignment assert runs here.
+    let mut reader = std::io::BufReader::new(&file);
+    let blob = Blob::parse(&mut reader).map_err(|e| format!("{}: {e}", path.display()))?;
+    drop(reader);
+    // Phase 2: metadata passed; map the file and run the payload checks on the
+    // map. A misaligned blob never reaches this line.
+    // SAFETY: the map is read-only and lives no longer than `file`. The blob
+    // is read-only trusted content, and every section access below is bounds
+    // checked against the map's own length by `Blob::validate_payload`'s range
+    // validation, so a concurrent truncation cannot produce an out-of-range
+    // slice through the parsed offsets.
+    let map = map(&file).map_err(|e| format!("{}: mmap failed: {e}", path.display()))?;
+    let bytes: &[u8] = &map;
+    blob.validate_payload(bytes)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    build_from_blob(path, &blob, bytes)
+}
+
+/// Every section-against-header validation of BL-2/BL-3, then the
+/// `ModelDirectory` composition.
+fn build_from_blob(path: &Path, blob: &Blob, bytes: &[u8]) -> Result<ModelDirectory, String> {
+    let header = &blob.header;
+    // The header's geometry is validated by the SAME rules as config.toml
+    // (qk-attention N-2), so a blob cannot declare a shape a directory could
+    // not.
+    let config = ModelConfig {
+        vocab_size: header.vocab_size,
+        d_model: header.d_model,
+        eos_token_id: header.eos_token_id,
+        bos_token_id: header.bos_token_id,
+        n_layers: header.n_layers,
+        n_heads: header.n_heads,
+        n_kv_heads: header.n_kv_heads,
+        head_dim: header.head_dim,
+        rms_norm_eps: header.rms_norm_eps,
+        rope_theta: header.rope_theta,
+        norm_slots: header.norm_slots.clone(),
+        weight_tying: header.weight_tying.clone(),
+    };
+    config.validate(path)?;
+
+    let remainder_dtype = header.remainder_dtype;
+    // `weight_tying`'s suffix is the SECOND declaration of the same bytes
+    // (BL-3.1/BL-3.2); disagreement names both.
+    if let Some(declared) = header.tying_dtype() {
+        let tying = declared.map_err(|e| format!("{}: {e}", path.display()))?;
+        if tying != remainder_dtype {
+            return Err(format!(
+                "{}: weight_tying declares @{} but the header declares remainder_dtype \
+                 \"{}\"; a remainder set cannot hold two dtypes",
+                path.display(),
+                tying.as_str(),
+                remainder_dtype.as_str()
+            ));
+        }
+    }
+
+    // Layers: required section, stream tag agreement, fail-closed parse, rank.
+    let mut layers: Vec<(String, Layer)> = Vec::new();
+    for name in &header.layers {
+        let section = blob.section(name).ok_or_else(|| {
+            format!(
+                "{}: blob is missing the required layer section {name:?}",
+                path.display()
+            )
+        })?;
+        if section.tag.stream_version().is_none() {
+            return Err(format!(
+                "{}: layer section {name:?} is tagged {}; a layer section must carry a qpk1 \
+                 stream (tag 0 qpk1_v1 or 1 qpk1_v2)",
+                path.display(),
+                section.tag.as_str()
+            ));
+        }
+        let raw = blob.slice(bytes, section);
+        let layer =
+            crate::parse(raw).map_err(|e| format!("{}: section {name:?}: {e}", path.display()))?;
+        if section.tag.stream_version() != Some(layer.version) {
+            return Err(format!(
+                "{}: layer section {name:?} is tagged {} but its stream header declares version {}",
+                path.display(),
+                section.tag.as_str(),
+                layer.version
+            ));
+        }
+        if layer.r > layer.dout.min(layer.din) {
+            return Err(format!(
+                "{}: section {name:?}: rank r={} exceeds min(dout, din)={}",
+                path.display(),
+                layer.r,
+                layer.dout.min(layer.din)
+            ));
+        }
+        layers.push((name.clone(), layer));
+    }
+
+    let embedding_floats = config
+        .vocab_size
+        .checked_mul(config.d_model)
+        .ok_or_else(|| format!("{}: vocab_size * d_model overflows", path.display()))?;
+    let embedding_section = blob.section("embedding").ok_or_else(|| {
+        format!(
+            "{}: blob is missing the required section \"embedding\"",
+            path.display()
+        )
+    })?;
+    let embedding = read_remainder_section(
+        path,
+        blob,
+        bytes,
+        embedding_section,
+        embedding_floats,
+        remainder_dtype,
+    )?;
+    // The head is keyed on the SECTION's presence (design B2): present means
+    // an untied head with its own bytes; absent means the head IS the
+    // embedding. A header that declares an untied head must ship the section.
+    let lm_head = match blob.section("lm_head") {
+        Some(section) => Some(read_remainder_section(
+            path,
+            blob,
+            bytes,
+            section,
+            embedding_floats,
+            remainder_dtype,
+        )?),
+        None if header.head_is_untied() => {
+            return Err(format!(
+                "{}: blob is missing the required section \"lm_head\" (the header declares an \
+                 untied head, so the head is not the embedding)",
+                path.display()
+            ));
+        }
+        None => None,
+    };
+
+    let slots: Vec<NormSlot> = config
+        .norm_slots
+        .iter()
+        .map(|s| s.parse::<NormSlot>().expect("validated inventory"))
+        .collect();
+    let per_block = inventory_block_floats(&slots, config.d_model, config.head_dim);
+    let norm_floats = per_block
+        .checked_mul(config.n_layers)
+        .and_then(|p| p.checked_add(config.d_model))
+        .ok_or_else(|| {
+            format!(
+                "{}: norm section count overflows (inventory {:?})",
+                path.display(),
+                config.norm_slots
+            )
+        })?;
+    let norms_section = blob.section("norms").ok_or_else(|| {
+        format!(
+            "{}: blob is missing the required section \"norms\"",
+            path.display()
+        )
+    })?;
+    let norm_weights = read_remainder_section(
+        path,
+        blob,
+        bytes,
+        norms_section,
+        norm_floats,
+        remainder_dtype,
+    )?;
+
+    // tokenizer.json is required (BL-2.2/B9): the server tokenizes immediately
+    // after load, so a blob without it would die at first tokenize.
+    let tokenizer_section = blob.section("tokenizer.json").ok_or_else(|| {
+        format!(
+            "{}: blob is missing the required section \"tokenizer.json\"",
+            path.display()
+        )
+    })?;
+    if tokenizer_section.tag != BlobTag::Raw {
+        return Err(format!(
+            "{}: section \"tokenizer.json\" is tagged {}; tokenizer sections are raw (tag 4)",
+            path.display(),
+            tokenizer_section.tag.as_str()
+        ));
+    }
+    let tokenizer_json = Some(blob.slice(bytes, tokenizer_section).to_vec());
+
+    Ok(ModelDirectory {
+        model_id: header.model_id.clone(),
+        layers,
+        eos_token_id: config.eos_token_id,
+        bos_token_id: config.bos_token_id,
+        vocab_size: config.vocab_size,
+        d_model: config.d_model,
+        n_layers: config.n_layers,
+        n_heads: config.n_heads,
+        n_kv_heads: config.n_kv_heads,
+        head_dim: config.head_dim,
+        rms_norm_eps: config.rms_norm_eps,
+        rope_theta: config.rope_theta,
+        norm_slots: slots,
+        remainder_dtype,
+        embedding,
+        lm_head,
+        norm_weights,
+        tokenizer_json,
+    })
+}
+
+/// One remainder section: the tag must equal the header's `remainder_dtype`
+/// (BL-3.3), the length must equal the inventory-derived float count times the
+/// declared itemsize (BL-2.3), and the payload widens to f64.
+fn read_remainder_section(
+    path: &Path,
+    blob: &Blob,
+    bytes: &[u8],
+    section: &BlobSection,
+    floats: usize,
+    dtype: RemainderDtype,
+) -> Result<Vec<f64>, String> {
+    let tag_dtype = section.tag.remainder_dtype().ok_or_else(|| {
+        format!(
+            "{}: remainder section {:?} is tagged {}; a remainder section must be fp32_le (tag 2) \
+             or bf16_le (tag 3)",
+            path.display(),
+            section.name,
+            section.tag.as_str()
+        )
+    })?;
+    if tag_dtype != dtype {
+        return Err(format!(
+            "{}: remainder section {:?} is tagged {} but the header declares remainder_dtype \
+             \"{}\"",
+            path.display(),
+            section.name,
+            section.tag.as_str(),
+            dtype.as_str()
+        ));
+    }
+    let expected_bytes = floats.checked_mul(dtype.itemsize()).ok_or_else(|| {
+        format!(
+            "{}: remainder section {:?} byte size overflows ({floats} elements @{})",
+            path.display(),
+            section.name,
+            dtype.as_str()
+        )
+    })?;
+    let raw = blob.slice(bytes, section);
+    if raw.len() != expected_bytes {
+        return Err(format!(
+            "{}: remainder section {:?} is {} bytes; expected exactly {expected_bytes} bytes (a \
+             {floats}-element remainder declared @{})",
+            path.display(),
+            section.name,
+            raw.len(),
+            dtype.as_str()
+        ));
+    }
+    Ok(raw
+        .chunks_exact(dtype.itemsize())
+        .map(|p| dtype.widen_le(p))
+        .collect())
 }
 
 /// Lexical containment check + join: `rel` must be a non-empty relative
@@ -1286,5 +1627,70 @@ mod tests {
         assert_eq!(m.head_dim, 2);
         assert!((m.rms_norm_eps - 1e-6).abs() < 1e-30);
         assert!((m.rope_theta - 10_000.0).abs() < 1e-30);
+    }
+
+    fn next_page(x: u64) -> u64 {
+        let rem = x % crate::blob::PAGE_SIZE;
+        if rem == 0 {
+            x
+        } else {
+            x + (crate::blob::PAGE_SIZE - rem)
+        }
+    }
+
+    fn find_embedding_offset_pos(blob: &[u8]) -> usize {
+        let header_len = u32::from_le_bytes(blob[8..12].try_into().unwrap()) as u64;
+        let table_start = next_page(12 + header_len) as usize;
+        let count = u32::from_le_bytes(blob[table_start..table_start + 4].try_into().unwrap());
+        let mut pos = table_start + 4;
+        for _ in 0..count {
+            let name_len = blob[pos] as usize;
+            let name_start = pos + 1;
+            let name = std::str::from_utf8(&blob[name_start..name_start + name_len]).unwrap();
+            let offset_pos = name_start + name_len + 1;
+            if name == "embedding" {
+                return offset_pos;
+            }
+            pos = offset_pos + 8 + 8;
+        }
+        panic!("no embedding section in fixture");
+    }
+
+    // BL-4.2 ordering: the alignment assert runs on the pread prefix, so a
+    // misaligned blob must refuse with ZERO mapper calls. The probe counts
+    // calls; a bug that maps first would make the count 1.
+    #[test]
+    fn misaligned_blob_refused_before_any_mmap() {
+        let mut blob = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/server-model.qpk"),
+        )
+        .expect("committed blob fixture");
+        let pos = find_embedding_offset_pos(&blob);
+        let offset = u64::from_le_bytes(blob[pos..pos + 8].try_into().unwrap());
+        blob[pos..pos + 8].copy_from_slice(&(offset + 8).to_le_bytes());
+        let path = std::env::temp_dir().join(format!(
+            "qpk1-misaligned-{}-{}.qpk",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::write(&path, &blob).expect("write misaligned blob");
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let result = load_blob_with(&path, |file| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            unsafe { memmap2::Mmap::map(file) }
+        });
+        let _ = std::fs::remove_file(&path);
+        let err = result.expect_err("a misaligned blob must refuse");
+        assert!(err.contains("4096"), "names the alignment: {err}");
+        assert!(err.contains("embedding"), "names the section: {err}");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "mmap must not be called when alignment fails (BL-4.2 ordering)"
+        );
     }
 }
