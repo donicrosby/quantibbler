@@ -196,6 +196,69 @@ def _is_integral(value: object) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Dense-operand dtypes for the FP-remainder products
+# ---------------------------------------------------------------------------
+#
+# The scalar trait in the Rust core (``quantibbler_kernels::dtype``) declares
+# one accumulator per dtype; the reference mirrors that table exactly, because
+# the reference IS the executable specification. ``bfloat16`` accumulates in
+# float32 and rounds ONCE at the output, which is what keeps its error an
+# output-precision bound instead of one that grows with the row width.
+
+_PRODUCT_DTYPES = ("float64", "float32", "bfloat16")
+_BF16_ACC = np.dtype(np.float32)
+
+
+def _product_dtype(dtype: object) -> str:
+    """Normalise a dense-operand dtype to one of the three accepted names."""
+    if isinstance(dtype, str):
+        name = dtype
+    else:
+        try:
+            name = np.dtype(dtype).name
+        except TypeError as exc:  # pragma: no cover - exotic objects only
+            raise ValueError(f"unknown dense dtype {dtype!r}") from exc
+    if name not in _PRODUCT_DTYPES:
+        raise ValueError(f"dense dtype must be one of {_PRODUCT_DTYPES}, got {dtype!r}")
+    return name
+
+
+def _bf16_bits_to_f32(bits: object) -> np.ndarray:
+    """Decode ``uint16`` bf16 bit patterns to float32 (exact: bf16 ⊂ float32)."""
+    u = np.asarray(bits, dtype=np.uint16).astype(np.uint32) << np.uint32(16)
+    return u.view(np.float32)
+
+
+def _f32_to_bf16_bits(x: object) -> np.ndarray:
+    """Round float32 to bf16, returning ``uint16`` bit patterns.
+
+    Round-to-nearest-EVEN is emulated in integer space: add ``0x7FFF`` plus the
+    kept mantissa's low bit, then truncate. NumPy has no native bfloat16, so the
+    bit pattern IS the wire form (the Rust face reads the same bits with
+    ``bf16::from_bits``); a torch ``bfloat16`` tensor reaches this through
+    ``tensor.view(torch.uint16)``.
+    """
+    u = np.asarray(x, dtype=np.float32).view(np.uint32).astype(np.uint64)
+    lsb = (u >> np.uint64(16)) & np.uint64(1)
+    rounded = (u + np.uint64(0x7FFF) + lsb) >> np.uint64(16)
+    return (rounded & np.uint64(0xFFFF)).astype(np.uint16)
+
+
+def _dense_operand(vec: object, dtype: str) -> tuple[np.ndarray, np.dtype]:
+    """Coerce a dense operand to ``dtype``; returns (values, accumulator dtype)."""
+    if dtype == "bfloat16":
+        return _bf16_bits_to_f32(vec), _BF16_ACC
+    return np.asarray(vec, dtype=dtype), np.dtype(dtype)
+
+
+def _dense_result(acc: np.ndarray, dtype: str) -> np.ndarray:
+    """Render an accumulator as the operand dtype (bf16 rounds once, if at all)."""
+    if dtype == "bfloat16":
+        return _f32_to_bf16_bits(acc)
+    return acc
+
+
 def _numpy_sign_estimate(x: object) -> np.ndarray:
     """int8 sign of ``x``: ``>0 -> +1``, ``<=0 -> -1``, exact zeros -> ``+1``.
 
@@ -210,19 +273,25 @@ def _decode_row_bit(packed: np.ndarray, row: int, k: int) -> int:
     return (int(packed[row, k >> 3]) >> (k & 7)) & 1
 
 
-def _numpy_packed_matvec(packed: object, n_bits: int, vec: object) -> np.ndarray:
-    """``unpack_bits(packed, n_bits, float64) @ vec`` without materializing.
+def _numpy_packed_matvec(
+    packed: object, n_bits: int, vec: object, dtype: object = "float64"
+) -> np.ndarray:
+    """``unpack_bits(packed, n_bits, dtype) @ vec`` without materializing.
 
-    Accumulation is pinned left-to-right in row-element order in every
-    backend so float results are bit-identical, not merely 1e-12-close.
+    Accumulation is pinned left-to-right in row-element order in every backend
+    and sum dtype, so ``float64`` results are bit-identical, not merely
+    1e-12-close. ``dtype`` selects the dense operand's precision (and therefore
+    the accumulator); ``bfloat16`` accumulates in float32 and returns ``uint16``
+    bit patterns.
     """
+    name = _product_dtype(dtype)
     p = np.asarray(packed, dtype=np.uint8)
     if p.ndim != 2:
         raise ValueError("packed_matvec expects a 2-D uint8 packed array")
     if not _is_integral(n_bits) or int(n_bits) < 0:
         raise ValueError(f"n_bits must be a non-negative integer, got {n_bits!r}")
     n_bits_i = int(n_bits)
-    v = np.asarray(vec, dtype=np.float64)
+    v, acc_dtype = _dense_operand(vec, name)
     n_rows, n_words = p.shape
     if n_bits_i > n_words * 8:
         raise ValueError(
@@ -230,27 +299,30 @@ def _numpy_packed_matvec(packed: object, n_bits: int, vec: object) -> np.ndarray
         )
     if v.ndim != 1 or v.shape[0] != n_bits_i:
         raise ValueError(f"vec must have shape ({n_bits_i},), got {v.shape}")
-    out = np.zeros(n_rows, dtype=np.float64)
+    out = np.zeros(n_rows, dtype=acc_dtype)
     for i in range(n_rows):
-        acc = 0.0
+        acc = acc_dtype.type(0.0)
         for k in range(n_bits_i):
-            s = 1.0 if _decode_row_bit(p, i, k) == 1 else -1.0
-            acc += s * float(v[k])
+            s = acc_dtype.type(1.0 if _decode_row_bit(p, i, k) == 1 else -1.0)
+            acc = acc_dtype.type(acc + s * acc_dtype.type(v[k]))
         out[i] = acc
-    return out
+    return _dense_result(out, name)
 
 
-def _numpy_packed_matmul(packed: object, n_bits: int, mat: object) -> np.ndarray:
+def _numpy_packed_matmul(
+    packed: object, n_bits: int, mat: object, dtype: object = "float64"
+) -> np.ndarray:
     """Column-batched :func:`_numpy_packed_matvec` (packed x dense-float only)."""
+    name = _product_dtype(dtype)
     p = np.asarray(packed, dtype=np.uint8)
     if p.ndim != 2:
         raise ValueError("packed_matmul expects a 2-D uint8 packed array")
     if not _is_integral(n_bits) or int(n_bits) < 0:
         raise ValueError(f"n_bits must be a non-negative integer, got {n_bits!r}")
     n_bits_i = int(n_bits)
-    m = np.asarray(mat, dtype=np.float64)
+    m, acc_dtype = _dense_operand(mat, name)
     if m.ndim != 2:
-        raise ValueError("packed_matmul expects a 2-D float64 matrix")
+        raise ValueError(f"packed_matmul expects a 2-D {name} matrix")
     n_rows, n_words = p.shape
     if n_bits_i > n_words * 8:
         raise ValueError(
@@ -259,15 +331,15 @@ def _numpy_packed_matmul(packed: object, n_bits: int, mat: object) -> np.ndarray
     if m.shape[0] != n_bits_i:
         raise ValueError(f"mat must have {n_bits_i} rows, got {m.shape[0]}")
     k_cols = m.shape[1]
-    out = np.zeros((n_rows, k_cols), dtype=np.float64)
+    out = np.zeros((n_rows, k_cols), dtype=acc_dtype)
     for i in range(n_rows):
         for j in range(k_cols):
-            acc = 0.0
+            acc = acc_dtype.type(0.0)
             for t in range(n_bits_i):
-                s = 1.0 if _decode_row_bit(p, i, t) == 1 else -1.0
-                acc += s * float(m[t, j])
+                s = acc_dtype.type(1.0 if _decode_row_bit(p, i, t) == 1 else -1.0)
+                acc = acc_dtype.type(acc + s * acc_dtype.type(m[t, j]))
             out[i, j] = acc
-    return out
+    return _dense_result(out, name)
 
 
 def _splitmix_matrix(seed: int, rank: int) -> np.ndarray:
@@ -443,21 +515,49 @@ def sign_estimate(x: object, *, backend: str | None = None) -> np.ndarray:
 
 
 def packed_matvec(
-    packed: object, n_bits: int, vec: object, *, backend: str | None = None
+    packed: object,
+    n_bits: int,
+    vec: object,
+    *,
+    dtype: object = "float64",
+    backend: str | None = None,
 ) -> np.ndarray:
-    """Packed x dense-float matvec; see ``_numpy_packed_matvec``."""
-    if _wants_rust("packed_matvec", backend):
-        return _call_rust("packed_matvec", packed, n_bits, vec)  # type: ignore
-    return _numpy_packed_matvec(packed, n_bits, vec)
+    """Packed x dense matvec; see ``_numpy_packed_matvec``.
+
+    ``dtype`` is the dense operand's precision: ``"float64"`` (the v0.1
+    default), ``"float32"``, or ``"bfloat16"`` — the latter takes and returns
+    ``uint16`` bit patterns, NumPy having no native bfloat16. The ``float64``
+    leg keeps the v0.1 kernel name and bytes; every other dtype routes through
+    the dtype-aware entry point.
+    """
+    name = _product_dtype(dtype)
+    if name == "float64":
+        if _wants_rust("packed_matvec", backend):
+            return _call_rust("packed_matvec", packed, n_bits, vec)  # type: ignore
+        return _numpy_packed_matvec(packed, n_bits, vec, name)
+    if _wants_rust("packed_matvec_dtype", backend):
+        return _call_rust("packed_matvec_dtype", packed, n_bits, vec, name)  # type: ignore
+    return _numpy_packed_matvec(packed, n_bits, vec, name)
 
 
 def packed_matmul(
-    packed: object, n_bits: int, mat: object, *, backend: str | None = None
+    packed: object,
+    n_bits: int,
+    mat: object,
+    *,
+    dtype: object = "float64",
+    backend: str | None = None,
 ) -> np.ndarray:
-    """Packed x dense-float matmul; see ``_numpy_packed_matmul``."""
-    if _wants_rust("packed_matmul", backend):
-        return _call_rust("packed_matmul", packed, n_bits, mat)  # type: ignore
-    return _numpy_packed_matmul(packed, n_bits, mat)
+    """Packed x dense matmul; see ``_numpy_packed_matmul`` (and
+    :func:`packed_matvec` for the ``dtype`` contract)."""
+    name = _product_dtype(dtype)
+    if name == "float64":
+        if _wants_rust("packed_matmul", backend):
+            return _call_rust("packed_matmul", packed, n_bits, mat)  # type: ignore
+        return _numpy_packed_matmul(packed, n_bits, mat, name)
+    if _wants_rust("packed_matmul_dtype", backend):
+        return _call_rust("packed_matmul_dtype", packed, n_bits, mat, name)  # type: ignore
+    return _numpy_packed_matmul(packed, n_bits, mat, name)
 
 
 def joint_itq(

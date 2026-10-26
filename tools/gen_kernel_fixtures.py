@@ -216,6 +216,118 @@ def _matmul_family(pyo3: bool) -> list[dict]:
     ]
 
 
+def _dtype_pyo3_available() -> bool:
+    """True when the extension carries the dtype-aware product entries."""
+    return k.HAVE_KERNELS and all(
+        hasattr(k._kernels, n) for n in ("packed_matvec_dtype", "packed_matmul_dtype")
+    )
+
+
+def _require_torch():
+    """The bf16 family's encoder: REQUIRED, never substituted.
+
+    The bf16 operands must be encoded by something other than the emulation the
+    fixture is used to validate, or a rounding-mode bug is written into the
+    fixture and then confirmed by the code that produced it. A missing torch is
+    a hard generation error.
+    """
+    try:
+        import torch  # noqa: PLC0415 - only the bf16 family needs it
+    except ImportError as exc:  # pragma: no cover - environment error
+        raise RuntimeError(
+            "the bf16 fixture family requires torch at generation time (an "
+            "encoder independent of this package's emulation); emulated "
+            "operands are not an accepted substitute"
+        ) from exc
+    return torch
+
+
+def _torch_bf16_bits(x: np.ndarray) -> np.ndarray:
+    """bf16 bit patterns for ``x`` from TORCH, not from this repo's emulation.
+
+    The generator must not feed the reference an operand it encoded with the
+    same code the reference decodes with: torch's own bfloat16 cast is an
+    independent encoder, so a rounding-mode error here cannot hide inside the
+    fixture. (A probe test asserts the repo's emulation agrees with this.)
+    """
+    torch = _require_torch()
+
+    return torch.tensor(np.asarray(x, np.float32), dtype=torch.bfloat16).view(torch.uint16).numpy()
+
+
+def _dtype_family(pyo3: bool) -> list[dict]:
+    """FP-remainder products at each dense-operand dtype.
+
+    bf16 operands cross as ``uint16`` bit patterns (NumPy has no native
+    bfloat16); the NumPy-reference face accumulates in float32 and rounds once,
+    mirroring the Rust scalar trait's declared accumulator.
+    """
+    pyo3 = pyo3 and _dtype_pyo3_available()
+    out: list[dict] = []
+    factor = _factor((6, 13), 401)
+    vec = np.random.default_rng(402).standard_normal(13)
+    packed = k.pack_bits(factor, backend="numpy-reference")
+    for scenario, dtype, operand in [
+        ("dtype_f32_matvec", "float32", vec.astype(np.float32)),
+        ("dtype_bf16_matvec", "bfloat16", _torch_bf16_bits(vec)),
+    ]:
+        operand = np.asarray(operand)
+        ref = k.packed_matvec(packed, 13, operand, dtype=dtype, backend="numpy-reference")
+        pyo3_out = None
+        if pyo3:
+            pyo3_out = {
+                "result": np.asarray(
+                    k.packed_matvec(packed, 13, operand, dtype=dtype, backend="rust")
+                ).tolist()
+            }
+        out.append(
+            _record(
+                scenario,
+                {"packed": packed.tolist(), "vec": operand.tolist()},
+                {"result": np.asarray(ref).tolist()},
+                {
+                    "packed": "uint8",
+                    "operand": dtype,
+                    "result": dtype,
+                    "n_bits": 13,
+                },
+                pyo3_out,
+            )
+        )
+
+    factor_m = _factor((5, 12), 403)
+    mat = np.random.default_rng(404).standard_normal((12, 3))
+    packed_m = k.pack_bits(factor_m, backend="numpy-reference")
+    for scenario, dtype, operand in [
+        ("dtype_f32_matmul", "float32", mat.astype(np.float32)),
+        ("dtype_bf16_matmul", "bfloat16", _torch_bf16_bits(mat)),
+    ]:
+        operand = np.asarray(operand)
+        ref = k.packed_matmul(packed_m, 12, operand, dtype=dtype, backend="numpy-reference")
+        pyo3_out = None
+        if pyo3:
+            pyo3_out = {
+                "result": np.asarray(
+                    k.packed_matmul(packed_m, 12, operand, dtype=dtype, backend="rust")
+                ).tolist()
+            }
+        out.append(
+            _record(
+                scenario,
+                {"packed": packed_m.tolist(), "mat": operand.tolist()},
+                {"result": np.asarray(ref).tolist()},
+                {
+                    "packed": "uint8",
+                    "operand": dtype,
+                    "result": dtype,
+                    "n_bits": 12,
+                },
+                pyo3_out,
+            )
+        )
+    return out
+
+
 def _itq_family(pyo3: bool) -> list[dict]:
     rng = np.random.default_rng(8)
     u_hat = rng.standard_normal((7, 3))
@@ -271,6 +383,7 @@ def main() -> None:
         "sign_estimate": _sign_family(pyo3),
         "packed_matvec": _matvec_family(pyo3),
         "packed_matmul": _matmul_family(pyo3),
+        "dtype_parity": _dtype_family(pyo3),
         "joint_itq": _itq_family(pyo3),
     }
     for fname, records in families.items():

@@ -418,3 +418,295 @@ def test_parity_all_kernels_present_on_both_backends():
         missing = [n for n in _RUST_KERNELS if not hasattr(k._kernels, n)]  # noqa: SLF001
         if missing:
             pytest.skip(f"installed extension predates the v0.1 surface (lacks {missing})")
+
+
+# ---------------------------------------------------------------------------
+# Dtype-generic FP-remainder products (change qk-kernels-dtype-generic).
+# Scenario IDs: dtype_tag_resolution, scalar_trait_covers_three_dtypes,
+# dtype_f32_matvec, dtype_bf16_matvec, dtype_f32_matmul, dtype_bf16_matmul,
+# f64_product_bit_identical, bf16_packed_still_bit_identical,
+# pyo3_dtype_tag_selects_output_dtype, pyo3_unknown_dtype_refused,
+# bf16_wire_form_is_uint16.
+#
+# bf16 deviation is bounded as a BACKWARD error on the row's term scale
+# Sigma_k |v_k|: the dominant term is the bf16 rounding of the OPERAND, which
+# scales with the terms, and a forward-relative bound is governed by the sum's
+# condition number (a canceling row sends it to infinity). These are the
+# constants rust-side `parity.rs` declares.
+# ---------------------------------------------------------------------------
+
+_PRODUCT_DTYPES = ("float64", "float32", "bfloat16")
+F32_BACKWARD_TOL = 1e-6
+BF16_BACKWARD_TOL = 1e-2
+
+
+def _torch_bf16_bits(x: np.ndarray) -> np.ndarray:
+    """bf16 bit patterns from TORCH — an encoder independent of this package."""
+    import torch
+
+    return torch.tensor(np.asarray(x, np.float32), dtype=torch.bfloat16).view(torch.uint16).numpy()
+
+
+def _bf16_bits_to_f32(bits: np.ndarray) -> np.ndarray:
+    u = np.asarray(bits, np.uint16).astype(np.uint32) << np.uint32(16)
+    return u.view(np.float32)
+
+
+def _dense(name: str, x: np.ndarray) -> np.ndarray:
+    """A dense operand in ``name``'s wire form (bf16 crosses as uint16 bits)."""
+    if name == "bfloat16":
+        return _torch_bf16_bits(x)
+    return np.asarray(x, dtype=name)
+
+
+def _decode(name: str, x: np.ndarray) -> np.ndarray:
+    """A result's wire form widened to float64 for comparison."""
+    if name == "bfloat16":
+        return _bf16_bits_to_f32(x).astype(np.float64)
+    return np.asarray(x).astype(np.float64)
+
+
+def _term_scale(factor: np.ndarray, operand: np.ndarray) -> np.ndarray:
+    """Sigma_k |v_k| per row — the backward-error denominator."""
+    return np.abs(factor.astype(np.float64)) @ np.abs(np.asarray(operand, np.float64))
+
+
+def test_scn_dtype_tag_resolution():
+    """Three dtype names resolve; anything else is refused naming the value."""
+    packed = k.pack_bits(_signed_factor((2, 4), seed=11), backend="numpy-reference")
+    op = np.ones(4, dtype=np.float32)
+    for name in _PRODUCT_DTYPES:
+        k.packed_matvec(packed, 4, _dense(name, op), dtype=name, backend="numpy-reference")
+    with pytest.raises(ValueError) as excinfo:
+        k.packed_matvec(packed, 4, op, dtype="float16", backend="numpy-reference")
+    assert "float16" in str(excinfo.value)
+    if _rust_ready("packed_matvec_dtype"):
+        with pytest.raises(ValueError) as excinfo:
+            k.packed_matvec(packed, 4, op, dtype="float16", backend="rust")
+        assert "float16" in str(excinfo.value), "the Rust face must name the value too"
+    else:
+        _require_rust("packed_matvec_dtype")
+
+
+def test_scn_scalar_trait_covers_three_dtypes():
+    """The accepted set is the same on both faces — no second private list."""
+    packed = k.pack_bits(_signed_factor((2, 4), seed=12), backend="numpy-reference")
+    op = np.ones(4, dtype=np.float32)
+    probes = [*_PRODUCT_DTYPES, "float16", "int8", "bfloat32", "float64x2"]
+
+    def accepted(backend: str) -> list[str]:
+        out = []
+        for name in probes:
+            operand = _dense(name if name in _PRODUCT_DTYPES else "float32", op)
+            try:
+                k.packed_matvec(packed, 4, operand, dtype=name, backend=backend)
+            except ValueError:
+                continue
+            out.append(name)
+        return out
+
+    numpy_accepted = accepted("numpy-reference")
+    assert numpy_accepted == list(_PRODUCT_DTYPES)
+    if _rust_ready("packed_matvec_dtype"):
+        assert accepted("rust") == numpy_accepted
+    else:
+        _require_rust("packed_matvec_dtype")
+
+
+def _check_dtype_matvec(dtype: str, *, n_bits: int, rows: int, seed: int) -> None:
+    factor = _signed_factor((rows, n_bits), seed=seed)
+    packed = k.pack_bits(factor, backend="numpy-reference")
+    vec = np.random.default_rng(seed + 1).standard_normal(n_bits)
+    operand = _dense(dtype, vec)
+    ref = k.packed_matvec(packed, n_bits, operand, dtype=dtype, backend="numpy-reference")
+    assert ref.dtype == (np.uint16 if dtype == "bfloat16" else np.dtype(dtype))
+
+    # the declared bound is exercised against the exact float64 product of the
+    # SAME operand: the different-precision computation this dtype replaces
+    exact_operand = (
+        _bf16_bits_to_f32(operand) if dtype == "bfloat16" else operand.astype(np.float32)
+    )
+    exact = k.packed_matvec(
+        packed, n_bits, exact_operand.astype(np.float64), backend="numpy-reference"
+    )
+    scale = _term_scale(factor, exact_operand)
+    got = _decode(dtype, ref)
+    tol = BF16_BACKWARD_TOL if dtype == "bfloat16" else F32_BACKWARD_TOL
+    assert np.all(np.abs(got - exact) <= tol * scale), (
+        f"{dtype} matvec exceeds the declared backward bound {tol}: "
+        f"worst {np.max(np.abs(got - exact) / scale):.3e} of the term scale"
+    )
+
+    if _rust_ready("packed_matvec_dtype"):
+        rust = k.packed_matvec(packed, n_bits, operand, dtype=dtype, backend="rust")
+        assert rust.dtype == ref.dtype, "the tagged dtype must come back on both faces"
+        assert rust.tobytes() == ref.tobytes(), "the two faces must agree bit-exactly"
+    else:
+        _require_rust("packed_matvec_dtype")
+
+
+def _check_dtype_matmul(dtype: str, *, n_bits: int, rows: int, cols: int, seed: int) -> None:
+    factor = _signed_factor((rows, n_bits), seed=seed)
+    packed = k.pack_bits(factor, backend="numpy-reference")
+    mat = np.random.default_rng(seed + 1).standard_normal((n_bits, cols))
+    operand = _dense(dtype, mat)
+    ref = k.packed_matmul(packed, n_bits, operand, dtype=dtype, backend="numpy-reference")
+    assert ref.dtype == (np.uint16 if dtype == "bfloat16" else np.dtype(dtype))
+
+    exact_operand = (
+        _bf16_bits_to_f32(operand) if dtype == "bfloat16" else operand.astype(np.float32)
+    )
+    exact = k.packed_matmul(
+        packed, n_bits, exact_operand.astype(np.float64), backend="numpy-reference"
+    )
+    scale = np.stack([_term_scale(factor, exact_operand[:, j]) for j in range(cols)], axis=1)
+    got = _decode(dtype, ref)
+    tol = BF16_BACKWARD_TOL if dtype == "bfloat16" else F32_BACKWARD_TOL
+    assert np.all(np.abs(got - exact) <= tol * scale), (
+        f"{dtype} matmul exceeds the declared backward bound {tol}: "
+        f"worst {np.max(np.abs(got - exact) / scale):.3e} of the term scale"
+    )
+
+    if _rust_ready("packed_matmul_dtype"):
+        rust = k.packed_matmul(packed, n_bits, operand, dtype=dtype, backend="rust")
+        assert rust.dtype == ref.dtype
+        assert rust.tobytes() == ref.tobytes(), "the two faces must agree bit-exactly"
+    else:
+        _require_rust("packed_matmul_dtype")
+
+
+def test_scn_dtype_f32_matvec():
+    _check_dtype_matvec("float32", n_bits=13, rows=6, seed=101)
+
+
+def test_scn_dtype_bf16_matvec():
+    _check_dtype_matvec("bfloat16", n_bits=13, rows=6, seed=102)
+
+
+def test_scn_dtype_f32_matmul():
+    _check_dtype_matmul("float32", n_bits=12, rows=5, cols=3, seed=103)
+
+
+def test_scn_dtype_bf16_matmul():
+    _check_dtype_matmul("bfloat16", n_bits=12, rows=5, cols=3, seed=104)
+
+
+def test_scn_f64_product_bit_identical():
+    """The refactor is structural: the float64 path is the v0.1 bytes."""
+    factor = _signed_factor((6, 13), seed=21)
+    packed = k.pack_bits(factor, backend="numpy-reference")
+    vec = np.random.default_rng(22).standard_normal(13)
+    ref = k.packed_matvec(packed, 13, vec, backend="numpy-reference")
+    dense = factor.astype(np.float64)
+    manual = np.array([sum(dense[i, kk] * vec[kk] for kk in range(13)) for i in range(6)])
+    assert ref.tobytes() == manual.tobytes(), "the reference is left-to-right float64"
+    if _rust_ready("packed_matvec", "packed_matvec_dtype"):
+        assert k.packed_matvec(packed, 13, vec, backend="rust").tobytes() == ref.tobytes()
+        tagged = k.packed_matvec(packed, 13, vec, dtype="float64", backend="rust")
+        assert tagged.tobytes() == ref.tobytes(), "the tagged float64 leg must be the v0.1 bytes"
+    else:
+        _require_rust("packed_matvec", "packed_matvec_dtype")
+
+
+def test_scn_f64_surface_signature_and_error_unchanged():
+    """The v0.1 f64 call shape and diagnostics, preserved verbatim.
+
+    Scenario ``f64_surface_signature_and_error_unchanged``. Both halves are
+    probed as VALUES: ``pytest.raises(ValueError)`` cannot tell a preserved
+    message from a rewritten one, and a new POSITIONAL parameter would break a
+    v0.1 call site that the keyword-only additions do not.
+    """
+    import inspect
+
+    for fn, third in ((k.packed_matvec, "vec"), (k.packed_matmul, "mat")):
+        params = list(inspect.signature(fn).parameters.values())
+        assert [p.name for p in params[:3]] == ["packed", "n_bits", third]
+        assert all(p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD for p in params[:3])
+        # every ADDED parameter is keyword-only, so no v0.1 call site breaks
+        assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in params[3:])
+        assert "dtype" in {p.name for p in params[3:]}
+
+    packed = k.pack_bits(_signed_factor((6, 13), seed=71), backend="numpy-reference")
+    packed_m = k.pack_bits(_signed_factor((5, 12), seed=72), backend="numpy-reference")
+
+    # NumPy reference: the v0.1 f64 literals
+    with pytest.raises(ValueError) as excinfo:
+        k.packed_matvec(packed, 13, np.ones(5), backend="numpy-reference")
+    assert "vec must have shape (13,), got (5,)" in str(excinfo.value)
+    with pytest.raises(ValueError) as excinfo:
+        k.packed_matmul(packed_m, 12, np.ones((5, 3)), backend="numpy-reference")
+    assert "mat must have 12 rows, got 5" in str(excinfo.value)
+
+    if _rust_ready("packed_matvec", "packed_matmul"):
+        # the Rust face's own literals, reached through PyO3 as ValueError
+        with pytest.raises(ValueError) as excinfo:
+            k.packed_matvec(packed, 13, np.ones(5), backend="rust")
+        assert "vec must have length 13, got 5" in str(excinfo.value)
+        with pytest.raises(ValueError) as excinfo:
+            k.packed_matmul(packed_m, 12, np.ones((5, 3)), backend="rust")
+        assert "mat length 15 is not a multiple of n_bits 12" in str(excinfo.value)
+    else:
+        _require_rust("packed_matvec", "packed_matmul")
+
+
+def test_scn_bf16_packed_still_bit_identical():
+    """The dtype touches the dense operand and nothing else."""
+    factor = _signed_factor((5, 12), seed=31)
+    packed = k.pack_bits(factor, backend="numpy-reference")
+    mat = np.random.default_rng(32).standard_normal((12, 3))
+    results = [
+        k.packed_matmul(packed, 12, _dense(dtype, mat), dtype=dtype, backend="numpy-reference")
+        for dtype in ("float32", "bfloat16")
+    ]
+    assert all(r.shape == (5, 3) for r in results)
+    decoded = k.unpack_bits(packed, 12, "int8", backend="numpy-reference")
+    assert k.pack_bits(decoded, backend="numpy-reference").tobytes() == packed.tobytes()
+    if _rust_ready("packed_matmul_dtype"):
+        for dtype in ("float32", "bfloat16"):
+            operand = _dense(dtype, mat)
+            rust = k.packed_matmul(packed, 12, operand, dtype=dtype, backend="rust")
+            numpy_ref = k.packed_matmul(packed, 12, operand, dtype=dtype, backend="numpy-reference")
+            assert rust.tobytes() == numpy_ref.tobytes()
+    else:
+        _require_rust("packed_matmul_dtype")
+
+
+def test_scn_pyo3_dtype_tag_selects_output_dtype():
+    packed = k.pack_bits(_signed_factor((4, 9), seed=41), backend="numpy-reference")
+    vec = np.random.default_rng(42).standard_normal(9)
+    if not _rust_ready("packed_matvec_dtype"):
+        _require_rust("packed_matvec_dtype")
+    for dtype, expected in (
+        ("float64", np.float64),
+        ("float32", np.float32),
+        ("bfloat16", np.uint16),
+    ):
+        got = k.packed_matvec(packed, 9, _dense(dtype, vec), dtype=dtype, backend="rust")
+        assert got.dtype == np.dtype(expected), f"{dtype} came back as {got.dtype}"
+
+
+def test_scn_pyo3_unknown_dtype_refused():
+    packed = k.pack_bits(_signed_factor((2, 3), seed=51), backend="numpy-reference")
+    if not _rust_ready("packed_matvec_dtype", "packed_matmul_dtype"):
+        _require_rust("packed_matvec_dtype", "packed_matmul_dtype")
+    with pytest.raises(ValueError) as excinfo:
+        k.packed_matvec(packed, 3, np.ones(3, np.float32), dtype="float8", backend="rust")
+    assert "float8" in str(excinfo.value)
+    with pytest.raises(ValueError) as excinfo:
+        k.packed_matmul(packed, 3, np.ones((3, 2), np.float32), dtype="float8", backend="rust")
+    assert "float8" in str(excinfo.value)
+
+
+def test_scn_bf16_wire_form_is_uint16():
+    """bf16 crosses as uint16 bit patterns; torch's cast is the independent check."""
+    import torch
+
+    vec = np.random.default_rng(61).standard_normal(7).astype(np.float32)
+    bits = _torch_bf16_bits(vec)
+    assert bits.dtype == np.uint16
+    assert k._f32_to_bf16_bits(vec).tobytes() == bits.tobytes(), (  # noqa: SLF001
+        "the package's bf16 rounding must be torch's rounding (round-to-nearest-even)"
+    )
+    assert _bf16_bits_to_f32(bits).dtype == np.float32
+    tensor = torch.tensor(vec, dtype=torch.bfloat16)
+    assert tensor.view(torch.uint16).numpy().tobytes() == bits.tobytes()

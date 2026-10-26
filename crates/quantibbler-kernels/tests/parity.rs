@@ -13,7 +13,9 @@
 use std::fs;
 use std::path::Path;
 
+use half::bf16;
 use quantibbler_kernels::core;
+use quantibbler_kernels::dispatch;
 
 const REL_TOL: f64 = 1e-12;
 
@@ -773,8 +775,403 @@ fn unpack_bits_zero_bits_nonempty_packed_is_error() {
 #[test]
 fn packed_matmul_zero_columns_returns_empty() {
     // mat.len() == 0 -> k == 0 -> zeroed (n_rows x 0) output, no panic.
-    let packed = [0u8; 2]; // 2 rows x 1 word (n_bits = 8)
-    let out = quantibbler_kernels::core::packed_matmul(&packed, 2, 8, &[], 0)
+    // 2 rows x 1 word (n_bits = 8). The dtype is explicit because the product is
+    // generic over its operand now: an empty literal alone leaves T uninferred.
+    let packed = [0u8; 2];
+    let out = quantibbler_kernels::core::packed_matmul(&packed, 2, 8, &[] as &[f64], 0)
         .expect("zero-column matmul is valid");
     assert_eq!(out.len(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Dtype-generic FP-remainder products (change qk-kernels-dtype-generic).
+// Scenario IDs: dtype_f32_matvec, dtype_bf16_matvec, dtype_f32_matmul,
+// dtype_bf16_matmul, f64_product_bit_identical, bf16_packed_still_bit_identical,
+// no_hardcoded_dtype_in_product_surface.
+// ---------------------------------------------------------------------------
+
+/// `f32` products: the same BACKWARD criterion as bf16, with a constant sized to
+/// f32's 24 mantissa bits (measured worst 4.5e-8 of the term scale).
+const F32_BACKWARD_TOL: f64 = 1e-6;
+
+/// bf16 products: a BACKWARD bound on the row's term scale `Σ_k |v_k|`.
+///
+/// The dominant deviation is the bf16 rounding of the OPERAND itself (≤ 2^-8
+/// relative per element under round-to-nearest), so the error scales with the
+/// terms, not with the result. A forward-relative bound is governed by the
+/// sum's condition number and blows up where the row cancels: measured on the
+/// committed matmul fixture, 4.5e-2 forward against 3.3e-3 backward — the
+/// forward criterion would have forced a tolerance ~14x looser than the
+/// arithmetic needs, i.e. it would stop being evidence.
+const BF16_BACKWARD_TOL: f64 = 1e-2;
+
+fn flat_u16(v: &serde_json::Value) -> Vec<u16> {
+    let mut out = Vec::new();
+    fn walk(v: &serde_json::Value, out: &mut Vec<u16>) {
+        match v {
+            serde_json::Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            serde_json::Value::Number(n) => out.push(n.as_u64().expect("uint value") as u16),
+            other => panic!("unexpected JSON value in u16 array: {other}"),
+        }
+    }
+    walk(v, &mut out);
+    out
+}
+
+/// bf16 bit patterns are the wire form (design D4); decoding is exact because
+/// bf16 ⊂ f32.
+fn bf16_bits_to_f32(bits: &[u16]) -> Vec<f32> {
+    bits.iter().map(|&b| bf16::from_bits(b).to_f32()).collect()
+}
+
+fn dense_as_f64(r: &dispatch::DenseResult) -> Vec<f64> {
+    match r {
+        dispatch::DenseResult::F64(v) => v.clone(),
+        dispatch::DenseResult::F32(v) => v.iter().map(|&x| x as f64).collect(),
+        dispatch::DenseResult::Bf16(v) => v.iter().map(|&x| x.to_f32() as f64).collect(),
+    }
+}
+
+/// Term scale `Σ_k |v_k|` for every output element — the backward-error
+/// denominator. Derived here from the fixture's own operand, never read from
+/// the record: a generator that emitted its own scale could hide a wrong one.
+fn term_scales(rec: &serde_json::Value, operand: &[f64], rows: usize, matvec: bool) -> Vec<f64> {
+    if matvec {
+        let s: f64 = operand.iter().map(|x| x.abs()).sum();
+        vec![s; rows]
+    } else {
+        let cols = shape_of(&rec["inputs"]["mat"]).last().copied().unwrap_or(0);
+        let n_bits = rec["dtypes"]["n_bits"].as_u64().unwrap() as usize;
+        let col_scale: Vec<f64> = (0..cols)
+            .map(|j| (0..n_bits).map(|t| operand[t * cols + j].abs()).sum())
+            .collect();
+        (0..rows).flat_map(|_| col_scale.iter().copied()).collect()
+    }
+}
+
+/// Load every committed record of the dtype family with the given scenario.
+fn dtype_records(scenario: &str) -> Vec<serde_json::Value> {
+    load_scenarios("dtype_parity.json")
+        .into_iter()
+        .filter(|r| r["scenario"] == scenario)
+        .collect()
+}
+
+/// One dtype record: rlib face against the NumPy-reference record at the
+/// declared criterion, then rlib against the PyO3 record exactly.
+fn check_dtype_record(rec: &serde_json::Value) -> usize {
+    let scenario = rec["scenario"].as_str().unwrap();
+    let dtype = rec["dtypes"]["operand"].as_str().unwrap();
+    let n_bits = rec["dtypes"]["n_bits"].as_u64().unwrap() as usize;
+    let packed = flat_u8(&rec["inputs"]["packed"]);
+    let rows = shape_of(&rec["inputs"]["packed"])[0];
+    let matvec = rec["inputs"].get("vec").is_some();
+    let key = if matvec { "vec" } else { "mat" };
+    let cols = if matvec {
+        0
+    } else {
+        shape_of(&rec["inputs"]["mat"]).last().copied().unwrap_or(0)
+    };
+    let np_rec = face_rec(rec, "numpy-reference").expect("numpy-reference face");
+
+    let (operand_f64, got, want): (Vec<f64>, Vec<f64>, Vec<f64>) = match dtype {
+        "float32" => {
+            let op32: Vec<f32> = flat_f64(&rec["inputs"][key])
+                .iter()
+                .map(|&x| x as f32)
+                .collect();
+            let out = if matvec {
+                dispatch::packed_matvec_dyn(
+                    &packed,
+                    rows,
+                    n_bits,
+                    dispatch::DenseOperand::F32(&op32),
+                )
+            } else {
+                dispatch::packed_matmul_dyn(
+                    &packed,
+                    rows,
+                    n_bits,
+                    dispatch::DenseOperand::F32(&op32),
+                    cols,
+                )
+            }
+            .unwrap_or_else(|e| panic!("{scenario}: {e}"));
+            (
+                flat_f64(&rec["inputs"][key]),
+                dense_as_f64(&out),
+                flat_f64(&np_rec["result"]),
+            )
+        }
+        "bfloat16" => {
+            let op16 = flat_u16(&rec["inputs"][key]);
+            let opbf: Vec<half::bf16> = op16.iter().map(|&b| half::bf16::from_bits(b)).collect();
+            let out = if matvec {
+                dispatch::packed_matvec_dyn(
+                    &packed,
+                    rows,
+                    n_bits,
+                    dispatch::DenseOperand::Bf16(&opbf),
+                )
+            } else {
+                dispatch::packed_matmul_dyn(
+                    &packed,
+                    rows,
+                    n_bits,
+                    dispatch::DenseOperand::Bf16(&opbf),
+                    cols,
+                )
+            }
+            .unwrap_or_else(|e| panic!("{scenario}: {e}"));
+            let operand: Vec<f64> = bf16_bits_to_f32(&op16).iter().map(|&x| x as f64).collect();
+            let want: Vec<f64> = bf16_bits_to_f32(&flat_u16(&np_rec["result"]))
+                .iter()
+                .map(|&x| x as f64)
+                .collect();
+            (operand, dense_as_f64(&out), want)
+        }
+        other => panic!("{scenario}: unexpected operand dtype {other}"),
+    };
+
+    assert_eq!(got.len(), want.len(), "{scenario}: result length");
+
+    // Face vs reference: the rlib face and the NumPy reference DECLARE the same
+    // accumulator, so a tolerance here would hide a face that had quietly picked
+    // a different one. Exact, not close.
+    for (i, (&a, &b)) in got.iter().zip(want.iter()).enumerate() {
+        assert_eq!(
+            a, b,
+            "{scenario}[{i}]: rlib {a} vs numpy-reference {b} — the two faces declare \
+             the same accumulator, so they must agree bit-exactly"
+        );
+    }
+
+    // The declared TOLERANCE is exercised against the exact f64 product of the
+    // SAME operand: that is the different-precision computation `f32`/`bf16`
+    // replace, and the only thing a tolerance is evidence about.
+    let exact: Vec<f64> = if matvec {
+        core::packed_matvec(&packed, rows, n_bits, &operand_f64)
+    } else {
+        core::packed_matmul(&packed, rows, n_bits, &operand_f64, cols)
+    }
+    .unwrap_or_else(|e| panic!("{scenario}: exact f64 product: {e}"));
+    assert_eq!(exact.len(), got.len(), "{scenario}: exact product length");
+    let scales = term_scales(rec, &operand_f64, rows, matvec);
+    let tol = if dtype == "float32" {
+        F32_BACKWARD_TOL
+    } else {
+        BF16_BACKWARD_TOL
+    };
+    let mut worst = 0.0f64;
+    for (i, (&a, &e)) in got.iter().zip(exact.iter()).enumerate() {
+        let used = (a - e).abs() / scales[i].max(f64::MIN_POSITIVE);
+        worst = worst.max(used);
+        assert!(
+            used <= tol,
+            "{scenario}[{i}]: |{a} - {e}| is {used:.3e} of the row's term scale Σ|v_k|, \
+             over the declared backward bound {tol}"
+        );
+    }
+    println!(
+        "{scenario}: worst deviation from the exact f64 product = {worst:.3e} \
+         of the term scale (declared backward bound {tol})"
+    );
+
+    if let Some(pyo3) = face_rec(rec, "pyo3") {
+        // Same arithmetic on both faces, so this is exact, not merely close:
+        // decoded through the same wire form the record was written in.
+        let pyo3_got: Vec<f64> = if dtype == "bfloat16" {
+            bf16_bits_to_f32(&flat_u16(&pyo3["result"]))
+                .iter()
+                .map(|&x| x as f64)
+                .collect()
+        } else {
+            let f = flat_f64(&pyo3["result"]);
+            f.iter().map(|&x| x as f32 as f64).collect()
+        };
+        assert_eq!(got, pyo3_got, "{scenario}: rlib vs pyo3 face");
+        return 2;
+    }
+    1
+}
+
+#[test]
+fn parity_dtype_f32_matvec() {
+    let recs = dtype_records("dtype_f32_matvec");
+    assert!(!recs.is_empty(), "dtype_f32_matvec fixture missing");
+    assert_eq!(check_dtype_record(&recs[0]), 2, "pyo3 face record expected");
+}
+
+#[test]
+fn parity_dtype_bf16_matvec() {
+    let recs = dtype_records("dtype_bf16_matvec");
+    assert!(!recs.is_empty(), "dtype_bf16_matvec fixture missing");
+    assert_eq!(check_dtype_record(&recs[0]), 2, "pyo3 face record expected");
+}
+
+#[test]
+fn parity_dtype_f32_matmul() {
+    let recs = dtype_records("dtype_f32_matmul");
+    assert!(!recs.is_empty(), "dtype_f32_matmul fixture missing");
+    assert_eq!(check_dtype_record(&recs[0]), 2, "pyo3 face record expected");
+}
+
+#[test]
+fn parity_dtype_bf16_matmul() {
+    let recs = dtype_records("dtype_bf16_matmul");
+    assert!(!recs.is_empty(), "dtype_bf16_matmul fixture missing");
+    assert_eq!(check_dtype_record(&recs[0]), 2, "pyo3 face record expected");
+}
+
+/// Scenario: f64_product_bit_identical — the refactor is structural. The
+/// committed `f64` records are the pre-refactor bytes; the `f64` instantiation
+/// reproduces them exactly, not within 1e-12.
+#[test]
+fn parity_f64_product_bit_identical() {
+    let mut checked = 0;
+    for rec in load_scenarios("packed_matvec.json") {
+        let packed = flat_u8(&rec["inputs"]["packed"]);
+        let rows = shape_of(&rec["inputs"]["packed"])[0];
+        let n_bits = rec["dtypes"]["n_bits"].as_u64().unwrap() as usize;
+        let vec = flat_f64(&rec["inputs"]["vec"]);
+        let got = core::packed_matvec(&packed, rows, n_bits, &vec).expect("f64 matvec");
+        let want = flat_f64(&face_rec(&rec, "numpy-reference").unwrap()["result"]);
+        assert_f64_bitidentical(&got, &want, "f64 packed_matvec");
+        checked += 1;
+    }
+    for rec in load_scenarios("packed_matmul.json") {
+        let packed = flat_u8(&rec["inputs"]["packed"]);
+        let rows = shape_of(&rec["inputs"]["packed"])[0];
+        let n_bits = rec["dtypes"]["n_bits"].as_u64().unwrap() as usize;
+        let cols = shape_of(&rec["inputs"]["mat"]).last().copied().unwrap_or(0);
+        let mat = flat_f64(&rec["inputs"]["mat"]);
+        let got = core::packed_matmul(&packed, rows, n_bits, &mat, cols).expect("f64 matmul");
+        let want = flat_f64(&face_rec(&rec, "numpy-reference").unwrap()["result"]);
+        assert_f64_bitidentical(&got, &want, "f64 packed_matmul");
+        checked += 1;
+    }
+    assert_eq!(checked, 3, "the f64 product fixture family moved");
+}
+
+/// Scenario: f64_surface_signature_and_error_unchanged — the v0.1 literals,
+/// character for character. A refactor that renames a diagnostic changes what
+/// a caller can match on, so the strings are pinned as VALUES here rather than
+/// asserted present; `is_err()` cannot tell a preserved message from a
+/// rewritten one.
+#[test]
+fn parity_f64_error_strings_unchanged() {
+    // "vec must have length {n_bits}, got {}"
+    let packed = core::pack_bits(&[1i8; 6 * 13], 6, 13).expect("pack_bits");
+    let short = vec![0.0f64; 5];
+    let e = core::packed_matvec(&packed, 6, 13, &short).expect_err("short vec must be refused");
+    assert_eq!(e.0, "vec must have length 13, got 5");
+
+    // "mat length {} is not a multiple of n_bits {n_bits}"
+    let packed_m = core::pack_bits(&[1i8; 5 * 12], 5, 12).expect("pack_bits");
+    let ragged = vec![0.0f64; 15]; // 15 % 12 != 0
+    let e =
+        core::packed_matmul(&packed_m, 5, 12, &ragged, 3).expect_err("ragged mat must be refused");
+    assert_eq!(e.0, "mat length 15 is not a multiple of n_bits 12");
+
+    // the validate_packed messages
+    let e = core::validate_packed(&[0u8; 3], 2, 8).expect_err("length mismatch must be refused");
+    assert_eq!(e.0, "packed length 3 does not match 2 rows x 1 bitplanes");
+    let e = core::validate_packed(&[0u8; 1], 1, 0).expect_err("n_bits=0 with rows must be refused");
+    assert_eq!(e.0, "n_bits=0 with non-empty packed rows");
+}
+
+/// Scenario: bf16_packed_still_bit_identical — the dtype touches the dense
+/// operand and nothing else. Records that differ only in dtype must carry the
+/// SAME packed bytes, and those bytes must round-trip through the integer core
+/// unchanged.
+#[test]
+fn parity_bf16_packed_still_bit_identical() {
+    let mut groups: std::collections::HashMap<&'static str, Vec<u8>> =
+        std::collections::HashMap::new();
+    for rec in load_scenarios("dtype_parity.json") {
+        let scenario = rec["scenario"].as_str().unwrap();
+        let family = if scenario.ends_with("matvec") {
+            "matvec"
+        } else {
+            "matmul"
+        };
+        let packed = flat_u8(&rec["inputs"]["packed"]);
+        let n_bits = rec["dtypes"]["n_bits"].as_u64().unwrap() as usize;
+        let rows = shape_of(&rec["inputs"]["packed"])[0];
+        if let Some(prev) = groups.get(family) {
+            assert_bytes(
+                &packed,
+                prev,
+                &format!("{scenario}: packed differs by dtype"),
+            );
+        } else {
+            groups.insert(family, packed.clone());
+        }
+        // the integer core is dtype-blind: unpack then re-pack is byte-exact
+        let factor = core::unpack_bits(&packed, rows, n_bits).expect("unpack_bits");
+        let repacked = core::pack_bits(&factor, rows, n_bits).expect("pack_bits");
+        assert_bytes(
+            &repacked,
+            &packed,
+            &format!("{scenario}: repack round-trip"),
+        );
+    }
+    assert_eq!(
+        groups.len(),
+        2,
+        "expected a matvec and a matmul packed group"
+    );
+}
+
+/// Scenario: no_hardcoded_dtype_in_product_surface — slice each product kernel
+/// BY SYMBOL (a line number is rot by construction) and assert no concrete
+/// float type name occurs inside it.
+#[test]
+fn parity_no_hardcoded_dtype_in_product_surface() {
+    let src = include_str!("../src/core.rs");
+    let dispatch_src = include_str!("../src/dispatch.rs");
+
+    // Every product kernel is documented and followed by another documented
+    // item, so "up to the next `/// `" is exactly the function's own text.
+    let region = |start: &str| -> &str {
+        let i = src
+            .find(start)
+            .unwrap_or_else(|| panic!("{start} not found in core.rs"));
+        let rest = &src[i..];
+        let end = rest.find("\n/// ").unwrap_or(rest.len());
+        &rest[..end]
+    };
+
+    for sym in [
+        "pub fn packed_matvec<T: KernelScalar>",
+        "pub fn packed_matmul<T: KernelScalar>",
+        "fn accumulate_row<T: KernelScalar>",
+        "fn accumulate_packed_row<T: KernelScalar>",
+    ] {
+        let body = region(sym);
+        assert!(
+            body.contains("T::Acc") || body.contains("::<T>"),
+            "{sym}: expected a generic body, found {} bytes",
+            body.len()
+        );
+        for concrete in ["f64", "f32", "bf16", "half::"] {
+            assert!(
+                !body.contains(concrete),
+                "{sym} names the concrete dtype {concrete:?}; the dtype must be \
+                 carried by the KernelScalar bound"
+            );
+        }
+    }
+    // the products reach their generic bodies from the dispatch enumeration,
+    // which is where naming a dtype variant is the POINT.
+    for variant in [
+        "DenseOperand::F64",
+        "DenseOperand::F32",
+        "DenseOperand::Bf16",
+    ] {
+        assert!(
+            dispatch_src.contains(variant),
+            "dispatch enumeration is missing {variant}"
+        );
+    }
 }

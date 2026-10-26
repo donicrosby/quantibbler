@@ -30,6 +30,10 @@ default = []
 pyo3 = { version = "0.30", features = ["abi3-py311"] }
 numpy = "0.30"
 nalgebra = "0.34.2"
+# bf16 for the dtype-generic product surface (change qk-kernels-dtype-generic,
+# design D3). Pure Rust, no C dependency, already in the workspace lock graph
+# via the tokenizers toolchain; 2.7 is the current stable 2.x line.
+half = "2.7"
 cubecl = { version = "0.11.0", features = ["hip"], optional = true }
 # The adopted attention substrate (change qk-flash-attention, design.md
 # "Substrate decision 2026-10-19"): cubek-attention 0.3.0 on the same

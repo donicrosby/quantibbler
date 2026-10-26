@@ -10,6 +10,8 @@
 //! fixtures (float64 rel 1e-12, packed outputs byte-identical).
 
 pub mod core;
+pub mod dispatch;
+pub mod dtype;
 
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -26,6 +28,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyTuple};
 
 use crate::core::KernelError;
+use crate::dtype::Dtype;
+use half::bf16;
 
 fn to_value_error(e: KernelError) -> PyErr {
     PyValueError::new_err(e.0)
@@ -230,6 +234,159 @@ fn joint_itq<'py>(
     Ok(PyTuple::new(py, [u_obj, v_obj, n_obj, c_obj])?.unbind())
 }
 
+/// Extract any-dim f32 view plus its flat row-major buffer and shape.
+fn dyn_f32<'py>(obj: &Bound<'py, PyAny>) -> PyResult<(Vec<f32>, Vec<usize>)> {
+    let arr = obj.extract::<PyReadonlyArrayDyn<'py, f32>>()?;
+    let view = arr.as_array();
+    let shape: Vec<usize> = view.shape().to_vec();
+    Ok((view.iter().copied().collect(), shape))
+}
+
+/// Extract bf16 as its `uint16` BIT PATTERNS (design D4): NumPy has no native
+/// bfloat16, so the wire form is the encoding itself — which is what a torch
+/// `bfloat16` tensor hands over through `view(torch.uint16)`.
+fn dyn_bf16<'py>(obj: &Bound<'py, PyAny>) -> PyResult<(Vec<bf16>, Vec<usize>)> {
+    let arr = obj.extract::<PyReadonlyArrayDyn<'py, u16>>()?;
+    let view = arr.as_array();
+    let shape: Vec<usize> = view.shape().to_vec();
+    Ok((
+        view.iter().map(|&bits| bf16::from_bits(bits)).collect(),
+        shape,
+    ))
+}
+
+/// A bf16 result crosses back as its `uint16` bit patterns.
+fn bf16_bits(v: &[bf16]) -> Vec<u16> {
+    v.iter().map(|x| x.to_bits()).collect()
+}
+
+/// 1-D tagged result: the array's dtype IS the tag the caller passed.
+fn dense_row_to_py(py: Python<'_>, r: dispatch::DenseResult) -> Py<PyAny> {
+    match r {
+        dispatch::DenseResult::F64(v) => PyArray1::from_slice(py, &v).into_any().unbind(),
+        dispatch::DenseResult::F32(v) => PyArray1::from_slice(py, &v).into_any().unbind(),
+        dispatch::DenseResult::Bf16(v) => {
+            PyArray1::from_slice(py, &bf16_bits(&v)).into_any().unbind()
+        }
+    }
+}
+
+/// Reshaped tagged result for the column-batched product.
+fn dense_mat_to_py(
+    py: Python<'_>,
+    r: dispatch::DenseResult,
+    n_rows: usize,
+    n_cols: usize,
+) -> PyResult<Py<PyAny>> {
+    Ok(match r {
+        dispatch::DenseResult::F64(v) => build_arr2(py, &v, n_rows, n_cols)?.into_any().unbind(),
+        dispatch::DenseResult::F32(v) => build_arr2(py, &v, n_rows, n_cols)?.into_any().unbind(),
+        dispatch::DenseResult::Bf16(v) => build_arr2(py, &bf16_bits(&v), n_rows, n_cols)?
+            .into_any()
+            .unbind(),
+    })
+}
+
+/// Dtype-aware `packed_matvec`: the tag selects the dense operand's dtype and
+/// the returned array's dtype. `bfloat16` buffers are `uint16` bit patterns.
+#[pyfunction]
+fn packed_matvec_dtype<'py>(
+    py: Python<'py>,
+    packed: &Bound<'py, PyAny>,
+    n_bits: usize,
+    vec: &Bound<'py, PyAny>,
+    dtype: &str,
+) -> PyResult<Py<PyAny>> {
+    let (pflat, pshape) = dyn_u8(packed)?;
+    let (n_rows, _n_words) = rows_cols(&pshape);
+    // Resolve the tag BEFORE touching the operand: an unknown dtype must fail
+    // closed rather than be interpreted as some other dtype.
+    let tag = Dtype::from_name(dtype).map_err(to_value_error)?;
+    let out = match tag {
+        Dtype::F64 => {
+            let (v, _) = dyn_f64(vec)?;
+            dispatch::packed_matvec_dyn(&pflat, n_rows, n_bits, dispatch::DenseOperand::F64(&v))
+        }
+        Dtype::F32 => {
+            let (v, _) = dyn_f32(vec)?;
+            dispatch::packed_matvec_dyn(&pflat, n_rows, n_bits, dispatch::DenseOperand::F32(&v))
+        }
+        Dtype::Bf16 => {
+            let (v, _) = dyn_bf16(vec)?;
+            dispatch::packed_matvec_dyn(&pflat, n_rows, n_bits, dispatch::DenseOperand::Bf16(&v))
+        }
+    }
+    .map_err(to_value_error)?;
+    Ok(dense_row_to_py(py, out))
+}
+
+/// Dtype-aware `packed_matmul`; see [`packed_matvec_dtype`] for the tag and the
+/// bf16 wire form.
+#[pyfunction]
+fn packed_matmul_dtype<'py>(
+    py: Python<'py>,
+    packed: &Bound<'py, PyAny>,
+    n_bits: usize,
+    mat: &Bound<'py, PyAny>,
+    dtype: &str,
+) -> PyResult<Py<PyAny>> {
+    let (pflat, pshape) = dyn_u8(packed)?;
+    let (n_rows, _n_words) = rows_cols(&pshape);
+    let tag = Dtype::from_name(dtype).map_err(to_value_error)?;
+    let n_cols = n_cols_of(mat)?;
+    let (out, k_cols) = match tag {
+        Dtype::F64 => {
+            let (v, _) = dyn_f64(mat)?;
+            let k = v.len().checked_div(n_bits.max(1)).unwrap_or(v.len());
+            (
+                dispatch::packed_matmul_dyn(
+                    &pflat,
+                    n_rows,
+                    n_bits,
+                    dispatch::DenseOperand::F64(&v),
+                    n_cols,
+                ),
+                k,
+            )
+        }
+        Dtype::F32 => {
+            let (v, _) = dyn_f32(mat)?;
+            let k = v.len().checked_div(n_bits.max(1)).unwrap_or(v.len());
+            (
+                dispatch::packed_matmul_dyn(
+                    &pflat,
+                    n_rows,
+                    n_bits,
+                    dispatch::DenseOperand::F32(&v),
+                    n_cols,
+                ),
+                k,
+            )
+        }
+        Dtype::Bf16 => {
+            let (v, _) = dyn_bf16(mat)?;
+            let k = v.len().checked_div(n_bits.max(1)).unwrap_or(v.len());
+            (
+                dispatch::packed_matmul_dyn(
+                    &pflat,
+                    n_rows,
+                    n_bits,
+                    dispatch::DenseOperand::Bf16(&v),
+                    n_cols,
+                ),
+                k,
+            )
+        }
+    };
+    dense_mat_to_py(py, out.map_err(to_value_error)?, n_rows, k_cols)
+}
+
+/// Last-axis length of an operand without re-extracting its values.
+fn n_cols_of(obj: &Bound<'_, PyAny>) -> PyResult<usize> {
+    let shape: Vec<usize> = obj.getattr("shape")?.extract()?;
+    Ok(shape.last().copied().unwrap_or(0))
+}
+
 #[pymodule]
 fn quantibbler_kernels(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(backend_version, m)?)?;
@@ -238,6 +395,8 @@ fn quantibbler_kernels(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sign_estimate, m)?)?;
     m.add_function(wrap_pyfunction!(packed_matvec, m)?)?;
     m.add_function(wrap_pyfunction!(packed_matmul, m)?)?;
+    m.add_function(wrap_pyfunction!(packed_matvec_dtype, m)?)?;
+    m.add_function(wrap_pyfunction!(packed_matmul_dtype, m)?)?;
     m.add_function(wrap_pyfunction!(joint_itq, m)?)?;
     Ok(())
 }

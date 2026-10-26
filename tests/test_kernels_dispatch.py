@@ -127,3 +127,51 @@ def test_dispatch_env_restored_between_tests(monkeypatch):
     monkeypatch.delenv("QUANTIBBLER_BACKEND", raising=False)
     # backend() auto-detects; the two baseline tests must stay green
     assert k.backend() in {"rust", "numpy-reference"}
+
+
+# ---------------------------------------------------------------------------
+# Dtype-tagged product dispatch (change qk-kernels-dtype-generic, design D5).
+# The routing contract: ``float64`` keeps the v0.1 entry point, every other tag
+# goes to the dtype-aware one — so an existing f64 call site cannot start
+# taking a different numerical path by accident.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingExt:
+    """A stand-in extension recording which entry point each call reached."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def __getattr__(self, name: str):
+        def _entry(*_args: object) -> np.ndarray:
+            self.calls.append(name)
+            return np.zeros(2)
+
+        return _entry
+
+
+@pytest.mark.parametrize(
+    ("product", "dtype", "expected"),
+    [
+        ("packed_matvec", "float64", "packed_matvec"),
+        ("packed_matvec", "float32", "packed_matvec_dtype"),
+        ("packed_matvec", "bfloat16", "packed_matvec_dtype"),
+        ("packed_matmul", "float64", "packed_matmul"),
+        ("packed_matmul", "float32", "packed_matmul_dtype"),
+        ("packed_matmul", "bfloat16", "packed_matmul_dtype"),
+    ],
+)
+def test_dispatch_dtype_tag_routes_to_the_matching_entry_point(
+    monkeypatch, product: str, dtype: str, expected: str
+):
+    ext = _RecordingExt()
+    monkeypatch.setattr(k, "HAVE_KERNELS", True)
+    monkeypatch.setattr(k, "_kernels", ext)
+    packed = k.pack_bits(np.ones((2, 4), dtype=np.int8), backend="numpy-reference")
+    operand = (
+        np.ones(4, dtype=np.float32) if product == "packed_matvec" else np.ones((4, 1), np.float32)
+    )
+
+    getattr(k, product)(packed, 4, operand, dtype=dtype, backend="rust")
+    assert ext.calls == [expected], f"{product} dtype={dtype} dispatched through {ext.calls}"

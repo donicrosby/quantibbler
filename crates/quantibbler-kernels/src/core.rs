@@ -8,7 +8,15 @@
 //! left-to-right in row-element order so packed_matvec/packed_matmul are
 //! bit-identical to the NumPy reference; R0 for joint_itq comes from a
 //! splitmix64 fill mirrored bit-exactly by the Python side.
+//!
+//! Dtype genericity (change qk-kernels-dtype-generic) applies to the
+//! FP-remainder products alone: [`packed_matvec`] and [`packed_matmul`] are
+//! generic over the dense-operand scalar `T: KernelScalar`, accumulating in
+//! `T::Acc` in the same element order. The `f64` instantiation is the v0.1
+//! one, term for term — the bitplane pack/unpack core stays integer, and the
+//! solver (`joint_itq`) stays float64.
 
+use crate::dtype::KernelScalar;
 use nalgebra::SVD;
 
 pub const DEFAULT_MAX_ITER: usize = 50;
@@ -188,15 +196,26 @@ pub fn sign_estimate(x: &[f64]) -> Vec<i8> {
         .collect()
 }
 
-/// Accumulate one packed row against a float64 slice, left-to-right in
-/// row-element order (bit-identical to the NumPy reference accumulation).
-fn accumulate_row(packed: &[u8], row_words: usize, row: usize, n_bits: usize, vec: &[f64]) -> f64 {
+/// Accumulate one packed row against a dense slice of dtype `T`,
+/// left-to-right in row-element order, summing in `T::Acc` (for `f64` this is
+/// term-for-term the v0.1 accumulation and therefore bit-identical).
+fn accumulate_row<T: KernelScalar>(
+    packed: &[u8],
+    row_words: usize,
+    row: usize,
+    n_bits: usize,
+    vec: &[T],
+) -> T::Acc {
     let base = row * row_words;
-    let mut acc = 0.0f64;
+    let mut acc = <T::Acc as KernelScalar>::ZERO;
     for k in 0..n_bits {
         let bit = (packed[base + (k >> 3)] >> (k & 7)) & 1;
-        let s = if bit == 1 { 1.0f64 } else { -1.0f64 };
-        acc += s * vec[k];
+        let s = if bit == 1 {
+            <T::Acc as KernelScalar>::ONE
+        } else {
+            <T::Acc as KernelScalar>::NEG_ONE
+        };
+        acc = acc + s * vec[k].to_acc();
     }
     acc
 }
@@ -221,51 +240,58 @@ pub fn validate_packed(packed: &[u8], n_rows: usize, n_bits: usize) -> Result<us
 }
 
 /// `unpack_bits(packed) @ vec` without materializing the binary matrix.
-pub fn packed_matvec(
+///
+/// Generic over the dense operand's dtype `T`; the result carries the same
+/// dtype, and the accumulation is the one in [`accumulate_row`]. `T = f64` is
+/// the v0.1 instantiation.
+pub fn packed_matvec<T: KernelScalar>(
     packed: &[u8],
     n_rows: usize,
     n_bits: usize,
-    vec: &[f64],
-) -> Result<Vec<f64>, KernelError> {
+    vec: &[T],
+) -> Result<Vec<T>, KernelError> {
     let n_words = validate_packed(packed, n_rows, n_bits)?;
     if vec.len() != n_bits {
         return err(format!("vec must have length {n_bits}, got {}", vec.len()));
     }
     Ok((0..n_rows)
-        .map(|i| accumulate_row(packed, n_words, i, n_bits, vec))
+        .map(|i| T::from_acc(accumulate_row::<T>(packed, n_words, i, n_bits, vec)))
         .collect())
 }
 
 /// Multiply one packed row (row `i`'s `row_words` bytes) by one matrix
 /// column `j`, accumulating left-to-right in element order: element `t`
 /// contributes `sign(bit t) * mat[t * n_cols + j]`.
-fn accumulate_packed_row(
+fn accumulate_packed_row<T: KernelScalar>(
     packed_row: &[u8],
     n_bits: usize,
     j: usize,
-    mat: &[f64],
+    mat: &[T],
     n_cols: usize,
-) -> f64 {
-    packed_row
-        .iter()
-        .enumerate()
-        .flat_map(move |(w, &byte)| (0..8).map(move |k| (w * 8 + k, byte >> k)))
-        .take(n_bits)
-        .map(|(t, shifted)| {
-            let s = if shifted & 1 == 1 { 1.0f64 } else { -1.0f64 };
-            s * mat[t * n_cols + j]
-        })
-        .sum()
+) -> T::Acc {
+    let mut acc = <T::Acc as KernelScalar>::ZERO;
+    for t in 0..n_bits {
+        let bit = (packed_row[t >> 3] >> (t & 7)) & 1;
+        let s = if bit == 1 {
+            <T::Acc as KernelScalar>::ONE
+        } else {
+            <T::Acc as KernelScalar>::NEG_ONE
+        };
+        acc = acc + s * mat[t * n_cols + j].to_acc();
+    }
+    acc
 }
 
-/// Column-batched `packed_matvec` (packed x dense-float only).
-pub fn packed_matmul(
+/// Column-batched `packed_matvec` (packed x dense-float only), generic over
+/// the dense operand's dtype `T`. `T = f64` is the v0.1 instantiation and its
+/// accumulation is unchanged.
+pub fn packed_matmul<T: KernelScalar>(
     packed: &[u8],
     n_rows: usize,
     n_bits: usize,
-    mat: &[f64],
+    mat: &[T],
     n_cols: usize,
-) -> Result<Vec<f64>, KernelError> {
+) -> Result<Vec<T>, KernelError> {
     let n_words = validate_packed(packed, n_rows, n_bits)?;
     if n_bits != 0 && mat.len() % n_bits != 0 {
         return err(format!(
@@ -274,7 +300,7 @@ pub fn packed_matmul(
         ));
     }
     let k = mat.len().checked_div(n_bits.max(1)).unwrap_or(mat.len());
-    let mut out = vec![0.0f64; n_rows * k];
+    let mut out = vec![<T as KernelScalar>::ZERO; n_rows * k];
     // Degenerate guard: chunks_mut(0) panics; zero columns means the
     // zeroed (n_rows x 0) output IS the result.
     if k == 0 {
@@ -282,7 +308,9 @@ pub fn packed_matmul(
     }
     for (out_row, packed_row) in out.chunks_mut(k).zip(packed.chunks_exact(n_words)) {
         for (j, acc) in out_row.iter_mut().enumerate() {
-            *acc = accumulate_packed_row(packed_row, n_bits, j, mat, n_cols);
+            *acc = T::from_acc(accumulate_packed_row::<T>(
+                packed_row, n_bits, j, mat, n_cols,
+            ));
         }
     }
     Ok(out)

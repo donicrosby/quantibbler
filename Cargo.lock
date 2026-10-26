@@ -3834,6 +3834,7 @@ dependencies = [
  "cubecl",
  "cubek-attention",
  "cubek-test-utils",
+ "half",
  "nalgebra",
  "numpy",
  "pyo3",
