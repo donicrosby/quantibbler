@@ -62,6 +62,21 @@ dtype's relative resolution is inert. The record says so (`inert: true`) instead
 of leaving a reader to reconcile `steps: 256` with `weight_delta_rel: 0.0`. The
 STE half declares it per-linear, from the recorded `u/v/s1/s2` relative moves.
 
+A relative movement is a division: it exists only over a non-zero entry
+baseline. The figures the declaration reads — TuneFP's aggregate
+`weight_delta_rel`, its bias compartment's `bias_delta_rel`, and each STE row's
+`u/v/s1/s2_rel_move` from `_rel_move` — carry no value, never a confident
+`0.0`, when the cause is the stage never running, the figure's entry baseline
+being exactly zero (a zero-init projection, a LoRA B matrix, a gated unit: the
+movement has no denominator and is undefined, while `0.0` would read as "the
+weights never moved" about parameters the stage may have tuned off zero), or —
+bias compartment only — a model with no bias to move. The no-answer propagates
+to the declaration itself: an STE row with any figure missing carries no row
+verdict, the stage verdict stays unknown when any row verdict is missing, and
+TuneFP's verdict is unwitnessed when its aggregate figure is — never an
+aggregate over a figure that does not exist, and never a false `inert: false`
+about a movement nobody measured.
+
 ## Named deltas (unclear statements implemented to the letter)
 
 - **Requirement 2's "existing fail-closed path" for TuneLatentSTE.** TuneFP has
