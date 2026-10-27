@@ -177,15 +177,20 @@ def _tune_fp(
         # figure alone cannot say whether the stage's bias compensation is
         # real.
         #
-        # `bias_delta_rel = None` has TWO causes and the row names which one
+        # `bias_delta_rel = None` names WHICH case left it without a figure
         # rather than overloading the bare `None`: `bias_tunables == 0` is the
         # no-bias-compartment case -- a bias-free model has nothing to move, so
         # `None` is the honest figure and never a confident 0.0 (design D12) --
         # while `bias_delta_rel is None` beside a NON-ZERO `bias_tunables` is
-        # the stage that never ran far enough to have an answer (empty tunable
-        # set, or a vacuous-teacher early return). A reader can therefore tell
-        # "the model is bias-free" from "the bias was not computed" off the
-        # record alone, without consulting the design doc.
+        # the stage that has no measurable figure: it never ran far enough to
+        # have an answer (empty tunable set, or a vacuous-teacher early return),
+        # or every bias baseline was exactly 0.0, so the relative movement has
+        # no denominator at all -- the division is undefined, not zero, and
+        # D12's "no value, never a confident 0.0" rules out recording 0.0. A
+        # reader can therefore tell "the model is bias-free" from "the bias
+        # figure was not computed" off the record alone, without consulting the
+        # design doc; `steps` separates "never ran" from "ran over an all-zero
+        # baseline".
         "bias_delta_rel": None,
         # The number of bias-bearing tunables the stage had: the discriminator
         # beside `bias_delta_rel`, filled once the tunable set is resolved (so
@@ -383,7 +388,14 @@ def _tune_fp(
             for p, p0 in zip(bias_params, bias_snapshot, strict=True):
                 bnum += float((p.detach() - p0).pow(2).sum())
                 bden += float(p0.pow(2).sum())
-        stats["bias_delta_rel"] = float(np.sqrt(bnum) / np.sqrt(bden)) if bden > 0.0 else 0.0
+        # An all-zero bias baseline (a zero-init bias projection) leaves the
+        # relative movement UNDEFINED -- 0.0 would read as "the bias never
+        # moved" about a bias the stage may have tuned off zero. Record the
+        # `None` initial value instead (design D12: no value, never a confident
+        # 0.0); `bias_tunables > 0` above still says the bias compartment
+        # exists, and `steps` says whether the stage ran.
+        if bden > 0.0:
+            stats["bias_delta_rel"] = float(np.sqrt(bnum) / np.sqrt(bden))
     # Inertness is DECLARED, not implied (qk-tune-loss-scale, requirement 3): a
     # stage that ran steps and moved its parameters by less than the parameter
     # dtype's relative resolution did nothing measurable, and the record says so

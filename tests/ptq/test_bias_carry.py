@@ -17,6 +17,10 @@ Five claims, one test each:
   bias-free tunable set (count 0 — design D12's legit-zero, "no value, never a
   confident 0.0") versus a stage that stopped before it could measure
   (count > 0). Without the count the two are one bare ``None``.
+* ``zero_bias_baseline_records_no_value`` — an all-zero bias baseline has no
+  denominator, so the row carries ``None`` and never a confident ``0.0``:
+  pinned for both degenerate arms (bias tuned off zero beside the zero
+  baseline, and nothing moved beside it).
 * ``biasless_block_packs_zero_bias_v2`` — the outcome the v6b artifact
   actually shipped (a bias-free model packs 196/196 exactly-zero biases) is
   pinned at the pack boundary: ``bias=False`` linears through
@@ -72,6 +76,33 @@ class _BiasFreeBlock(nn.Module):
         with torch.no_grad():
             for m in (self.fc1, self.fc2):
                 m.weight.copy_(torch.randn(d, d, generator=gen, dtype=torch.float64) * 0.4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc2(torch.relu(self.fc1(x)))
+
+
+class _ZeroInitBiasBlock(nn.Module):
+    """Two float64 linears whose biases are initialized to EXACTLY 0.0 — the
+    zero-init bias-projection shape ``_BiasBlock`` cannot express (it fills
+    every bias with ``BIAS_INIT``).
+
+    ``freeze_bias`` holds the biases out of the optimizer so a stage can run
+    over a bias-bearing set and leave the zero baseline exactly where it is:
+    the ``bnum == 0`` arm beside an all-zero denominator, told apart from the
+    arm where the stage tuned the bias off zero.
+    """
+
+    def __init__(self, d: int, seed: int, *, freeze_bias: bool = False) -> None:
+        super().__init__()
+        gen = torch.Generator().manual_seed(seed)
+        self.fc1 = nn.Linear(d, d, dtype=torch.float64)
+        self.fc2 = nn.Linear(d, d, dtype=torch.float64)
+        with torch.no_grad():
+            for m in (self.fc1, self.fc2):
+                m.weight.copy_(torch.randn(d, d, generator=gen, dtype=torch.float64) * 0.4)
+                m.bias.zero_()
+                if freeze_bias:
+                    m.bias.requires_grad_(False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.fc2(torch.relu(self.fc1(x)))
@@ -348,3 +379,67 @@ def test_biasless_block_packs_zero_bias_v2():
         np.testing.assert_array_equal(got, np.zeros(d))
     # The zeros ride the same wire any bias does: byte-identical round trip.
     assert reloaded.serialize() == blobs
+
+
+def test_zero_bias_baseline_records_no_value():
+    """An all-zero bias baseline is no denominator: ``None``, never a 0.0.
+
+    The degenerate arm the record got wrong: when every selected bias vector is
+    exactly 0.0 at stage start, ``bden == 0.0`` and the relative movement is
+    UNDEFINED — yet the tail recorded ``0.0``, i.e. "the bias never moved", even
+    when the stage had tuned the bias OFF zero. Design D12's rule ("no value,
+    never a confident 0.0") leaves the field at ``None``; the bias-tunable count
+    that sits beside it keeps the row self-describing (bias compartment
+    present, figure not available). Both degenerate arms are pinned here, each
+    against movement recomputed from a held snapshot:
+
+    * ``bnum > 0`` — the stage tuned the bias off zero. The old row read
+      ``0.0``: the exact lie the defect is about.
+    * ``bnum == 0`` — nothing moved either. A zero baseline is no denominator
+      whether or not anything moved, so this is still no value, not a
+      legitimate 0.0.
+    """
+    d = 6
+    cfg = PTQConfig(solver_backend="numpy", rank=3, cosine_schedule=False)
+    x_b = torch.cat(_calib(d), dim=0)
+
+    def _run(block: nn.Module) -> tuple[dict, float, float]:
+        with torch.no_grad():
+            y_b = block(x_b) * 1.2 + 0.1
+        before = [m.bias.detach().clone() for m in (block.fc1, block.fc2)]
+        rec = _tune_fp(
+            block,
+            x_b,
+            y_b,
+            cfg,
+            cfg.stage_pre.batch_size,
+            label="zero-bias",
+            tune_names=["fc1", "fc2"],
+            factorized_in_block=1,
+        )
+        bnum = bden = 0.0
+        with torch.no_grad():
+            for m, b0 in zip((block.fc1, block.fc2), before, strict=True):
+                bnum += float((m.bias.detach() - b0).pow(2).sum())
+                bden += float(b0.pow(2).sum())
+        return rec, bnum, bden
+
+    # (b) The bias was tuned off a zero baseline: nonzero movement, undefined
+    # relative figure. The recorded 0.0 said "never moved" about a moved bias.
+    rec_moved, bnum_moved, bden_moved = _run(_ZeroInitBiasBlock(d, seed=11))
+    assert rec_moved["steps"] > 0, "the stage must run for this measurement"
+    assert rec_moved["bias_tunables"] == 2, "the row still declares its bias compartment"
+    assert bden_moved == 0.0, "the baseline is exactly zero — no denominator"
+    assert bnum_moved > 0.0, "the stage did move the bias off zero"
+    assert rec_moved["bias_delta_rel"] is None
+
+    # (a) The same zero baseline with nothing moved: still no value (a zero
+    # denominator cannot yield a ratio), and the row says so rather than
+    # claiming a measured 0.0. The weights moved, so the stage demonstrably ran.
+    rec_still, bnum_still, bden_still = _run(_ZeroInitBiasBlock(d, seed=12, freeze_bias=True))
+    assert rec_still["steps"] > 0, "the stage must run for this measurement"
+    assert rec_still["weight_delta_rel"] > 0.0, "the stage ran and moved its weights"
+    assert rec_still["bias_tunables"] == 2, "the row still declares its bias compartment"
+    assert bden_still == 0.0, "the baseline is exactly zero — no denominator"
+    assert bnum_still == 0.0, "the held zero baseline did not move"
+    assert rec_still["bias_delta_rel"] is None
