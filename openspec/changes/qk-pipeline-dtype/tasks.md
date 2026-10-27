@@ -27,8 +27,8 @@
 - [x] 2.2 **FactorizedLinear.from_weight dtype-generic.**
   SVD init: on GPU, use `torch.linalg.svd` at **float32** accumulation
   dtype (justified accumulation site — bf16 SVD is platform-dependent); on
-  CPU, use NumPy float64 path then cast. The NumPy path stays the parity
-  reference. Run `uv run pytest tests/ptq/test_factorized.py -v`.
+  CPU, use NumPy float64 path then cast. The NumPy path stays the reference
+  at the same declared dtype. Run `uv run pytest tests/ptq/test_factorized.py -v`.
 
 - [x] 2.3 **_factor_terms at compute_dtype.**
   The activation_dtype parameter equals `compute_dtype`. The STE passthrough
@@ -84,7 +84,7 @@
   reports the named reason wherever the lane runs without an accelerator.
   Run `uv run pytest tests/ptq/ -k parity -v`.
   **CPU cells: SHIPPED** (`tests/ptq/test_pipeline_dtype_generic.py`, three
-  parametrized cells + the float64 NumPy reference). **GPU cells: SHIPPED**
+  parametrized cells + the NumPy parity fixture). **GPU cells: SHIPPED**
   (`tests/ptq/test_pipeline_dtype_gpu.py::test_scn_admm_parity_gpu_cell[bf16|float32|float64]`,
   same fixture, same reachable metric, same classes) — measured on the GPU lane
   card `t_f8e3b1d8` 2026-10-27: all six cells inside their declared class
@@ -130,15 +130,14 @@
    computation at `compute_dtype`. Teacher logit cache at `compute_dtype`.
    Run `uv run pytest tests/ptq/test_tune_scales_kd.py -v`.
 
-- 4.6 **`ste_dtype_generic` — FOLDED into OQ-3 (planner ruling, 2026-10-27), not a task of this change.**
-   The bf16-relative-to-f64 STE gradient record and the 1e-3 deviation bound are
-   a first-production-run diagnostic owned by design.md OQ-3 (which states the
-   same measurement verbatim); the `ste_bf16_gradient_deviation` event is retired
-   from this change's delta (zero producers/readers; its correct shape depends on
-   OQ-3's outcome). The `ste_dtype_generic` scenario now asserts only the shipped
-   behavior — non-zero bf16 latent gradients + `gradient_norm` at the declared
-   compute dtype. A follow-up spec change defines the then-appropriate
-   instrumentation/event once OQ-3's verdict is measured. See design.md C4 + OQ-3.
+- 4.6 **`ste_dtype_generic` — RETIRED (2026-10-27 user directive); not a task of this change.**
+   The bf16-relative-to-f64 STE gradient comparator is dead by directive and OQ-3
+   is RETIRED — no f64-relative threshold may be reintroduced. The
+   `ste_bf16_gradient_deviation` event and the `ste_dtype_generic` scenario are
+   retired from this change's delta (zero producers/readers); STE dtype-generic
+   coverage is carried by `ste_refinement_improves_mse` (gradients reach
+   U/V/s1/s2 at any supported compute dtype; block MSE decreases over T_post).
+   See design.md C4 + OQ-3.
 
 ## Phase5: Device placement
 
@@ -210,7 +209,7 @@
    The grep command (full pattern set):
    `grep -rnE '\.double\(\)|torch\.float32|torch\.float64|np\.float32|np\.float64|astype\(.*float' src/quantibbler/ptq/ tools/quantize_hf_model.py`
    Zero unjustified hits. Each site maps to one of three resolution classes:
-   (a) parametric, (b) accumulation-site, (c) parity-oracle. Populate the
+   (a) parametric, (b) accumulation-site, (c) reference-path. Populate the
    enumeration in design.md's crystallization section. Run after Phase4.
 
 - [x] 6.2 **Driver: remove float64 hardcodes in export path.**

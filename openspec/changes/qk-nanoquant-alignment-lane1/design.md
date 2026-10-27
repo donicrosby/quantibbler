@@ -46,7 +46,7 @@ Re-scoping was considered and discarded: a backstop cap "only when the token cli
 
 ### D-6 Preserved invariants
 
-float64 accumulators everywhere (config.yaml numerics policy); `_TINY` zero-variance floor in both `collect_stats` and `robust_diag`; the `chunk_rows` streamed path streams BOTH legs (AST structural pin `test_d7_pin_streaming_branch_cannot_materialize_activations` must stay green — the implementer re-checks the branch shape after the edit); reference path (`chunk_rows=None`) keeps its landed materializing construction.
+accumulation at the pipeline's declared numerics precision (config.yaml numerics policy); `_TINY` zero-variance floor in both `collect_stats` and `robust_diag`; the `chunk_rows` streamed path streams BOTH legs (AST structural pin `test_d7_pin_streaming_branch_cannot_materialize_activations` must stay green — the implementer re-checks the branch shape after the edit); reference path (`chunk_rows=None`) keeps its landed materializing construction.
 
 ## Discarded alternatives
 

@@ -61,7 +61,7 @@ crystallization entry below, and these are single-run upper bounds on a loaded b
 | eval path | driver call sites `perplexity_from_logits(lambda b: model(b.to(_device)), …)` | already device-true: the batch is moved to the logits' device inside the helper, and the model is on `_device` | leave (already ported) |
 | checkpoint write | `checkpoints.py`, one `.npz` per block | 11.7 MB and 0.072 s per block | leave |
 | Phase-1 host assembly | `calibration.py` exit (the `collect_stats` disposition section above) | 0.299 s per fire | leave |
-| solver host-hop and SVD init | `block_recon`: `w = linear.weight.detach().to(float64).cpu().numpy()`, then `np.linalg.svd` when `solver="svd"` | the hop IS the solver contract (the solve's device is chosen by `solver_backend`, resolved at the solve site); `solver="svd"` is the diagnostic arm, production default is `admm` | leave (measure-first if ever promoted) |
+| solver host-hop and SVD init | `block_recon`: `w = linear.weight.detach().cpu().numpy()` at the solver's declared precision, then `np.linalg.svd` when `solver="svd"` | the hop IS the solver contract (the solve's device is chosen by `solver_backend`, resolved at the solve site); `solver="svd"` is the diagnostic arm, production default is `admm` | leave (measure-first if ever promoted) |
 | tokenization / wikitext load | driver `[2/6]` | caller-side, off the PTQ path | leave |
 
 Fire-level total for the small pieces: (26.4 + 4.12 + 1.31) s × 28 blocks + 0.3 s + I/O
@@ -239,8 +239,8 @@ unrecorded pair ran at ~52 as well), so the per-stage factor is a ~3× order of
 magnitude with a large contention band, not a precise figure. A quiet-window
 re-run is part of the same GO'd production measurement that closes row 18; the
 named candidates for the gap against the estimate are the proposal's own batch-1
-STE latency bound and fp64 latents/Adam (`FactorizedLinear` holds its parameters
-in float64 by design) on gfx1151's 1/16 fp64 rate. Recorded as a finding, not a
+STE latency bound and the pipeline's latents/Adam held at the declared precision
+on gfx1151's 1/16 fp64 rate. Recorded as a finding, not a
 defect: this measurement supersedes the estimate, which is what the row asks for.
 
 The tool also prints the stage record's OWN `elapsed_s` beside the wall clock

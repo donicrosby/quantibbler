@@ -272,7 +272,7 @@ note — the specs' parity gates do not care which substrate computes.
 - **One pinned divergence, by design on their side:** cubek's
   cpu-reference clamps the output denominator (`l > eps ? l : eps`), so
   a fully-masked row returns **0.0** with `lse = −inf`, while our
-  executable specification computes the dense `0/0` and yields **NaN**
+  our NumPy reference computes the dense `0/0` and yields **NaN**
   position-for-position (task 1.4's contract). The two implementations
   agree on `lse` and diverge by construction on the row values. A
   dedicated test pins BOTH sides explicitly — cubek 0.0 + lse −inf on
@@ -385,7 +385,7 @@ branch selector adjudicated)
 
 **Control (real output, `uv run python /opt/data/tmp/control_f32_scalar_face.py`).**
 Our own f32 attention face — the same algorithm in f32, normalizing at the end —
-against the recorded f64 oracle on fixture #0, read by the witness statistic:
+against the recorded parity fixture on fixture #0, read by the witness statistic:
 **inf-norm 1.759e-07, banded 7.206e-07, unbanded per-element 3.001e-06**
 (identical at tile block 64/8/1; 5.11e-06 / 5.46e-06 at block 2/4). cubek's
 reference on the same case: **1.759e-07 / 7.206e-07 / 1.146e-05**. Clause 1 and

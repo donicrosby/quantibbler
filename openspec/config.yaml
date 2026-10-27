@@ -29,10 +29,11 @@ context: |
     inference (parity probes, pipeline gates); it does not reimplement
     kernels in torch or NumPy.
   - NumPy reference implementations in `src/quantibbler/kernels/` remain
-    the executable specification (they define correct behavior and run
-    where the extension is absent); the Rust kernels must match them on
-    float64 within 1e-12 relative tolerance on every probe test, and the
-    parity probes run the SAME fixture through both faces.
+    the verification fixtures at the declared dtype (they define correct
+    behavior and run where the extension is absent); the Rust kernels must
+    match them at the declared dtype within the per-dtype tolerances the
+    qk-kernels capability declares on every probe test, and the parity
+    probes run the SAME fixture through both faces.
   - Interchange between the two halves is the qpk1 container ONLY. The
     server reads what the compressor writes, nothing else.
   - A C/C++/Cython/CUDA-C++ dependency is BANNED anywhere in the build graph
@@ -48,7 +49,7 @@ context: |
     `uv sync --no-dev --all-extras` and assert its imports; `pip install
     quantibbler` must yield a working compressor). `kernels` is the one extra
     that qualifies: the NumPy references in `src/quantibbler/kernels/` are the
-    executable specification and run where the Rust extension is absent. A
+    verification fixtures at the declared dtype and run where the Rust extension is absent. A
     dependency the suite needs is a HARD one — a missing needed dep is a sync
     error that fails loudly at collection, never an ignored/skipped tier.
   - Dependency freshness: every declared dependency requirement must be
@@ -78,7 +79,7 @@ context: |
     first-run compilation cost in server contexts. Adopt only for a
     profile-justified GPU lane, pinned per the freshness rule, with
     backend-parity probes (packed bits identical across CUDA/HIP/CPU
-    runs; float64 rel 1e-12 vs the NumPy reference).
+    runs; the declared per-dtype tolerance vs the NumPy fixture).
 
   ## Method invariants (from the pinned papers in docs/papers/)
 
@@ -112,8 +113,9 @@ context: |
   - cargo test + cargo clippy --all-targets -D warnings + cargo fmt --check
     for the kernels crate; pytest for the Python package; maturin build for
     the wheel. All must pass before a change lands.
-  - Correctness probes: Rust kernel output vs NumPy reference (rel 1e-12,
-    float64) and a sign-agreement invariant (packed bits identical).
+  - Correctness probes: Rust kernel output vs the same-declared-dtype NumPy
+    fixture within the declared per-dtype tolerance, and a sign-agreement
+    invariant (packed bits identical).
   - End-to-end smoke: tiny random transformer block, quantize -> serialize
     -> reload -> forward, max logit delta bounded, BPW measured from bytes.
 

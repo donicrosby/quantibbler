@@ -71,4 +71,4 @@ parameter. Clean-room law: no implementation source consulted.
   `qk-artifact-blob`.
 - No solver change: `joint_itq` and its splitmix/Gram-Schmidt float64
   numerics stay bit-identical.
-- No `f16`; no regeneration of the committed `f64` fixture records.
+- No `f16`; no regeneration of committed fixture records at any declared dtype.

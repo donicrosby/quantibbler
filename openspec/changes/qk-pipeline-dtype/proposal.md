@@ -38,8 +38,8 @@ wall is the baseline to beat.
 3. **GPU solver.** The LB-ADMM solver and SVD init run on the accelerator
    device (torch backend), not CPU/NumPy. The solver moves to torch tensors on
    the device — eliminating per-block host round-trips for the ~400-iteration
-   ADMM loop. The NumPy backend stays the parity oracle (unit-test-only, per
-   existing spec).
+   ADMM loop. The NumPy backend is the unit-test-only reference path at the declared
+   dtype (per existing spec).
 
 4. **Per-stage device placement map.** Every stage declares its device:
    capture (accelerator), TuneFP (accelerator), solver (accelerator),
@@ -88,7 +88,8 @@ wall is the baseline to beat.
 - **Invariant-touching: yes — the method numerics.** The default compute dtype
   changes from float64 to bf16. The config.yaml method-invariant line and the
   qk-ptq default-numerics requirement are MODIFIED. The solver backend default
-  stays torch; the NumPy backend remains the unit-test-only parity oracle.
+  stays torch; the NumPy backend remains the unit-test-only reference path
+  at the declared dtype.
 - **Affected specs**: `qk-ptq` (1 REMOVED, 2 MODIFIED, 10 ADDED requirements).
   `qk-representation` and `qk-server` are untouched — the container format
   already declares `remainder_dtype`, and the server already reads it.
@@ -137,5 +138,4 @@ spec, not corpus claims.
 - No re-fire authorization: producing artifacts under the new defaults is a
   separate GO question for @user.
 - No sqrt-fold preconditioner changes, no Lane 0/1/2/3 changes.
-- The NumPy parity reference stays float64 (the executable specification does
-  not change precision — parity is float64 vs float64).
+- Parity verification uses same-declared-dtype NumPy fixtures: each compute_dtype is verified against fixtures at its own dtype, not against a higher-precision oracle.

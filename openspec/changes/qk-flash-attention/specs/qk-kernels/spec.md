@@ -2,7 +2,7 @@
 
 ## ADDED Requirements
 
-### Requirement: Tiled exact-attention NumPy reference (executable specification)
+### Requirement: Tiled exact-attention NumPy reference (declared-dtype verification fixture)
 
 The kernels package SHALL provide a NumPy tiled attention reference
 implementing [FA] §3.1 Algorithm 1 (blockwise online softmax with running

@@ -16,7 +16,7 @@ already install the product with `uv sync --no-dev --all-extras` and assert
 `pip install quantibbler` must yield a working compressor. A dev-group home
 would break both; the only remaining extra is `kernels`, which is genuinely
 optional product surface because the NumPy references in
-`src/quantibbler/kernels/` are the executable specification and run where the
+`src/quantibbler/kernels/` are the verification fixtures at the declared dtype and run where the
 Rust extension is absent.
 
 ## What Changes

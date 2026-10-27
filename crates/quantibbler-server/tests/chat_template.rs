@@ -200,3 +200,82 @@ fn fixture_reproduces_the_real_artifact_shape_ct_3_2() {
         "the loader must resolve the fixture's own sidecar bytes"
     );
 }
+
+/// A private copy of the fixture model directory with its canonical
+/// `chat_template.jinja` sidecar stripped, so the artifact declares no template
+/// anywhere. Removed on drop.
+struct StrippedTemplateDir(PathBuf);
+
+impl StrippedTemplateDir {
+    fn new(name: &str) -> Self {
+        let dst = std::env::temp_dir().join(format!("ct-1-3-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dst);
+        copy_tree(&fixture_dir(), &dst);
+        std::fs::remove_file(dst.join("chat_template.jinja"))
+            .expect("strip the canonical sidecar from the temp copy");
+        Self(dst)
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for StrippedTemplateDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// CT-1.3 (HTTP half) — an artifact with no template anywhere (the canonical
+/// sidecar stripped; the fixture carries no legacy `tokenizer_config.json`
+/// field and no `tokenizer.json` field) loads with `chat_template == None`, and
+/// `/v1/chat/completions` refuses 400 in the invalid_request_error envelope
+/// naming the absence — no tokenization or generation runs.
+///
+/// The sibling `no_template_yields_none_ct_1_3` (model/mod.rs unit tests) pins
+/// the resolution to `None`; this leg is the one that drives the refusal
+/// through the served endpoint, the half no existing chat-400 leg covers
+/// (those render a template that is present).
+#[test]
+fn no_template_artifact_returns_400_ct_1_3() {
+    let dir = StrippedTemplateDir::new("http");
+    assert!(
+        !dir.path().join("chat_template.jinja").exists(),
+        "the temp copy must have no canonical sidecar (the precondition)"
+    );
+
+    let (state, router) = ready_router_for(dir.path());
+    assert!(
+        state.engine.chat_template.is_none(),
+        "an artifact with no template anywhere must resolve chat_template to None"
+    );
+    let port = serve_on_port(router);
+    let resp = post_json(
+        port,
+        "/v1/chat/completions",
+        &chat_body(FIXTURE_MODEL_ID, false),
+    )
+    .expect("chat request");
+    assert_eq!(resp.status, 400, "{}", resp.body);
+    let value: serde_json::Value = serde_json::from_str(&resp.body).expect("envelope JSON");
+    assert_eq!(
+        value["error"]["type"],
+        serde_json::json!("invalid_request_error"),
+        "the refusal must ride the OpenAI envelope"
+    );
+    let message = value["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the refusal must name a reason: {}", resp.body));
+    assert!(
+        message.contains("no chat template"),
+        "the refusal must name the absence: {message}"
+    );
+    // No tokenization or generation was attempted: the body is the error
+    // envelope alone, with no usage or choices.
+    assert!(
+        value.get("usage").is_none() && value.get("choices").is_none(),
+        "a refused chat must not carry usage or choices: {}",
+        resp.body
+    );
+}

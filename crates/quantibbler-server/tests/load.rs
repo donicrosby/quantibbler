@@ -69,7 +69,12 @@ fn load_failure_never_ready() {
             !status.success(),
             "variant {variant}: exit status was success"
         );
-        let diag = server.diagnostic();
+        // The child exited, but its stderr is captured by an async drain
+        // thread, so a read right after `try_wait()` can return only what that
+        // thread has published SO FAR — under load the load error can still be
+        // in flight. Poll until the expected line lands (the poll-not-race
+        // pattern `wait_for_log` uses) before asserting.
+        let diag = diagnostic_containing(&server, failing_file);
         assert!(
             diag.contains(failing_file),
             "variant {variant}: diagnostic must name {failing_file}; got: {diag}"
@@ -123,4 +128,19 @@ fn health_readiness_gate() {
             assert_eq!(body["error"]["type"], serde_json::json!("server_error"));
         });
     });
+}
+
+/// Poll a failed server's captured stderr for `needle` (the async drain thread
+/// publishes incrementally, so the load error may not be visible the instant
+/// the child exits), then return the buffer either way so the failure message
+/// carries what was actually captured.
+fn diagnostic_containing(server: &ServerProcess, needle: &str) -> String {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let diag = server.diagnostic();
+        if diag.contains(needle) || std::time::Instant::now() > deadline {
+            return diag;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

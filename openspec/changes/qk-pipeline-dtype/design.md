@@ -16,7 +16,6 @@ Three distinct precision roles:
 |------|-------------------|-------|---------------|
 | **Storage/compute** | `bf16` | Latents (U, V), scales (s1, s2), bias, activation captures, STE forward, TuneFP/STE/KD gradients, packed sign extraction | User mandate: one dtype end-to-end |
 | **Accumulation** | `float32` | Dot-product accumulators (ADMM `VᵀV`, `UᵀU` normal equations), Cholesky factorization, robust-diagonal running sums, CE-gradient squared-statistic accumulation, KL-divergence sum | bf16's 7-bit mantissa: a dot product over d=4096 terms accumulates ~1.4 ULPs per term → ~12 bits lost. float32's 23-bit mantissa recovers ~16 guard bits relative to bf16, safe for ranks up to ~4096 before needing float64. |
-| **Parity reference** | `float64` (unchanged) | NumPy solver backend (unit-test-only), kernel parity probes | The executable specification stays at the highest precision — the oracle does not move |
 
 The accumulation dtype is a per-site named constant, not an adaptive heuristic.
 Each site that widens declares its dtype and the arithmetic bound that justifies
@@ -52,12 +51,12 @@ HF weights (bf16)
 
 - Constructor: latents stored as `nn.Parameter` at `compute_dtype` (was
   always `double()`/`torch.float64`). The `from_weight` SVD init: on CPU,
-  uses the NumPy float64 path then casts to `compute_dtype` before storing;
+  uses the NumPy path at the declared dtype then casts to `compute_dtype` before storing;
   on GPU, uses `torch.linalg.svd` at **float32** accumulation dtype
   (explicit, not the device dtype) — `torch.linalg.svd` at bf16 is
   platform-dependent and may not converge; float32 SVD is a justified
-  accumulation site under class (b) in the evidence gate. The parity
-  oracle compares against the NumPy float64 SVD path.
+  accumulation site under class (b) in the evidence gate. Parity
+  verification runs the NumPy SVD path at the same declared dtype.
 - `_factor_terms`: operates at `compute_dtype` — the `activation_dtype`
   parameter becomes the pipeline's `compute_dtype`. The STE passthrough
   `sign(u) + u - u.detach()` works identically at any float dtype.
@@ -135,8 +134,8 @@ and the GPU-idle window — not the crossing time itself.
 | Export | CPU (host) | Write to disk — inherent host path |
 
 The solver moves to `torch` tensors on the accelerator device. The two
-host↔device round-trips per layer are eliminated. The NumPy backend remains
-the float64 parity oracle, reached only by `--solver-backend numpy` in unit
+host↔device round-trips per layer are eliminated. The NumPy backend is
+a unit-test-only reference path, reached only by `--solver-backend numpy` in unit
 tests — the torch backend on the accelerator is the production default.
 
 ### Device selection
@@ -168,13 +167,13 @@ The torch solver backend (`solver_backend.py`, `lb_admm.py`) parameterizes on
 | Scale extraction `mean(|û_i|)` | bf16 | float32 sums | Sum over r terms per row |
 
 The torch backend SHALL produce results within the tolerance declared per
-compute_dtype (see "Tolerances" below) relative to the NumPy float64 reference.
+compute_dtype (see "Tolerances" below) measured against same-declared-dtype NumPy parity fixtures.
 
 ### Per-dtype tolerances
 
 **Superseded by C1 below.** The table's tolerances were declared on the converged-output cosine metric; measurement proved that metric measures basin selection, not dtype fidelity (C1). The correct metric is the first-update residual relative difference, and the tolerance values (1e-2 / 1e-4 / 1e-12) transfer unchanged — the bounds were correctly derived from format ULP analysis; the defect was the metric, not the values.
 
-| Compute dtype | ADMM recon cos tolerance vs float64 | Parity gate class |
+| Compute dtype | ADMM recon cos tolerance | Parity gate class |
 |---------------|-------------------------------------|-------------------|
 | float64 | 1e-12 (existing) | float64-parity |
 | float32 | 1e-4 (backward error on ADMM round-off) | float32-parity |
@@ -185,7 +184,7 @@ ULP bounds. The parity suite extends across the dtype×device matrix:
 `{bf16, float32, float64} × {GPU, CPU}` with per-dtype bounds as above.
 The pipeline owns these tolerance definitions independently — they are
 pipeline-level end-to-end reconstruction cosine bounds measured at the
-block output (unpacked reconstruction vs float64-NumPy reference output),
+block output (unpacked reconstruction vs same-declared-dtype NumPy fixture output),
 distinct from the per-operation backward-error bounds in
 `qk-kernels-dtype-generic` (which govern kernel-level precision for
 individual matmuls and pack operations). The first production run SHALL
@@ -203,8 +202,7 @@ is the evidence gate. Resolution classes:
   dtype, or is the declaration/mapping itself.
 - **(b) Accumulation-site:** a named accumulation/host grade with the arithmetic
   or contract justification in the comment beside it.
-- **(c) Parity-oracle:** a deliberate float64 literal in the NumPy parity path,
-  a unit test, or a reference fixture.
+- **(c) Reference-path:** Deliberate dtype literal in the NumPy solver path (`solver_backend.py`, unit tests, reference fixtures) carrying an explicit `# reference-path: <dtype> by design` comment.
 
 `tools/quantize_hf_model.py` returns **zero** hits: every dtype decision on the
 driver path is the declared one.
@@ -216,7 +214,7 @@ driver path is the declared one.
 | `calibration.py` `_to_numpy_stat` | (b) | statistic STORAGE schema boundary (documented) |
 | `solver_backend.py` `host_np_dtype` (`np.float32`) | (a) | the declared host-grade map itself |
 | `_factorized.py` accelerator SVD (`torch.float32`) | (b) | named float32 accumulation for `torch.linalg.svd` |
-| `_factorized.py` NumPy SVD init (`torch.float64`) | (c) | `# parity-oracle: float64 by design` |
+| `_factorized.py` NumPy SVD init (`torch.float64`) | (c) | `# reference-path: float64 by design` |
 | `_factorized.py` `check_layer_magnitude` | (b) | catastrophe gate: Frobenius ratio over the whole block |
 | `lb_admm.py` `DEFAULT_SCALE_FLOOR` | (b) | named dead-channel floor constant |
 | `api.py` `scale_dtype` dispatch | (a) | the declared `config.scale_dtype` storage knob |
@@ -352,30 +350,13 @@ this specification phase; same resolve-by-production pattern as OQ-2/3.)
 The float32 accumulation for ADMM normal equations is justified arithmetically
 for ranks up to ~4096. The first production run at rank 512 under bf16 compute
 + float32 accumulation MUST measure the ADMM convergence trajectory (residual
-norm per iteration) and compare it against a float64 run on the same layer.
+norm per iteration) and confirm convergence within the declared iteration budget.
 Divergence (more than 10% additional iterations to converge, or failure to
 converge) would indicate float32 accumulation is insufficient at this rank.
 
 ### OQ-3: bf16 STE gradient fidelity
 
-**Status:** OPEN — owned by planner, resolved by first production measurement.
-
-The STE passthrough `sign(u) + u - u.detach()` at bf16 involves three
-operations with ~7-bit mantissa each. The gradient scale (`d/dU = s1`) may
-lose precision relative to the float64 path. The first production run MUST
-compare the per-linear STE gradient norm against the float64 reference path on
-at least one layer and record the relative difference. A difference exceeding
-1e-3 relative would indicate bf16 STE gradients need a float32 intermediate
-(the accumulation dtype can widen the STE path without widening the latents).
-
-**Ownership note (planner ruling, 2026-10-27):** this OQ is now the sole owner
-of the bf16-relative-to-f64 STE gradient record and the 1e-3 bound. The
-`ste_dtype_generic` scenario's standing-event assertion
-(`ste_bf16_gradient_deviation`) was folded here and retired from the change's
-spec delta (see C4). If this OQ's verdict is "float32 intermediate needed",
-the remedy — a float32 STE intermediate and whatever deviation/instrumentation
-then applies — is specified in a FOLLOW-UP change, not asserted by
-qk-pipeline-dtype.
+**Status:** RETIRED — the f64 comparator is dead per user directive 2026-10-27. STE gradient fidelity at bf16 is measured intrinsically (non-zero gradient, MSE improvement over T_post steps) without reference to a higher-precision path. The `ste_bf16_gradient_deviation` event and its `ste_dtype_generic` scenario are retired outright: the intrinsic detection threshold has no dtype-neutral calibration value and no named owner, so the trigger is unfalsifiable; no f64-relative threshold may be reintroduced (that comparator is dead by directive). STE dtype-generic coverage is carried by `ste_refinement_improves_mse`.
 
 ## Discarded alternatives
 
@@ -405,8 +386,9 @@ accumulation question entirely.
 
 **Discarded.** The existing spec rule (torch backend without accelerator
 refuses) is correct: a CPU torch backend doing ~400 Cholesky solves per layer
-on one socket is the same performance as NumPy, and NumPy is the parity oracle
-— never a fallback. The explicit `--device cpu` path uses torch CPU tensors.
+on one socket is the same performance as NumPy, and the NumPy backend is a
+unit-test-only reference path at the declared dtype — never a fallback. The
+explicit `--device cpu` path uses torch CPU tensors.
 
 ### D5: Remainder dtype always tracks compute dtype (no separate knob)
 
@@ -458,8 +440,8 @@ which does separate the dtypes at their declared classes:
 | float32 | 3.8e-7 | 1e-4 (holds) |
 | float64 | 2.5e-15 | 1e-12 (holds) |
 
-(metric: relative difference of the FIRST ADMM update residual vs the float64
-NumPy reference; `tests/ptq/test_pipeline_dtype_generic.py::test_scn_admm_parity_cpu_cell`)
+(metric: relative difference of the FIRST ADMM update residual vs the NumPy
+parity fixture; `tests/ptq/test_pipeline_dtype_generic.py::test_scn_admm_parity_cpu_cell`)
 
 Also measured, same fixture: all three dtypes converge within the budget
 (bf16 344 / float32 347 / float64 360 iterations at `admm_max_iter=900`), so the
@@ -570,6 +552,13 @@ at the declared compute dtype. tasks.md row 4.6 is re-scoped out of this change
 to a plain deferred note; the measurement obligation lives in OQ-3, and a
 follow-up spec change will define the then-appropriate instrumentation/event
 once OQ-3's outcome is measured.
+
+**Superseded (2026-10-27 user directive).** The f64-relative comparator this
+deferral tracked is dead: OQ-3 is RETIRED and no f64-relative threshold may be
+reintroduced. `ste_dtype_generic` and the `ste_bf16_gradient_deviation` event
+are retired from the delta outright; STE dtype-generic coverage is carried by
+`ste_refinement_improves_mse`. The ruling above is retained as the record of
+the pre-directive disposition.
 
 ### C5: `bias_zero_assertion_gate`'s zero-bias-fails arm re-ruled — the gate fires on dropped bias, never on bias-free architecture
 
