@@ -4,7 +4,7 @@ Each task is independently verifiable. Tests precede implementation per
 capability; test names reference scenario IDs. Last task runs the full gate
 suite.
 
-- [ ] 1.1 Add a torch-free `resume`-record builder in `src/quantibbler/qk_report/`
+- [x] 1.1 Add a torch-free `resume`-record builder in `src/quantibbler/qk_report/`
   that constructs the record dict from plain inputs (resumed flag,
   restored-blocks list, checkpoint-dir string, image/digest strings,
   fingerprint-admission dict); emits `resumed: false` + empty
@@ -14,7 +14,7 @@ suite.
   `resume_identity_is_evidence_not_an_assertion` (no `identical_bytes` key),
   running without skips in a lean environment.
 
-- [ ] 1.2 Wire the record into `tools/quantize_hf_model.py`: read
+- [x] 1.2 Wire the record into `tools/quantize_hf_model.py`: read
   `completed_blocks(_ckpt_dir)` where `_ckpt_dir` is resolved (before
   `quantize_model`), read the restored `fingerprint.json` — its `fingerprint`
   digest, its `model_identity` digest, and its provenance members (the
@@ -37,14 +37,18 @@ suite.
   edges, and `dump_report` acceptance are unchanged (the record is never read
   by a gate — discriminating, not coincidental).
 
-- [ ] 1.3 Add the fingerprint non-folding guard (SHALL NOT): a suite test
+- [x] 1.3 Add the fingerprint non-folding guard (SHALL NOT): a suite test
   asserting the resume record does not change `config_fingerprint` for a fixed
   config, that `PTQConfig` gained no resume field, and that
   `_FINGERPRINT_PROVENANCE` is unchanged. Verification:
   `resume_marker_never_folds_the_fingerprint`, red-first — a poisoned config
   (a `resumed` field) changes `config_fingerprint`; the real config does not.
 
-- [ ] 1.4 Run the full gate suite (`uv run pytest`; kernels `cargo test` +
+- [x] 1.4 Run the full gate suite (`uv run pytest`; kernels `cargo test` +
   `clippy --all-targets -- -D warnings` + `fmt --check`; `maturin build`) and
   `openspec validate qk-resume-report --strict`. Record results; every gate
-  green before the change lands.
+  green before the change lands. Green, with one pre-existing integration-lane
+  red outside this change's diff: `test_driver_stage_map.py`'s faithful stage-map
+  leg asserts a hand-pinned `fidelity_conditions` set that no longer matches the
+  record's own `capture_is_fp_stream` condition. Reproduced verbatim on the
+  pre-change revision, so it is a stale pin for that leg's owner, not this one.

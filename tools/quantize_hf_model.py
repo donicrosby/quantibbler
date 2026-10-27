@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import random
 import struct
@@ -106,7 +107,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from quantibbler.ptq.api import QuantizedModel, quantize_model
 from quantibbler.ptq.block_recon import VacuousTeacherError
-from quantibbler.ptq.checkpoints import append_stage_event
+from quantibbler.ptq.checkpoints import (
+    _FINGERPRINT_NAME,
+    _FINGERPRINT_PROVENANCE,
+    append_stage_event,
+    completed_blocks,
+)
 from quantibbler.ptq.config import PrefixProbeAbort, PTQConfig, StageHyper
 from quantibbler.qk_report import (
     COLLAPSE_LINE,
@@ -122,6 +128,7 @@ from quantibbler.qk_report import (
     probe_aborts,
     probe_ratio,
     provenance,
+    resume_record,
     stage_failure_report,
     stage_map,
     verdict,
@@ -504,6 +511,45 @@ def _stage_recorder(sink: list, log_dir: Path | None = None) -> Any:
     return _record
 
 
+def _restored_blocks(checkpoint_dir: Path | None) -> list[int]:
+    """The completed block archives already on disk at launch, or ``[]``.
+
+    A pure scan of the checkpoint directory — the same one the stage-journal
+    seed makes — read HERE, before the pipeline runs, so the report declares
+    what a prior launch left rather than what this launch went on to write.
+    """
+    return completed_blocks(checkpoint_dir) if checkpoint_dir is not None else []
+
+
+def _resume_admission(checkpoint_dir: Path) -> dict | None:
+    """The restored checkpoints' own fingerprint admission, as report evidence.
+
+    Copied verbatim off the checkpoint directory's ``fingerprint.json`` — the
+    same record the resume guard refuses on — rather than re-derived: the config
+    digest, the model-identity record, the recorded provenance fields and the
+    resolved device. A reader compares these against the launch trail; the
+    driver asserts none of them.
+
+    The read is tolerant by design: a record that is absent or unreadable yields
+    ``None`` here, so the refusal stays where it belongs — in the guard, which
+    runs downstream and refuses this launch's resume before any report exists.
+    """
+    try:
+        record = json.loads((checkpoint_dir / _FINGERPRINT_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    admission = {
+        "fingerprint": record.get("fingerprint"),
+        "model_identity": record.get("model_identity"),
+        "solver_device": record.get("solver_device"),
+    }
+    for name in _FINGERPRINT_PROVENANCE:
+        admission[name] = record.get(name)
+    return admission
+
+
 def _run_identity(
     args: argparse.Namespace,
     prov: dict,
@@ -513,6 +559,7 @@ def _run_identity(
     eval_rows: int,
     ppl_baseline_bf16: Any,
     evaluation: dict,
+    resume: dict,
 ) -> dict:
     """Report identity fields shared by every exit path.
 
@@ -557,6 +604,10 @@ def _run_identity(
         # and which harness produced it. Sits beside the method verdict rather
         # than inside it — see `evaluation_record`.
         "evaluation": evaluation,
+        # The restart declaration: launch state, so a run that died before the
+        # end-of-run gate still says whether it resumed and from where. A record
+        # for a reader — no verdict, gate, or exit code reads it.
+        "resume": resume,
         "regime": {
             "baseline_eval": "bfloat16 (checkpoint native; papers' pedestal)",
             "solver": "float64, per-layer just-in-time (sign margins + parity reference)",
@@ -1454,6 +1505,21 @@ def main() -> int:
                 flush=True,
             )
     _record = _stage_recorder(stage_events, _ckpt_dir)
+    # The restart declaration, built from launch state before the pipeline runs:
+    # the blocks a prior launch left on disk, and the fingerprint admission the
+    # restore will be checked against. A fresh launch carries the record too, so
+    # the completion, abort and stage-failure reports share one key set. A
+    # refused restore never reaches a report — the guard raises first — so
+    # `resumed: true` cannot outlive a runner that did not actually admit.
+    restored = _restored_blocks(_ckpt_dir)
+    resume = resume_record(
+        resumed=bool(restored),
+        restored_blocks=restored,
+        checkpoint_dir=str(_ckpt_dir) if restored else None,
+        image=os.environ.get("QUANTIBBLER_IMAGE", "unknown"),
+        image_digest=os.environ.get("QUANTIBBLER_IMAGE_DIGEST", "unknown"),
+        admitted_by_fingerprint=_resume_admission(_ckpt_dir) if restored else None,
+    )
     # Identity fields shared by every report path, built once (see
     # `_run_identity`: the probe-abort and stage-failure reports must be as
     # self-describing as a completion report).
@@ -1465,6 +1531,7 @@ def main() -> int:
         eval_rows=len(held_out) * BATCH,
         ppl_baseline_bf16=ppl_base,
         evaluation=evaluation,
+        resume=resume,
     )
 
     try:
@@ -1645,6 +1712,10 @@ def main() -> int:
             # not a property of the quantization method or calibration
             # protocol. See `qk_report.evaluation_record`.
             "evaluation": identity["evaluation"],
+            # The restart declaration, on the completion shape too: the record
+            # is built once from launch state, so every exit path carries the
+            # same key.
+            "resume": identity["resume"],
             "ste_flip_pass_budget": int(args.ste_flip_pass_budget),
             "runtime_deviations": identity["runtime_deviations"],
             "stages": [{"event": event, **info} for event, info in stage_events],

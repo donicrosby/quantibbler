@@ -53,6 +53,7 @@ from .reports import (
     evaluation_record,
     geometry_deviations,
     provenance,
+    resume_record,
     stage_failure_report,
 )
 from .stages import (
@@ -83,6 +84,7 @@ __all__ = [
     "probe_aborts",
     "abort_report",
     "stage_failure_report",
+    "resume_record",
     "stage_map",
     "stage_row_times",
     "geometry_deviations",

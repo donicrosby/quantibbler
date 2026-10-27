@@ -26,7 +26,7 @@ sys.path.insert(0, str(REPO_ROOT / "tools"))
 import quantize_hf_model as qhf  # noqa: E402
 import repack_remainder  # noqa: E402
 
-from quantibbler.qk_report import provenance  # noqa: E402
+from quantibbler.qk_report import provenance, resume_record  # noqa: E402
 from quantibbler.qpk1 import serialize  # noqa: E402
 from quantibbler.remainder_dtype import (  # noqa: E402
     REMAINDER_DTYPES,
@@ -265,6 +265,17 @@ def _identity(remainder_dtype: str) -> dict:
         eval_rows=1,
         ppl_baseline_bf16=1.0,
         evaluation={},
+        # The restart declaration rides the shared identity payload on every
+        # path, so a caller that builds the identity states the launch's
+        # restart state.
+        resume=resume_record(
+            resumed=False,
+            restored_blocks=[],
+            checkpoint_dir=None,
+            image="unknown",
+            image_digest="unknown",
+            admitted_by_fingerprint=None,
+        ),
     )
 
 

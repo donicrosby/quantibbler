@@ -115,6 +115,52 @@ def stage_failure_report(exc: Any, identity_fields: dict, stages: list) -> dict:
     return report
 
 
+def resume_record(
+    *,
+    resumed: bool,
+    restored_blocks: Any,
+    checkpoint_dir: str | None,
+    image: str,
+    image_digest: str,
+    admitted_by_fingerprint: dict | None,
+) -> dict:
+    """The top-level ``resume`` record: a reader-facing restart declaration.
+
+    A resumed launch's ``wall_seconds`` covers the post-resume segment only, so
+    the number alone cannot tell a reader that the full solve was not measured
+    end to end. This record names the discontinuity from launch state the driver
+    already holds: whether a prior launch's completed blocks were restored,
+    which blocks, from which directory, under which container image, and the
+    fingerprint admission the restore was checked against.
+
+    It is a RECORD, never a gate — no verdict, band edge, exit code, stage
+    condition or fail-fast reads it — and it is emitted on every report shape
+    (completion, probe-abort, stage-failure) with the same key set, so a strict
+    consumer never KeyErrors on one shape. It rides beside the identity fields
+    rather than inside the serialized report model, so an older build still
+    parses a newer report and a report written before this record existed still
+    parses here.
+
+    ``admitted_by_fingerprint`` is the restored checkpoint's own admission
+    record, threaded verbatim from what ``check_fingerprint`` read — the caller
+    copies the real record rather than re-deriving a subset. No
+    ``identical_bytes`` claim is computed: whether two launches ran identical
+    source bytes is a host-side measurement (a diff across two tips) that the
+    container, which has no ``git``, cannot make. Absence of the claim is the
+    honest shape, never a ``True`` the driver cannot support.
+    """
+    return {
+        # Derived at the call site from the completed-block scan, so the flag
+        # and the list it describes cannot disagree.
+        "resumed": bool(resumed),
+        "restored_blocks": list(restored_blocks),
+        "checkpoint_dir": checkpoint_dir,
+        "image": image,
+        "image_digest": image_digest,
+        "admitted_by_fingerprint": admitted_by_fingerprint,
+    }
+
+
 def geometry_deviations(seq_len: Any, tune_seq_len: Any, calibration_rows: Any = None) -> list:
     """Named runtime deviations from [NQ]'s calibration geometry.
 

@@ -27,6 +27,7 @@ from quantibbler.qk_report import (
     abort_report,
     dump_report,
     evaluation_record,
+    resume_record,
 )
 
 # --------------------------------------------------------------------------
@@ -158,6 +159,17 @@ _ABORT_IDENTITY_VALUES: dict[str, object] = {
     # The emitted container (qk-artifact-blob BW-1). An aborted run exports
     # nothing, so the record carries the requested format with nulls.
     "container": {"format": "blob", "path": None, "sha256": None},
+    # The restart declaration, built by the production builder so this fixture
+    # cannot drift from the record the driver threads: an aborted run carries the
+    # launch state it had, never a record reconstructed here.
+    "resume": resume_record(
+        resumed=False,
+        restored_blocks=[],
+        checkpoint_dir=None,
+        image="unknown",
+        image_digest="unknown",
+        admitted_by_fingerprint=None,
+    ),
 }
 
 
