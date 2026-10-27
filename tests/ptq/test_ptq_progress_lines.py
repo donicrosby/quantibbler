@@ -110,7 +110,9 @@ def test_block_progress_lines_are_one_per_block_with_wall_and_a_completion_marke
     reconstruct_model(
         model,
         batches,
-        PTQConfig(solver_backend="numpy", rank=4),
+        # NumPy arm: the port's config defaults to bf16, which this backend
+        # refuses by name — its fixtures declare the float64 oracle grade.
+        PTQConfig(solver_backend="numpy", rank=4, compute_dtype="float64"),
         stats_book=_stats_book(model, batches),
     )
 
@@ -150,7 +152,10 @@ def test_a_block_that_raises_leaves_its_own_line_and_no_completion_marker(monkey
     monkeypatch.setattr(block_recon, "reconstruct_block", explode_on_second)
     with pytest.raises(RuntimeError, match="simulated"):
         reconstruct_model(
-            model, batches, PTQConfig(solver_backend="numpy", rank=4), stats_book=book
+            model,
+            batches,
+            PTQConfig(solver_backend="numpy", rank=4, compute_dtype="float64"),
+            stats_book=book,
         )
 
     notes = [m.group("note") for m in _ptq_lines(capsys.readouterr().out)]
@@ -160,7 +165,9 @@ def test_a_block_that_raises_leaves_its_own_line_and_no_completion_marker(monkey
 def test_ptq_phase_lines_precede_the_first_block_line(capsys):
     model = _TinyWholeModel()
     batches = _tokens()
-    quantize_model(model, batches, PTQConfig(solver_backend="numpy", rank=4))
+    quantize_model(
+        model, batches, PTQConfig(solver_backend="numpy", rank=4, compute_dtype="float64")
+    )
 
     notes = [m.group("note") for m in _ptq_lines(capsys.readouterr().out)]
     assert notes[:3] == [
