@@ -122,6 +122,11 @@ def test_paper_faithful_run_records_the_algorithm1_stage_map(
         "no_discrete_flip_pass": True,
         "no_scale_only_rescope": True,
         "no_vacuous_teacher": True,
+        # The stream-provenance condition (owned by `qk_report.stages`): a
+        # capture whose teacher read the COMPRESSED stream denies the faithful
+        # label, so every clean-run set carries it. This full-set pin is the
+        # only place the whole condition set meets a real driver report.
+        "capture_is_fp_stream": True,
         "no_stage_failure": True,
         "solver_is_admm": True,
         # The evidence half of the claim: every `required` stage of the
@@ -203,15 +208,21 @@ def test_paper_faithful_run_records_the_algorithm1_stage_map(
     # Deviations that remain are NAMED in the record, not silent.
     assert "polish" in mapped["lb_admm"]["deviation"]
     assert "informed assumption" in mapped["tune_fp"]["deviation"]
-    # The stage map's own reading was falsified by the 64,151x fire: both cells
-    # must describe the per-target cycle now, and the overruled reading must not
-    # survive anywhere in them.
+    # Each cell must describe the ruling IN FORCE and name the reading it
+    # supersedes: TuneFP's per-target cycle (the once-per-block placement was
+    # falsified by the 64,151x fire), TuneLatentSTE's one joint pass per block
+    # over the whole factorized set (a DECLARED departure from Algorithm 1
+    # line 19). A cell that still presents a superseded reading as the method
+    # is what these two pins exist to catch.
     assert "PER-TARGET" in mapped["tune_fp"]["deviation"], (
         "the tune_fp stage-map cell still carries the overruled placement reading"
     )
     assert "once per block" not in mapped["tune_fp"]["deviation"]
-    assert "per-target" in mapped["ste"]["deviation"], (
-        "the ste stage-map cell still carries the overruled scheduling reading"
+    assert "jointly over every factorized linear" in mapped["ste"]["deviation"], (
+        "the ste stage-map cell does not describe the joint block pass"
+    )
+    assert "DECLARED deviation" in mapped["ste"]["deviation"], (
+        "the ste cell names no declared departure from Algorithm 1 line 19"
     )
 
     tune = [stage for stage in report["stages"] if stage["event"] == "tune_fp"]
