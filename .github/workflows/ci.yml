@@ -229,13 +229,24 @@ jobs:
     # into a green no-run). On a run with a cold cache it waits for the seed's
     # one download; on a hit the seed is a no-op and this proceeds at once.
     #
-    # timeout-minutes: the leg's quiet baseline is ~60s end-to-end (abort before
-    # block 3 on a minimal-shape run: rank 1, 1 ADMM iter, seq 64, 8 cal seqs).
-    # 15 minutes is ~15x that baseline — a hard ceiling so a regressed leg fails
-    # the job loud and fast instead of silently grinding a hosted runner for
-    # half an hour. The in-script 3600s backstop stays as the recorded-contract
-    # ceiling; this job-level timeout is the CI churn fence.
-    timeout-minutes: 15
+    # timeout-minutes: sized against the leg's recorded CONTENTION worst case,
+    # not its quiet baseline (abort before block 3 on a minimal-shape run:
+    # rank 1, 1 ADMM iter, seq 64, 8 cal seqs — ~60s). A three-way runner wave
+    # has driven that same command to 2573s (~43 min) with the abort still
+    # bit-identical; the in-script 3600s ceiling exists to clear that, and a
+    # 15-minute fence fires first on exactly those contended-but-correct runs,
+    # leaving the in-script backstop unreachable.
+    # 65 minutes = 3900s = 1.52x the recorded 2573s worst and 65x the quiet
+    # baseline, deliberately ABOVE the in-script 3600s ceiling so that ceiling
+    # stays reachable: a true hang is caught and reported by the in-script
+    # wall/timeout checks, and this fence is only the outer net for a hang
+    # before the driver starts (checkout + sync + cache restore run ~1-2 min
+    # ahead of the driver, so the in-script kill lands ~3720s on the job clock,
+    # still ~180s inside this fence).
+    # Accepted trade: a hung leg occupies a hosted
+    # runner for up to ~65 minutes instead of 15; a contended-but-correct run
+    # finishes instead of being cancelled.
+    timeout-minutes: 65
     needs: seed-weights
     runs-on: ubuntu-latest
     env:
@@ -263,7 +274,8 @@ jobs:
       # The recorded abort command, executed offline, with the abort asserted
       # from the real process: abort before block 3, wall time inside the 3600s
       # contention-immune backstop (quiet baseline ≈60s — catches hangs and
-      # gross regressions, not an abort-latency contract), status failed +
+      # gross regressions, not an abort-latency contract; the job fence above
+      # sits past this ceiling so this backstop stays reachable), status failed +
       # probe_abort fields + the trajectory so far, nonzero exit.
       # Its invocation list also names `--device cpu` (see tools/ci/abort_leg.py):
       # the recorded run this leg cites was itself a CPU run under CI, and
