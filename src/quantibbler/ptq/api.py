@@ -20,6 +20,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from ._probe import _note_ptq_progress
 from .block_recon import QuantizedLayerState, _quantizable_names, reconstruct_model
 from .calibration import collect_stats
 from .config import PTQConfig
@@ -109,6 +110,13 @@ def quantize_model(
     if not batches:
         raise ValueError("quantize_model needs calibration data")
 
+    # The anchor for this stage's own progress lines. A CI cancel destroys the
+    # runner, so the phase boundaries before the block loop — the statistics
+    # pass and the teacher deep copy, both memory-heavy — must name themselves
+    # on stdout or a wedge in either is indistinguishable from a wedge in a
+    # block.
+    _ptq_t0 = time.monotonic()
+
     # Seed the stage record BEFORE the first event is emitted: the journal is
     # this launch's own append log, so a seed read after a few appends would
     # hand the launch its own prefix back. A directory with no completed block
@@ -130,7 +138,9 @@ def quantize_model(
     # doubles as the statistics source — it was reading the compressed-prefix
     # stream, which is line 9's TUNING input, not the paper's statistics input.
     chunk_rows = _phase1_chunk_rows(model)
+    _note_ptq_progress(f"phase 1 statistics: {len(batches)} batches", time.monotonic() - _ptq_t0)
     stats_book = collect_stats(model, batches, chunk_rows=chunk_rows)
+    _note_ptq_progress("phase 1 statistics done", time.monotonic() - _ptq_t0)
     if recorder is not None:
         recorder(
             "phase1_statistics",
@@ -145,6 +155,7 @@ def quantize_model(
     teacher = copy.deepcopy(model)
     for param in teacher.parameters():
         param.requires_grad_(False)
+    _note_ptq_progress("teacher snapshot done", time.monotonic() - _ptq_t0)
 
     # Phase 2: block-wise reconstruction (Algorithm 1 lines 8-24). Each
     # BlockReconResult carries the per-layer artifacts in declaration order.

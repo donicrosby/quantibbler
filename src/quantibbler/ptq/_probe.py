@@ -177,6 +177,39 @@ def _record_solver_probe(name, w, bal, res, cfg) -> None:
     )
 
 
+def _cgroup_gb() -> float | None:
+    """This process's cgroup v2 memory reading in GiB, or None when unreadable.
+
+    The reading that bounds a real-model run is the cgroup's, never the host's:
+    the cap that kills the process belongs to the cgroup it runs in, so a host
+    figure would misattribute the death. Absent on a v1 or non-Linux host, and
+    stated as absent rather than invented.
+    """
+    try:
+        with open("/sys/fs/cgroup/memory.current") as fh:
+            return int(fh.read()) / 2**30
+    except Exception:
+        return None
+
+
+def _note_ptq_progress(note: str, wall_s: float) -> None:
+    """Print one PTQ progress line on stdout, with the wall seconds into it.
+
+    The CI abort leg streams the driver's stdout live, and the job-level
+    timeout fence throws away the runner it ran on — so the job log is the only
+    channel a cancelled run leaves behind, while the PTQ stage itself prints
+    nothing per block and a stall there is a bare silence. Each line carries
+    the wall seconds the CALLER measured from its own anchor (the PTQ stage for
+    a phase boundary, block reconstruction for a block) plus the cgroup
+    reading, so a stall localizes to a sub-stage AND to a memory level. Always
+    on: a line an env var can turn off witnesses nothing on a runner that is
+    discarded with the job.
+    """
+    mem = _cgroup_gb()
+    suffix = "" if mem is None else f" cgroup={mem:.2f}G"
+    print(f"[ptq] {note} wall={wall_s:.1f}s{suffix}", flush=True)
+
+
 def _note_block_progress(idx: int, name: str | None, x_running=None) -> None:
     """Append a crash-safe breadcrumb before each block reconstruction.
 
@@ -188,9 +221,12 @@ def _note_block_progress(idx: int, name: str | None, x_running=None) -> None:
     path = os.getenv("QUANTIBBLER_BREADCRUMBS")
     if not path:
         return
+    mem = _cgroup_gb()
+    if mem is None:
+        # Nothing to write rather than a line whose omitted figure a reader
+        # would have to interpret: this channel exists for numbers.
+        return
     try:
-        with open("/sys/fs/cgroup/memory.current") as fh:
-            mem = int(fh.read()) / 2**30
         line = f"block[{idx}] {name or '(stem)'} cgroup={mem:.2f}G"
         if x_running is not None:
             line += f" x_running={tuple(x_running.shape)}@{x_running.dtype}"

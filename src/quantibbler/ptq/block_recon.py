@@ -70,6 +70,7 @@ is re-exported from this module, so external import paths are unchanged):
 from __future__ import annotations
 
 import copy
+import time
 from pathlib import Path
 
 import torch
@@ -113,6 +114,9 @@ from ._probe import (
 )
 from ._probe import (
     _note_block_progress as _note_block_progress,
+)
+from ._probe import (
+    _note_ptq_progress as _note_ptq_progress,
 )
 from ._probe import (
     _record_solver_probe as _record_solver_probe,
@@ -257,6 +261,11 @@ def reconstruct_model(
     collection remains, so a caller that has no Phase-1 pass is not silently
     handed fabricated statistics.
     """
+    # Per-block lines are measured from HERE, so block 0's number also carries
+    # the prefix work that precedes it (fingerprint read, stem forward): a wedge
+    # in that region then shows as a late first line, never as bare silence.
+    _recon_t0 = time.monotonic()
+
     quantizable = _quantizable_names(model)
     if not quantizable:
         raise ValueError("model has no quantizable nn.Linear layers")
@@ -313,6 +322,7 @@ def reconstruct_model(
     # divergence between the two IS the lane.
     x_fp = x_running.clone()
     _note_block_progress(0, None, x_running)
+    _note_ptq_progress("block 0 (stem)", time.monotonic() - _recon_t0)
 
     # Snapshot the fp outputs of any fp stem layer that sits AFTER the last
     # quantized block (e.g. the LM head): reconstruct_model's in-place loop
@@ -334,7 +344,9 @@ def reconstruct_model(
         # checkpoint restore are both driven by what
         # the block is OWED, never by what an archive contains.
         expected_names = _scope_filter(_quantizable_names(block), cfg.layer_scope)
-        _note_block_progress(len(results) + 1, name, x_running)
+        idx = len(results) + 1
+        _note_block_progress(idx, name, x_running)
+        _note_ptq_progress(f"block {idx} {name}", time.monotonic() - _recon_t0)
         if i in done_set:
             # Resume: restore this block's solved layers bit-exactly,
             # write them into the host (the quantized prefix then
@@ -416,6 +428,9 @@ def reconstruct_model(
         probe = cfg.progress_probe
         if probe is not None:
             probe(model, len(results), name)
+    # A completion marker, so "finished every block" and "killed inside the last
+    # block" cannot read the same from the log's tail.
+    _note_ptq_progress(f"block recon complete: {len(results)} blocks", time.monotonic() - _recon_t0)
     return results
 
 
