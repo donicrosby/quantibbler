@@ -84,7 +84,8 @@ def test_probe_row_carries_the_compute_dtype(tmp_path, monkeypatch):
     Same provenance-gap class as an unlabelled rho_end, and sharper here: an
     fp32 row's cos is not comparable to an fp64 row's, so a row that omits the
     dtype actively invites exactly that comparison. Stated rather than implied
-    -- the fp64 default rides along so a reader never has to infer it.
+    -- the fp64 arm is declared by name (this fixture runs the NumPy backend,
+    whose only arm is float64) so a reader never has to infer it.
     """
     w, bal, res = _planted()
     path = tmp_path / "probe.jsonl"
@@ -94,7 +95,7 @@ def test_probe_row_carries_the_compute_dtype(tmp_path, monkeypatch):
     monkeypatch.delenv("_fp_w", raising=False)
 
     block_recon._record_solver_probe(
-        "planted", w, bal, res, PTQConfig(solver_backend="numpy", rank=4)
+        "planted", w, bal, res, PTQConfig(solver_backend="numpy", rank=4, compute_dtype="float64")
     )
     block_recon._record_solver_probe(
         "planted", w, bal, res, PTQConfig(solver_backend="numpy", rank=4, compute_dtype="float32")

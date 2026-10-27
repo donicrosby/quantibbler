@@ -225,15 +225,16 @@ def test_tune_knob_is_passthrough_and_never_wrapper_chosen():
 def test_compute_dtype_knob_is_passthrough_and_recorded():
     """Precision is run identity, not a wrapper default.
 
-    Unset must mean UNSET on the command line -- the driver's own float64
-    default is the reference path -- while the announce, the launch.env and the
-    breadcrumb trail all state the effective value, because two arms whose
-    records differ only in precision cannot be told apart afterwards.
+    Unset must mean UNSET on the command line -- the driver's own bf16 default
+    is the pipeline's one-declared-dtype path -- while the announce, the
+    launch.env and the breadcrumb trail all state the effective value, because
+    two arms whose records differ only in precision cannot be told apart
+    afterwards.
     """
     unset = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048", OUT="/tmp/nq-dtype")
     assert unset.returncode == 0, unset.stderr
     assert "'--compute-dtype'" not in unset.stdout
-    assert "compute_dtype=float64" in unset.stderr
+    assert "compute_dtype=bf16" in unset.stderr
 
     fp32 = _launch(
         RANK="512", SOLVER="svd", SEQ_LEN="2048", OUT="/tmp/nq-dtype", COMPUTE_DTYPE="float32"

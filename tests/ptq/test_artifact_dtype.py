@@ -137,7 +137,7 @@ def _export(tmp_path: Path, remainder_dtype: str, **overrides) -> Path:
     out_dir = tmp_path / f"export-{remainder_dtype}"
     out_dir.mkdir(parents=True, exist_ok=True)
     kwargs = {
-        "embedding_f64": _EMBED,
+        "embedding_host": _EMBED,
         "model_id": "export-remainder-fixture",
         "eos_token_id": 3,
         "bos_token_id": 1,
@@ -145,7 +145,7 @@ def _export(tmp_path: Path, remainder_dtype: str, **overrides) -> Path:
         "geometry": _GEOMETRY,
         "inventory": _INVENTORY,
         "norm_weights": _NORMS,
-        "lm_head_f64": None,
+        "lm_head_host": None,
         "tied": True,
         "remainder_dtype": remainder_dtype,
     }
@@ -228,6 +228,11 @@ def _identity_args(remainder_dtype: str) -> types.SimpleNamespace:
         solver="svd",
         scale_dtype="float16",
         remainder_dtype=remainder_dtype,
+        # The pipeline's own compute dtype travels in the identity too; an
+        # artifact is only identified by naming the precision it was COMPUTED at
+        # as well as the one it stores at. Tracked with the remainder dtype here
+        # so the two arms of this fixture stay distinguishable.
+        compute_dtype=("bf16" if remainder_dtype == "bf16" else "float64"),
         factor_mode="svd",
         ablation="none",
         layer_scope="all",

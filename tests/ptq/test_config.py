@@ -7,7 +7,11 @@ import numpy as np
 import pytest
 
 from quantibbler.ptq.checkpoints import config_fingerprint
-from quantibbler.ptq.config import PTQConfig, StageHyper
+from quantibbler.ptq.config import (
+    NumPyBackendUnsupportedDtypeError,
+    PTQConfig,
+    StageHyper,
+)
 
 
 def test_scn_config_defaults():
@@ -46,14 +50,25 @@ def test_scn_config_defaults():
     assert cfg.cosine_schedule is True
 
 
-def test_scn_default_numerics_float64():
-    """default_numerics_float64: float64 is the default compute dtype and the
-    mapped numpy dtype follows it."""
+def test_scn_default_numerics_bf16():
+    """default_numerics_bf16 (qk-ptq ADDED requirement: "The pipeline SHALL
+    compute in bf16 by default with float32 and float64 as documented opt-in
+    only"): a bare PTQConfig is bf16, and bf16 has no NumPy scalar type — the
+    NumPy-backed property refuses by name rather than widening silently."""
     cfg = PTQConfig(
         solver_backend="numpy",
     )
-    assert cfg.compute_dtype == "float64"
-    assert cfg.np_compute_dtype == np.dtype(np.float64)
+    assert cfg.compute_dtype == "bf16"
+    with pytest.raises(NumPyBackendUnsupportedDtypeError):
+        _ = cfg.np_compute_dtype
+
+
+def test_scn_float64_opt_in():
+    """float64_opt_in: float64 stays the paper-regime reference — selectable,
+    never default — and maps to the NumPy oracle dtype by name."""
+    f64 = PTQConfig(solver_backend="numpy", compute_dtype="float64")
+    assert f64.compute_dtype == "float64"
+    assert f64.np_compute_dtype == np.dtype(np.float64)
 
 
 def test_scn_float32_opt_in():

@@ -38,6 +38,7 @@ from ._stats import (
 )
 from ._ste import _discrete_flip_pass, _tune_latent_ste
 from ._tuning import STE_JOINT_SCOPE, STE_RESCOPE_MARKER, TUNE_FP_LOSS_MARKER, _tune_fp
+from .accumulation import accumulation_np_dtype, torch_dtype
 from .bit_polish import greedy_polish
 from .calibration import LayerStatsBook, collect_stats, robust_diag
 from .config import PTQConfig
@@ -240,7 +241,11 @@ def reconstruct_block(
                 if entry.name in scope:
                     aligned.add(entry)
             stats_book = aligned
-    dt = cfg.np_compute_dtype
+    # ONE declared dtype for every tensor this stage creates. `np_compute_dtype`
+    # is deliberately NOT consulted: it refuses bf16 by name (NumPy has no bf16
+    # scalar type), and the torch dtype is the only mapping the pipeline's own
+    # storage contract needs.
+    _compute_dtype_torch = torch_dtype(cfg.compute_dtype)
     # Which stages this run carries (D-2/D-3). ``polish`` is the greedy bit-flip
     # stage: it is inherently discrete, so only a full binary run performs it.
     # ``refine`` is TuneLatentSTE — ``untuned-signs`` skips it by definition
@@ -353,7 +358,14 @@ def reconstruct_block(
             if recorder is not None:
                 recorder("tune_fp", **tune_fp_record)
 
-        w = linear.weight.detach().to(torch.float64).cpu().numpy()
+        # The target reaches the solver at the DECLARED host grade — float64 for a
+        # float64 run (unchanged), float32 for bf16/float32, which is bf16's exact
+        # widening and the only NumPy grade it has. Deriving it from compute_dtype
+        # keeps a bf16 run from being silently upcast at the solver's doorstep,
+        # which is the dtype laundering this change exists to remove.
+        w = np.ascontiguousarray(
+            to_host_np(linear.weight, dtype=accumulation_np_dtype(cfg.compute_dtype))
+        )
         d_in_t, d_out_t = robust_diag(entry.d_in_raw, entry.d_out_raw, tau=cfg.tau, gamma=cfg.gamma)
         # [NQ] B.1 Eq. 26 folds the preconditioner as a square root on each side:
         #   W~ = sqrt(D~_out) W sqrt(D~_in)
@@ -366,7 +378,8 @@ def reconstruct_block(
         d_in_t = np.sqrt(d_in_t)
         d_out_t = np.sqrt(d_out_t)
         w_tilde = (d_out_t[:, None] * w) * d_in_t[None, :]
-        w_tilde = w_tilde.astype(dt)
+        # No dtype cast here: the solver backend casts to the declared compute
+        # dtype at its own entry, and a NumPy cast could not express bf16 anyway.
         if cfg.solver == "svd":
             # Ablation-measured path: the truncated-SVD
             # warm start itself, fed through the identical balance+polish.
@@ -435,12 +448,19 @@ def reconstruct_block(
         s2_np = np.ascontiguousarray(s2_p)
         # The LIVE bias, i.e. whatever TuneFP just tuned for this target (the
         # pre-TuneFP value only for target 1, which no TuneFP pass precedes).
+        # The layer stores at the DECLARED compute dtype, named here rather than
+        # inferred from the latents: the polish path hands over exact +-1 BITS
+        # (int8), which are storage values, not a precision.
         bias0 = (
-            linear.bias.detach().to(torch.float64).clone()
+            linear.bias.detach().to(_compute_dtype_torch).clone()
             if linear.bias is not None
-            else torch.zeros(linear.weight.shape[0], device=linear.weight.device)
+            else torch.zeros(
+                linear.weight.shape[0], device=linear.weight.device, dtype=_compute_dtype_torch
+            )
         )
-        fac = FactorizedLinear(u0, v0, bias0, factor_mode=cfg.factor_mode)
+        fac = FactorizedLinear(
+            u0, v0, bias0, factor_mode=cfg.factor_mode, compute_dtype=_compute_dtype_torch
+        )
         # Scales initialized from Eq. 8 (with the latent scale folded in).
         with torch.no_grad():
             # copy_ requires matching devices; the numpy round trip through the CPU solver
