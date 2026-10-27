@@ -118,6 +118,20 @@
    computation at `compute_dtype`. Teacher logit cache at `compute_dtype`.
    Run `uv run pytest tests/ptq/test_tune_scales_kd.py -v`.
 
+- [ ] 4.6 **`ste_dtype_generic`: bf16 STE gradient recorded relative to the f64 reference + deviation event.**
+   At bf16 compute, run each layer's STE against a float64 reference, record the
+   per-linear gradient norm RELATIVE to that reference, and emit a
+   `ste_bf16_gradient_deviation` event when the relative deviation exceeds 1e-3.
+   Run `uv run pytest tests/ptq/ -k ste_dtype`.
+   **DEFERRED (declared, 2026-10-27):** the float64-reference run does not exist,
+   so `ste_bf16_gradient_deviation` has no producer and no reader; both STE test
+   files added only `compute_dtype` pins. This is a SECOND production STE pass
+   (an instrumentation change on the numerics path) and it intersects design.md
+   OQ-3, whose outcome — whether bf16 STE gradients need a float32 intermediate —
+   changes what the event should assert, so it is routed to the planner rather
+   than improvised here. The shipped record is `gradient_norm` at the declared
+   compute dtype. See design.md "Implementation crystallization" C4.
+
 ## Phase5: Device placement
 
 - [x] 5.1 **Per-stage device placement map.**

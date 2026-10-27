@@ -515,3 +515,30 @@ The accelerator cells of the dtype×device matrix (`{bf16, float32, float64} ×
 {GPU}`) cannot run in a CPU-only worker sandbox. `test_scn_admm_parity_gpu_cells_skip_with_reason`
 emits a documented skip event naming the reason and the deferral target; the
 cells run on the GPU lane card `t_f8e3b1d8` (host-side container discipline).
+
+### C4: `ste_dtype_generic` deferred — the bf16-relative-to-f64 STE gradient record is not implemented
+
+**Superseded claim (authored):** `ste_dtype_generic` (`specs/qk-ptq/spec.md`,
+STE-refinement requirement) asserts that at bf16 compute the per-linear STE
+gradient norm is recorded RELATIVE TO the float64 reference, and that a
+deviation exceeding 1e-3 relative triggers a `ste_bf16_gradient_deviation`
+event.
+
+**Measured (this implementation):** `_ste.py` records `gradient_norm` per
+linear at the declared compute dtype, and nothing more. There is NO float64
+reference run inside the stage and no relative-deviation record:
+`ste_bf16_gradient_deviation` has zero producers and zero readers tree-wide
+(grep over `src/` and `tests/`), and both STE test files' diffs are solely
+`compute_dtype` pins. The scenario is wholly unexecuted.
+
+**Disposition: DEFERRED, declared.** Satisfying the scenario means running each
+layer's STE a SECOND time at float64 purely to compute the comparison, inside
+the production stage, plus a report event and its test — an instrumentation
+change on the numerics path, not a pin. It also intersects **OQ-3**, which
+already frames the same measurement as a first-production-run obligation and
+whose outcome (whether bf16 STE gradients need a float32 intermediate) would
+change what the event should assert. It is therefore declared here and routed
+to the planner rather than improvised under this card. The shipped record —
+`gradient_norm` at the declared compute dtype — is honest as far as it goes;
+the relative-to-f64 record and the `ste_bf16_gradient_deviation` event are
+named debt, tracked by the open task row and by OQ-3.
