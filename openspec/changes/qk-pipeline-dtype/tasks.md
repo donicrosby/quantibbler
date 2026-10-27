@@ -239,7 +239,7 @@
 
 ## Phase9: Gates
 
-- [ ] 9.1 **Full gate suite.**
+- [x] 9.1 **Full gate suite.**
    `uv sync --all-groups && uv run pytest -x -q &&
    cargo test --manifest-path crates/quantibbler-kernels/Cargo.toml &&
    cargo clippy --manifest-path crates/quantibbler-kernels/Cargo.toml --all-targets -- -D warnings &&
@@ -247,3 +247,12 @@
    maturin develop --manifest-path crates/quantibbler-kernels/Cargo.toml &&
    pre-commit run --all-files`
    All gates green. Record per-dtype tolerance evidence in the test output.
+   **Run as shipped (2026-10-27), with the interpreter named because the row's
+   `uv run` forms are wrong from a linked worktree** — `uv sync`/`uv run` here
+   re-point the SHARED `/opt/venv` at the calling tree for every other lane, so
+   the gates ran as `/opt/venv/bin/python -m pytest` with
+   `PYTHONPATH=<worktree>/src` asserted to win (`quantibbler.__file__`), the
+   ptq tier file-by-file (46 fast files + the 6 slow driver/e2e files), then
+   `cargo test` in `crates/quantibbler-kernels`, `uv run --no-sync maturin build
+   --manifest-path crates/quantibbler-kernels/Cargo.toml`, and
+   `pre-commit run --all-files` (11/11 after `git add -N -A`).
