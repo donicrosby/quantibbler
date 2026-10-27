@@ -49,6 +49,7 @@ def greedy_polish(
     s2: np.ndarray,
     *,
     rounds: int = 6,
+    dtype: str = "float64",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Polish binary factors in place semantics (returns new arrays).
 
@@ -65,7 +66,12 @@ def greedy_polish(
             3-6 rounds reaches the local plateau on production geometry.
 
     Returns:
-        ``(ub, vb, s1, s2)`` with float64 ub/vb (+1/-1) and float64 scales.
+        ``(ub, vb, s1, s2)`` at the declared working ``dtype``: ub/vb as +1/-1
+        floats (never integer — see the coercion note below) and scales.
+
+    ``dtype`` is the pipeline's declared working grade (its accumulation dtype:
+        float32 under bf16, the dtype itself at float32/float64). ``float64``
+        is the default and is what the NumPy-oracle fixtures pin.
 
     Raises:
         ValueError: on shape mismatches or non-finite inputs.
@@ -77,11 +83,17 @@ def greedy_polish(
     # it must not be the thing that decides whether a GPU run can polish.
     from .solver_backend import to_host_np
 
-    w = np.ascontiguousarray(to_host_np(w), dtype=np.float64)
-    ub = to_host_np(ub).copy()
-    vb = to_host_np(vb).copy()
-    s1 = to_host_np(s1).copy()
-    s2 = to_host_np(s2).copy()
+    work = np.dtype(dtype)
+    w = np.ascontiguousarray(to_host_np(w), dtype=work)
+    # The bits arrive as int8 (the packed-sign storage type) and MUST be floated
+    # before any matmul here: NumPy's integer `@` accumulates in the INPUT dtype,
+    # so ``ub @ vb.T`` at int8 overflows past rank 127 (measured: 300 ones ->
+    # "44"). The whole objective is a product of these bits, so an int8 Gram is
+    # silently wrong for every production rank, not merely less precise.
+    ub = np.asarray(to_host_np(ub), dtype=work).copy()
+    vb = np.asarray(to_host_np(vb), dtype=work).copy()
+    s1 = np.asarray(to_host_np(s1), dtype=work).copy()
+    s2 = np.asarray(to_host_np(s2), dtype=work).copy()
     if w.ndim != 2:
         raise ValueError(f"target must be 2-D, got {w.shape}")
     dout, din = w.shape

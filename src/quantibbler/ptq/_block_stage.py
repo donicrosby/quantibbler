@@ -10,6 +10,7 @@ every test that patches ``block_recon.reconstruct_block`` keeps working.
 from __future__ import annotations
 
 import copy
+import time
 
 import numpy as np
 import torch
@@ -38,7 +39,12 @@ from ._stats import (
 )
 from ._ste import _discrete_flip_pass, _tune_latent_ste
 from ._tuning import STE_JOINT_SCOPE, STE_RESCOPE_MARKER, TUNE_FP_LOSS_MARKER, _tune_fp
-from .accumulation import accumulation_np_dtype, accumulation_spec, torch_dtype
+from .accumulation import (
+    accumulation_np_dtype,
+    accumulation_spec,
+    accumulation_torch_dtype,
+    torch_dtype,
+)
 from .bit_polish import greedy_polish
 from .calibration import LayerStatsBook, collect_stats, robust_diag
 from .config import PTQConfig
@@ -124,6 +130,10 @@ def reconstruct_block(
     # --- Capture (Algorithm 1 lines 9-10): quantized-prefix inputs and fp
     # teacher targets. When x_b is not given, this is the first block and
     # the calibration data itself is the (identity-prefix) input.
+    # Per-stage row time (qk-pipeline-dtype 5.5): every stage appends its own
+    # wall seconds to its record, so the per-stage aggregate the report quotes
+    # against the ~8h v6-class baseline is measured, never inferred.
+    t_capture = time.perf_counter()
     if x_b is None:
         x_b = torch.cat(batches, dim=0)
         if x_b.dtype.is_floating_point:
@@ -190,6 +200,7 @@ def reconstruct_block(
             teacher_source=teacher_source,
             teacher_fingerprint=teacher_fingerprint,
             capture_index=capture_index,
+            elapsed_s=time.perf_counter() - t_capture,
         )
 
     # --- Step 1: TuneFP (line 12) is fired INSIDE the factorization loop
@@ -220,10 +231,15 @@ def reconstruct_block(
         # (App. C :3011, CE through the model) — a real solve supplies the
         # Phase-1 book; direct callers supply a documented loss-bearing
         # cotangent (the spec's ``0.5*||z - t||**2`` factory shape).
+        # The Phase-1 sum-of-squares runs at the DECLARED accumulation grade:
+        # the statistics are what the preconditioner and the loss weight are
+        # built from, and a bf16 accumulator would carry 7-bit mantissa loss
+        # into both.
+        _accum_torch = accumulation_torch_dtype(cfg.compute_dtype)
         if x_b.dtype == torch.float64:
             # The float64 reference path (executable-spec fixtures): one
             # whole-batch backward, bit-identical to the landed behavior.
-            stats_book = collect_stats(block, [x_b], cotangent=cotangent)
+            stats_book = collect_stats(block, [x_b], cotangent=cotangent, accum_dtype=_accum_torch)
         elif x_b.dtype.is_floating_point:
             # Lower-precision (real-model) float activations: row-chunked
             # backwards through the block — the statistic definition is
@@ -231,9 +247,16 @@ def reconstruct_block(
             # once per batch), but a whole-batch backward retains attention
             # graphs for every row at once (~15GB on a 28-layer bf16 trunk)
             # and OOMs under container caps.
-            stats_book = collect_stats(block, [x_b], chunk_rows=4, cotangent=cotangent)
+            stats_book = collect_stats(
+                block, [x_b], chunk_rows=4, cotangent=cotangent, accum_dtype=_accum_torch
+            )
         else:
-            stats_book = collect_stats(_input_adapter(block, batches), [x_b], cotangent=cotangent)
+            stats_book = collect_stats(
+                _input_adapter(block, batches),
+                [x_b],
+                cotangent=cotangent,
+                accum_dtype=_accum_torch,
+            )
         scope = {n for n, _ in quantizable_linears}
         if any(entry.name not in scope for entry in stats_book):
             aligned = LayerStatsBook()
@@ -325,6 +348,7 @@ def reconstruct_block(
     # and a numpy-arm run silently mislabelled about the arm its balance used.
     # Env is process-global, so one resolution per block covers every layer.
     balance_backend, _balance_source = solver_backend_provenance(cfg.solver_backend)
+    t_solve = time.perf_counter()
     for idx, (entry, (name, linear)) in enumerate(
         zip(stats_book, quantizable_linears, strict=False)
     ):
@@ -366,7 +390,13 @@ def reconstruct_block(
         w = np.ascontiguousarray(
             to_host_np(linear.weight, dtype=accumulation_np_dtype(cfg.compute_dtype))
         )
-        d_in_t, d_out_t = robust_diag(entry.d_in_raw, entry.d_out_raw, tau=cfg.tau, gamma=cfg.gamma)
+        d_in_t, d_out_t = robust_diag(
+            entry.d_in_raw,
+            entry.d_out_raw,
+            tau=cfg.tau,
+            gamma=cfg.gamma,
+            dtype=accumulation_spec(cfg.compute_dtype),
+        )
         # [NQ] B.1 Eq. 26 folds the preconditioner as a square root on each side:
         #   W~ = sqrt(D~_out) W sqrt(D~_in)
         # Folding the raw diagonals charges the scales' magnitude twice across the
@@ -434,6 +464,7 @@ def reconstruct_block(
                 to_host_np(bal.s1),
                 to_host_np(bal.s2),
                 rounds=cfg.polish_rounds,
+                dtype=accumulation_spec(cfg.compute_dtype),
             )
             # Exact refold: latents = polished bits themselves (sign(latent) is
             # then a fixed point — STE cannot and need not move them), scales
@@ -464,10 +495,9 @@ def reconstruct_block(
         else:
             # Named device from the owning weight (test_device_constructors is
             # the grep that keeps this class unrepresentable).
-            _bias_dev = linear.weight.device
-            bias0 = torch.zeros(
-                linear.weight.shape[0], device=_bias_dev, dtype=_compute_dtype_torch
-            )
+            _dev = linear.weight.device
+            _rows = linear.weight.shape[0]
+            bias0 = torch.zeros(_rows, device=_dev, dtype=_compute_dtype_torch)
         fac = FactorizedLinear(
             u0, v0, bias0, factor_mode=cfg.factor_mode, compute_dtype=_compute_dtype_torch
         )
@@ -497,7 +527,11 @@ def reconstruct_block(
         # The polish count travels in the existing event: an ablation's log must
         # PROVE zero polish invocations, and adding a new event name would
         # change the stage sequence every existing consumer asserts.
-        recorder("lb_admm", polish_rounds=cfg.polish_rounds if polish else 0)
+        recorder(
+            "lb_admm",
+            polish_rounds=cfg.polish_rounds if polish else 0,
+            elapsed_s=time.perf_counter() - t_solve,
+        )
 
     # --- Step 3 record (line 19), emitted once per block after the
     # factorization loop so the stage sequence every existing consumer
@@ -642,6 +676,7 @@ def reconstruct_block(
 
     # --- Extraction and packing (lines 20-23).
     layers: list[QuantizedLayerState] = []
+    t_pack = time.perf_counter()
     for name, fac in facs.items():
         # Bits are made only for a binary run. In fp mode extract_and_pack
         # refuses outright (D-5), so the run produces no fabricated layer
@@ -675,6 +710,7 @@ def reconstruct_block(
             layers=sorted(facs),
             extracted=len(layers),
             factor_mode=cfg.factor_mode,
+            elapsed_s=time.perf_counter() - t_pack,
         )
 
     return BlockReconResult(layers)

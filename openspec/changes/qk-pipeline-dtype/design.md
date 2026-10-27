@@ -191,15 +191,52 @@ confirm these declared bounds per dtype.
 
 **dtype×device matrix provenance:** The six-cell matrix `{bf16, float32, float64} × {GPU, CPU}` cannot be fully proven on CI (GPU cells require an accelerator). The CPU cells SHALL run always (they are the torch CPU backend path). The GPU cells SHALL run on the designated GPU hardware lane: the repo's rocm-family image `quantibbler-ptq:rocm-official` (digest-pinned) on the Strix Halo box (gfx1151), with exact skip-count discipline — every skipped GPU cell MUST produce a documented skip event naming the reason (no GPU present). The first fire on the GPU lane proves the three accelerator cells.
 
-### Initial hardcoded-dtype site enumeration
+### Hardcoded-dtype site enumeration (task 6.1, populated)
 
-The pre-change grep against the full pattern set (`.double()`, `torch.float32`, `torch.float64`, `np.float32`, `np.float64`, `astype(…float…)`) SHALL produce an exact inventory. Every site maps to one of three resolution classes:
+The grep against the full pattern set
+(`grep -rnE '\.double\(\)|torch\.float32|torch\.float64|np\.float32|np\.float64|astype\(.*float' src/quantibbler/ptq/ tools/quantize_hf_model.py`)
+is the evidence gate. Resolution classes:
 
-- **(a) Parametric:** Site uses `compute_dtype` or `accum_dtype` from config.
-- **(b) Accumulation-site:** Named accumulation dtype with arithmetic justification in a comment.
-- **(c) Parity-oracle:** Deliberate float64 literal in the NumPy parity path (`solver_backend.py:64`, unit tests, reference fixtures) carrying an explicit `# parity-oracle: float64 by design` comment.
+- **(a) Parametric:** the site uses the declared `compute_dtype` / accumulation
+  dtype, or is the declaration/mapping itself.
+- **(b) Accumulation-site:** a named accumulation/host grade with the arithmetic
+  or contract justification in the comment beside it.
+- **(c) Parity-oracle:** a deliberate float64 literal in the NumPy parity path,
+  a unit test, or a reference fixture.
 
-Known high-count sites: `_factorized.py:91,92,95` `.double()` → (a), `solver_backend.py:64` `dtype=np.float64` → (c), `config.py:24,156-158,246-248` compute f64 defaults → (a). The full enumeration lives in this section at implementation time — task 6.1 populates it with every resolved line number.
+`tools/quantize_hf_model.py` returns **zero** hits: every dtype decision on the
+driver path is the declared one.
+
+| Site | Class | Note |
+|------|-------|------|
+| `calibration.py` `_TINY` | (b) | named dead-channel floor constant |
+| `calibration.py` `_accumulator_dtype` (`torch.float32`) | (a) | the bf16→float32 accumulation mapping itself |
+| `calibration.py` `_to_numpy_stat` | (b) | statistic STORAGE schema boundary (documented) |
+| `solver_backend.py` `host_np_dtype` (`np.float32`) | (a) | the declared host-grade map itself |
+| `_factorized.py` accelerator SVD (`torch.float32`) | (b) | named float32 accumulation for `torch.linalg.svd` |
+| `_factorized.py` NumPy SVD init (`torch.float64`) | (c) | `# parity-oracle: float64 by design` |
+| `_factorized.py` `check_layer_magnitude` | (b) | catastrophe gate: Frobenius ratio over the whole block |
+| `lb_admm.py` `DEFAULT_SCALE_FLOOR` | (b) | named dead-channel floor constant |
+| `api.py` `scale_dtype` dispatch | (a) | the declared `config.scale_dtype` storage knob |
+| `api.py` `_phase1_chunk_rows`, `_block_stage` branch | (a) | dtype comparisons, not casts |
+| `api.py` finiteness reads, `deserialize` loads | (b) | validation/load at the widest host grade |
+| `scale_calib.py` KD logit cache dtype | (a) | derived from the measured logit dtype |
+| `_stats.py` weight fingerprint digest | (b) | identity canonicalization: the digest must not depend on the run's dtype |
+| `_stats.py` loss-weight host vectors | (b) | host statistic, cast to the compute dtype at the loss site |
+| `checkpoints.py` state archive + torch reload | (b) | persisted-payload storage schema (int8 bits, float64 scales) |
+| `_probe.py:160` | — | comment text only, no call site |
+| `e2e.py` tiny gate fixture | (c) | reference fixture |
+
+**Flagged for the planner (one delta).** Three of the (b) rows above are the
+SAME shape and the requirement's three-class vocabulary does not name it: a
+**persisted-payload / identity-canonicalization grade** (`checkpoints.py`'s
+archive schema, `_stats.py`'s weight-fingerprint digest, `api.py`'s load path).
+These are not compute paths — a checkpoint's float64 scales and a fingerprint's
+float64 canonical form are BYTE CONTRACTS, and re-grading them to the compute
+dtype would move the resume admission and the identity digest without any
+numerics changing. They are enumerated as (b) here because (b) is the closest of
+the three; the class list needs a fourth entry ("storage/identity grade, not a
+compute path") or an explicit exclusion, and that is a spec change with an owner.
 
 ## Architecture: good-guest resource discipline
 
@@ -367,3 +404,75 @@ users who want bf16-quality pipeline numerics with fp32-precision artifact
 sidecars (e.g. for bit-exact comparison against pre-bf16 artifacts). The
 default tracking is the user ruling's intent; the separate knob preserves the
 declared-separation principle from `qk-artifact-dtype`.
+
+## Implementation crystallization (2026-10-27)
+
+Dated record of what the implementation found, per the repo's
+"behavior change lands with its crystallization entry" rule. Measured numbers
+replace authoring-time estimates; superseded statements are kept beside them so
+they cannot be quoted as current.
+
+### C1: the `admm_parity_per_dtype` tolerance cells do NOT reproduce as written
+
+**Superseded claim (authored):** `admm_parity_per_dtype` — the reconstruction
+cosine against the float64 NumPy reference satisfies **≥0.99 (bf16)**,
+**≥0.9999 (float32)**, **≥1−1e-12 (float64)**; and the per-dtype tolerances table
+above (1e-2 / 1e-4 / 1e-12) is "declared, not calibrated".
+
+**Measured (torch 2.14.1+cpu, explicit `QUANTIBBLER_DEVICE=cpu`, 3 seeds,
+`admm_max_iter=1200`, converged arms):** the converged-output cosine does not
+separate dtypes at all — including the float64 arm against the float64 NumPy
+reference:
+
+| Arm | 1 − cos vs converged float64 NumPy reference (3 trials) |
+|-----|--------------------------------------------------------|
+| bf16 | 0.32 – 0.68 |
+| float32 | 0.23 – 0.64 |
+| **float64 (torch)** | **0.25 – 0.68** |
+
+The float64-torch vs float64-NumPy pair is the control: it differs by 0.25–0.68
+at the CONVERGED point while agreeing to 2.5e-15 at the first update. The
+SVID proxy is a sign-quantized rank-1 projection, so the iterate is a discrete
+sign pattern: round-off differences between two backends select among
+near-equal discrete optima, and hundreds of iterations amplify the selection.
+A converged-output cosine therefore measures **basin selection**, not dtype
+fidelity, and cannot carry any per-dtype bound in either direction — the cells
+are not merely unsatisfied, they are not a measurement of the thing they name.
+Resolution: the reachable metric is the EARLY trajectory against the reference,
+which does separate the dtypes at their declared classes:
+
+| compute dtype | measured | declared class |
+|---------------|----------|----------------|
+| bf16 | 1.0e-3 | 1e-2 (holds) |
+| float32 | 3.8e-7 | 1e-4 (holds) |
+| float64 | 2.5e-15 | 1e-12 (holds) |
+
+(metric: relative difference of the FIRST ADMM update residual vs the float64
+NumPy reference; `tests/ptq/test_pipeline_dtype_generic.py::test_scn_admm_parity_cpu_cell`)
+
+Also measured, same fixture: all three dtypes converge within the budget
+(bf16 344 / float32 347 / float64 360 iterations at `admm_max_iter=900`), so the
+budget question is not what separates the cells.
+
+**Owner: planner.** This is a measurement row, so the numbers above replace the
+authored ones here and in the tolerance table; the `admm_parity_per_dtype`
+scenario's metric in `specs/qk-ptq/spec.md` (a converged-output cosine bound)
+needs a ruling — either the scenario moves to the early-trajectory metric, or it
+declares the basin-selection caveat explicitly. The same applies to
+`accumulation_identity_at_higher_dtypes`' float64-torch clause.
+
+### C2: the polish entry was an int8 Gram (fixed here)
+
+`greedy_polish` receives the binary factors as int8 (their storage type) and
+formed `ub @ vb.T` at int8. NumPy's integer `@` accumulates in the INPUT dtype,
+so the Gram overflows past rank 127 (measured: 300 ones → `44`). Every
+production rank (>127) silently polished against a corrupted objective. The
+dtype-generic port floats the bits at the declared work grade, which fixes it;
+the tiny-rank fixtures (r ≤ 8) never overflowed, which is why it shipped.
+
+### C3: GPU cells deferred, not dropped
+
+The accelerator cells of the dtype×device matrix (`{bf16, float32, float64} ×
+{GPU}`) cannot run in a CPU-only worker sandbox. `test_scn_admm_parity_gpu_cells_skip_with_reason`
+emits a documented skip event naming the reason and the deferral target; the
+cells run on the GPU lane card `t_f8e3b1d8` (host-side container discipline).
