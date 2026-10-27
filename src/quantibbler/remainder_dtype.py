@@ -94,7 +94,14 @@ def host_array(values, dtype: str) -> np.ndarray:
 
     Kept here, beside the byte contract, so every exporter reaches the bytes the
     same way — the dtype vocabulary and the hop that feeds it stay one story.
+
+    ``dtype`` is the artifact's declared STORAGE grade, not this hop's grade:
+    the host array is always float32 (a bf16 sidecar is written from it by
+    :func:`encode`). It is still read here — through :func:`itemsize`, the same
+    refusal ``encode``/``decode`` use — so an undeclared or misspelled token is
+    refused by name at this boundary instead of riding silently into the writer.
     """
+    itemsize(dtype)
     if hasattr(values, "detach"):  # torch tensor: widen then move to host
         return values.detach().to(torch.float32).cpu().numpy()
     return np.asarray(values, dtype=np.float32)

@@ -151,8 +151,9 @@ def test_scn_admm_parity_gpu_cells_skip_with_reason():
 
 def test_scn_per_stage_timing_recorded():
     """per_stage_timing_recorded: every stage appends its own wall seconds."""
+    from test_block_recon import _calib, _fixed_cot, _TinyBlock
+
     from quantibbler.ptq.block_recon import reconstruct_block
-    from tests.ptq.test_block_recon import _calib, _fixed_cot, _TinyBlock
 
     block = _TinyBlock(8, seed=3)
     batches = _calib(8)
@@ -180,8 +181,9 @@ def test_scn_per_stage_timing_recorded():
 
 def test_scn_per_stage_device_from_module():
     """per_stage_device_from_module: the stage's device is the module's own."""
+    from test_block_recon import _calib, _fixed_cot, _TinyBlock
+
     from quantibbler.ptq.block_recon import reconstruct_block
-    from tests.ptq.test_block_recon import _calib, _fixed_cot, _TinyBlock
 
     block = _TinyBlock(8, seed=4)
     batches = _calib(8)

@@ -332,7 +332,7 @@ class NumpyBackend(_BaseBackend):
 
             raise NumPyBackendUnsupportedDtypeError(
                 "the NumPy backend is the float64 parity oracle and has no bf16 "
-                "scalar type; bf16 and float32 compute require the torch backend "
+                "scalar type; bf16 compute requires the torch backend "
                 "(solver_backend='torch')"
             )
         return self._m.dtype(spec)

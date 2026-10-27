@@ -84,6 +84,14 @@ def greedy_polish(
     from .solver_backend import to_host_np
 
     work = np.dtype(dtype)
+    if work not in (np.dtype(np.float32), np.dtype(np.float64)):
+        raise ValueError(
+            f"greedy_polish works at an accumulation grade; {dtype!r} is not a "
+            "floating accumulation dtype (expected float32 or float64). An "
+            "integer work grade is exactly the int8-Gram behaviour this path "
+            "floats the bits to avoid, so the refusal is owned here rather than "
+            "trusted to the caller."
+        )
     w = np.ascontiguousarray(to_host_np(w), dtype=work)
     # The bits arrive as int8 (the packed-sign storage type) and MUST be floated
     # before any matmul here: NumPy's integer `@` accumulates in the INPUT dtype,

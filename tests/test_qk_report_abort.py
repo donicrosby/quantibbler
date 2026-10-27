@@ -114,6 +114,10 @@ _ABORT_IDENTITY_VALUES: dict[str, object] = {
     "model": "Qwen/Qwen3-0.6B",
     "rank": 1,
     "solver": "svd",
+    # The ONE dtype the run computes in. Carried on the abort path too: a bare
+    # launch computes at the driver default (bf16), which is what the recorded
+    # abort run carried, so the mirror must cover the key rather than omit it.
+    "compute_dtype": "bf16",
     "scale_dtype": "float32",
     "remainder_dtype": "fp32",
     "seq_len": 64,
@@ -158,6 +162,20 @@ _ABORT_IDENTITY_VALUES: dict[str, object] = {
     # The emitted container (qk-artifact-blob BW-1). An aborted run exports
     # nothing, so the record carries the requested format with nulls.
     "container": {"format": "blob", "path": None, "sha256": None},
+    # Good-guest evidence travels on every exit path (the driver records the
+    # bounds it APPLIED, derived from host state), so the abort mirror carries
+    # the key too. Values are the recorded run's host reading, hand-pinned like
+    # the rest of the table.
+    "resources": {
+        "good_guest": True,
+        "cpu_cores": 8,
+        "loadavg_1m": 0.12,
+        "threads": 6,
+        "threads_reason": "light",
+        "torch_threads": 6,
+        "gpu_memory_fraction": 0.85,
+        "unified_memory_device": False,
+    },
 }
 
 

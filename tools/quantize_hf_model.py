@@ -1447,7 +1447,7 @@ def main() -> int:
                     ratio=ratio,
                 )
 
-    _stage("[4/6] PTQ: bf16 model, per-layer float64 solver (block recon + scale KD)")
+    _stage(f"[4/6] PTQ: {args.compute_dtype} compute, per-layer solver (block recon + scale KD)")
     _bread("entering quantize_model: block recon first, then KD scale calibration")
     solver_t = time.time()
     aborted: PrefixProbeAbort | None = None
@@ -1661,6 +1661,13 @@ def main() -> int:
             "model": args.model,
             "rank": args.rank,
             "solver": prov["solver"],
+            # The ONE dtype the pipeline computed in, and the good-guest bounds
+            # actually applied. Both are identity fields shared by EVERY exit
+            # path (`_run_identity`): a completion report that omitted them
+            # would not have the same key set as the abort and stage-failure
+            # reports, which spread the helper directly.
+            "compute_dtype": args.compute_dtype,
+            "resources": identity["resources"],
             "scale_dtype": prov["scale_dtype"],
             "remainder_dtype": args.remainder_dtype,
             "seq_len": args.seq_len,

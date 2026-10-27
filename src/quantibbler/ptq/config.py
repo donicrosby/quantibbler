@@ -43,11 +43,11 @@ _LOSS_WEIGHT_MODES = ("terminal_grad", "uniform")
 class NumPyBackendUnsupportedDtypeError(RuntimeError):
     """A compute dtype the NumPy backend cannot represent was requested.
 
-    The NumPy backend is the float64 parity oracle, and NumPy has no bfloat16
-    scalar type at all — so bf16 compute (and the float32 arm, which the oracle
-    does not carry) must be refused BY NAME rather than mapped to a nearest
-    neighbour. A silent mapping would make a bf16 run execute and report at a
-    different precision than its own provenance claims.
+    The NumPy backend carries float32 and float64 by name (it is the float64
+    parity oracle), but has no bfloat16 scalar type at all — so bf16 compute
+    must be refused BY NAME rather than mapped to a nearest neighbour. A silent
+    mapping would make a bf16 run execute and report at a different precision
+    than its own provenance claims.
     """
 
 
@@ -61,9 +61,9 @@ def np_compute_dtype_spec(compute_dtype: str) -> str:
     if compute_dtype == "bf16":
         raise NumPyBackendUnsupportedDtypeError(
             "compute_dtype='bf16' has no NumPy scalar type: the NumPy backend is "
-            "the float64 parity oracle and cannot represent bf16. bf16 and "
-            "float32 compute require the torch backend; request "
-            "solver_backend='torch', or declare compute_dtype='float64'."
+            "the float64 parity oracle and cannot represent bf16. bf16 compute "
+            "requires the torch backend; request solver_backend='torch', or "
+            "declare compute_dtype='float64' (or 'float32')."
         )
     if compute_dtype not in ("float32", "float64"):
         raise ValueError(f"compute_dtype must be one of {_COMPUTE_DTYPES}, got {compute_dtype!r}")
