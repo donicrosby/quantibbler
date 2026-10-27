@@ -234,7 +234,7 @@ The `remainder_dtype` for export SHALL default to the mapping of compute_dtype (
 
 ### Requirement: The bias path SHALL carry bias tensors at the declared compute_dtype through every stage
 
-Bias tensors SHALL be stored at `compute_dtype`, carried through solver and STE at `compute_dtype`, and exported at the declared remainder dtype. No stage SHALL zero or drop the bias.
+Bias tensors SHALL be stored at `compute_dtype`, carried through solver and STE at `compute_dtype`, and exported at the declared remainder dtype. No stage SHALL zero or drop the bias a module declares.
 
 #### Scenario: bias_preserved_through_pipeline
 
@@ -243,8 +243,13 @@ Bias tensors SHALL be stored at `compute_dtype`, carried through solver and STE 
 
 #### Scenario: bias_zero_assertion_gate
 
-- **WHEN** the e2e gate quantizes a tiny model with non-zero biases
-- **THEN** the exported artifact's bias vectors are all non-zero, and a zero-bias artifact fails the gate even if PPL passes
+- **WHEN** the e2e gate quantizes a tiny model in which at least one quantized linear declares a bias (`linear.bias is not None` — attention_bias or MLP bias present) with a non-zero source value
+- **THEN** every such linear's exported bias is non-zero, and an artifact whose declared-bias linears all carry exactly-zero (or absent) bias fails the gate even if the PPL ratio and every other gate condition pass
+
+#### Scenario: bias_zero_assertion_gate_not_fired_on_legit_zero_biases
+
+- **WHEN** the quantized model's architecture declares no tunable bias on any quantized linear (`bias=None` everywhere — the Qwen3-0.6B class with `attention_bias=false` and no MLP bias), or declares biases whose source values are all exactly zero
+- **THEN** the gate performs no bias-non-zero assertion, an artifact whose bias fields are all exactly zero passes the gate, and the bias-free outcome is a present, exactly-zero field rather than an omitted one
 
 #### Scenario: bias_dtype_tracks_compute_dtype
 

@@ -542,3 +542,50 @@ to the planner rather than improvised under this card. The shipped record —
 `gradient_norm` at the declared compute dtype — is honest as far as it goes;
 the relative-to-f64 record and the `ste_bf16_gradient_deviation` event are
 named debt, tracked by the open task row and by OQ-3.
+
+### C5: `bias_zero_assertion_gate`'s zero-bias-fails arm re-ruled — the gate fires on dropped bias, never on bias-free architecture
+
+**Superseded claim (authored):** `bias_zero_assertion_gate`
+(`specs/qk-ptq/spec.md`) asserted "a zero-bias artifact fails the gate even if
+PPL passes" — a clause whose WHEN carries no architecture discriminator.
+
+**Measured/exonerated (t_59815b89, recorded as OQ-1 above):** Qwen3-0.6B is
+architecturally bias-free (`attention_bias=false`, no MLP bias); its artifact's
+196/196 exactly-zero bias fields are legit-zero math — the faithful
+serialization of absence, born at `_block_stage.py:438-441` and carried through
+journal, checkpoints, and wire. The clause as written would REFUSE exactly this
+artifact class, so it is not an implementable assertion — nearly every fixture,
+including the e2e gate's own `TinyGateModel` (declared biases whose source
+values are zeroed at construction, `e2e.py:120-129`), would fail it.
+
+**Ruling (2026-10-27, reviewer R2, comment 477):** the gate's bias clause is a
+dropped-bias detector, not a zero-bias detector. It fires iff a quantized
+linear DECLARES a bias in the live model (`linear.bias is not None`) whose
+SOURCE value is non-zero, and that linear's exported bias field is exactly zero
+(or absent) — "bias SHOULD exist but didn't arrive". It never fires on
+zero-source declared biases (a zeroed-at-source bias carries zero faithfully;
+there is nothing to drop, and no observable difference) and performs no bias
+assertion at all for bias-free architectures, whose all-zero fields are the
+expected outcome.
+
+*Spec amendment (this commit):* the scenario's WHEN is re-scoped to the
+architecture-declared fire condition with PPL-independence preserved, and a
+second scenario pins the legit-zero pass arm naming the Qwen3-0.6B trait
+(`attention_bias=false`, no MLP bias). The requirement body's "no stage SHALL
+zero or drop the bias" is re-scoped to "a bias the module declares".
+
+**Implementing test acceptance shape (corrected):** both arms test through
+`run_e2e_gate` (the gate holds the live model at quantize time, so the declared
+bias is readable there). Fire arm — a corruption-injection pass in the
+mechanism of the existing `flip_one_bit` self-test: a bias-bearing fixture (a
+`TinyGateModel` variant whose linear biases are seeded non-zero, mirroring the
+bias-bearing fixtures in `tests/ptq/test_bias_carry.py`) quantizes green with
+every declared-bias linear's exported bias non-zero; a second run zeroing the
+exported bias field while logits stay intact MUST fail the gate
+(`pytest.raises`, the shape of `test_scn_e2e_gate_detects_corruption`). Pass
+arm — the stock `TinyGateModel` (declared, zero-source biases) and a
+bias-free variant (`bias=False` linears) both pass with all-zero bias fields;
+the pack-boundary contract for the absent-bias case is already pinned by
+`test_biasless_block_packs_zero_bias_v2` (PRESENT, exactly-zero v2 field). No
+unit gate loads a real Qwen3 checkpoint; `attention_bias=false` is the config
+trait the discriminator reads off the live model's modules.
