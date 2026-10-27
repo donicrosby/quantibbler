@@ -27,8 +27,8 @@
 - [ ] 2.2 **FactorizedLinear.from_weight dtype-generic.**
   SVD init: on GPU, use `torch.linalg.svd` at **float32** accumulation
   dtype (justified accumulation site — bf16 SVD is platform-dependent); on
-  CPU, use NumPy float64 path then cast. The NumPy path stays the parity
-  reference. Run `uv run pytest tests/ptq/test_factorized.py -v`.
+  CPU, use NumPy float64 path then cast. The NumPy path stays the reference
+  at the same declared dtype. Run `uv run pytest tests/ptq/test_factorized.py -v`.
 
 - [ ] 2.3 **_factor_terms at compute_dtype.**
   The activation_dtype parameter equals `compute_dtype`. The STE passthrough
@@ -145,7 +145,7 @@
    The grep command (full pattern set):
    `grep -rnE '\.double\(\)|torch\.float32|torch\.float64|np\.float32|np\.float64|astype\(.*float' src/quantibbler/ptq/ tools/quantize_hf_model.py`
    Zero unjustified hits. Each site maps to one of three resolution classes:
-   (a) parametric, (b) accumulation-site, (c) parity-oracle. Populate the
+   (a) parametric, (b) accumulation-site, (c) reference-path. Populate the
    enumeration in design.md's crystallization section. Run after Phase4.
 
 - [ ] 6.2 **Driver: remove float64 hardcodes in export path.**

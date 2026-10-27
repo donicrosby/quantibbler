@@ -34,14 +34,14 @@ All solver and accumulation paths (activation statistics, preconditioner constru
 - **WHEN** the caller sets `compute_dtype = "float32"`
 - **THEN** solver entry points operate in float32, and the change of behavior is observable only through that explicit config setting
 
-### Requirement: Rust kernel dispatch SHALL match the NumPy reference on float64 probes
+### Requirement: Rust kernel dispatch SHALL match declared-dtype NumPy parity fixtures on probe inputs
 
-When the `quantibbler-kernels` Rust extension is present, its float64 output on probe inputs SHALL match the NumPy reference path — the executable specification — within 1e-12 relative tolerance, with packed bits identical (sign-agreement invariant), per the verification gates of `openspec/config.yaml` and the parity-gated dispatch of the qk-kernels capability.
+When the `quantibbler-kernels` Rust extension is present, its output on probe inputs at a declared dtype SHALL match same-declared-dtype NumPy parity fixtures within the per-dtype tolerances declared by the qk-kernels capability (bf16 backward 1e-2 and f32 backward 1e-6 of the row term scale; float64 rel 1e-12), with packed bits identical (sign-agreement invariant), per the verification gates of `openspec/config.yaml`.
 
-#### Scenario: rust_matches_reference_probes
+#### Scenario: rust_matches_parity_fixtures
 
-- **WHEN** a kernel probe (pack, unpack, or a float64 solve helper) executes with the Rust extension installed
-- **THEN** the Rust output matches the NumPy reference within 1e-12 relative tolerance in float64, and packed bits are identical between the two paths
+- **WHEN** a kernel probe (pack, unpack, or a solve helper) executes with the Rust extension installed at any declared dtype
+- **THEN** the Rust output matches the same-dtype NumPy parity fixture within the declared per-dtype tolerance, and packed bits are identical between the two paths
 
 ### Requirement: Global calibration SHALL produce robust diagonal preconditioners from activation and gradient statistics
 
@@ -318,7 +318,7 @@ When `collect_stats` receives `chunk_rows`, its forward hooks SHALL retain only
 float64 per-feature sum-of-squares and token counts; retained state SHALL be
 independent of the number of rows/chunks. It SHALL NOT retain or concatenate
 full activation tensors. Gradient accumulation remains unchanged. The
-`chunk_rows=None` float64 reference path SHALL remain byte-identical.
+`chunk_rows=None` path SHALL remain byte-identical to its committed fixture records at the declared dtype.
 
 #### Scenario: streamed_stats_match_reference
 

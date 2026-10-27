@@ -22,7 +22,7 @@ Lane order is load-bearing: this change gates on Lane 0 (`qk-nanoquant-alignment
 
 4. **Sqrt fold at W̃ formation.** `W̃ = sqrt(d_out) ⊙ W ⊙ sqrt(d_in)`, with the SAME sqrt'd vectors handed to `magnitude_balance` for the Eq. 9 recovery — one shared definition. `robust_diag` keeps applying Eq. 3 shrinkage to the clipped statistics and does NOT sqrt.
 
-Preserved by construction: float64 discipline throughout, zero-variance floors (`_TINY`), the `chunk_rows` streamed path's O(feature-width) state and no-materialization pin, and the reference/stream parity scenario at 1e-12 — it stays green under the NEW statistics.
+Preserved by construction: accumulation at the pipeline's declared numerics precision, zero-variance floors (`_TINY`), the `chunk_rows` streamed path's O(feature-width) state and no-materialization pin, and the reference/stream parity scenario at 1e-12 — it stays green under the NEW statistics.
 
 ## Impact
 

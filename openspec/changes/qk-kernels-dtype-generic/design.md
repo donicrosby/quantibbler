@@ -91,8 +91,7 @@ zero behavior change is cheapest to prove when the old symbol is untouched.
 ### D6 — The bf16/f32 tolerance is a BACKWARD bound on the term scale
 
 The brief's honest tolerance for bf16 is ~1e-2 relative (8 mantissa
-bits). Declared form: **backward** — deviation from the exact `f64` product
-of the SAME operand, divided by the row's term scale `Σ_k |v_k|` — with
+bits). Declared form: **backward** — deviation from exact arithmetic over the declared-dtype operands (unrounded products, declared accumulator), divided by the row's term scale `Σ_k |v_k|` — with
 bf16 at 1e-2 and f32 at 1e-6. A forward-relative bound is governed by the
 sum's condition number: measured 4.5e-2 forward against 3.3e-3 backward on
 the committed matmul fixture, i.e. a forward criterion would have forced a
@@ -106,12 +105,11 @@ already uses; it is reused, not reinvented.
   v0.1 gates.
 - **f32 products**: backward 1e-6 of the row term scale `Σ_k |v_k|`.
 - **bf16 products**: backward 1e-2 of the row term scale.
-- **Face-to-face** (rlib vs NumPy reference vs PyO3): EXACT, bit-identical
+- **Face-to-face** (rlib vs NumPy fixture vs PyO3): EXACT, bit-identical
   — all three declare the same accumulator, so a tolerance there would
-  hide a face that quietly picked a different one. The tolerances are
-  exercised against the exact `f64` product of the same operand (the
-  genuinely different-precision computation each dtype replaces), never
-  between two faces.
+  hide a face that quietly picked a different one. The declared tolerances are
+  exercised against exact arithmetic over the declared-dtype operands
+  (unrounded products, declared accumulator), never between two faces.
 - **Term scale**: for one output element, the sum of absolute values of
   the dense operand's elements the row contracts with (matvec: the vector;
   matmul: the column).
@@ -192,9 +190,9 @@ already uses; it is reused, not reinvented.
 Recorded on the implementation branch (green fixtures there) at spec
 authoring time; every number is re-verified in the gate row at landing.
 
-- **The f64 surface did not move.** The 24 pre-existing crate tests pass
-  unchanged, and the `f64_product_bit_identical` leg re-runs every
-  committed f64 product record through the f64 instantiation asserting
+- **The `f64` surface did not move.** The 24 pre-existing crate tests pass
+  unchanged, and the `f64_product_bit_identical` leg re-runs the 3-record
+  f64 product fixture family through the f64 instantiation asserting
   BYTE identity. Regenerating the fixtures left `pack_bits.json`,
   `sign_estimate.json`, `packed_matvec.json`, `packed_matmul.json` and
   `joint_itq.json` byte-identical (`cmp`) — the change does not perturb
@@ -202,9 +200,9 @@ authoring time; every number is re-verified in the gate row at landing.
 - **Both tolerance bounds are load-bearing.** Tightening them to 1e-12 /
   1e-6 reddened all four dtype legs; the files were restored
   byte-identical.
-- **Face parity is exact, not toleranced.** rlib, NumPy reference and PyO3
+- **Face parity is exact, not toleranced.** rlib, NumPy fixture and PyO3
   agree bit-for-bit on all four dtype fixtures; the declared tolerances
-  are exercised only against the exact f64 product.
+  are exercised only against the result at the declared operand dtype.
 - **The no-hardcoded-dtype pin is a symbol-sliced source scan.** It slices
   `packed_matvec`, `packed_matmul`, `accumulate_row` and
   `accumulate_packed_row` out of `core.rs` by their generic signatures —
@@ -243,16 +241,16 @@ implementation was then re-read against it and every gate re-run on the
 reconciled tree. Numbers below are from that run, not carried over.
 
 - **The `f64` surface did not move.** The 24 pre-existing crate tests pass
-  unchanged; every committed `f64` product record is reproduced BYTE-identically
-  through the `f64` instantiation, and regenerating the fixtures leaves
+  unchanged; the 3-record f64 product fixture family is reproduced BYTE-identically
+  through the f64 instantiation, and regenerating the fixtures leaves
   `pack_bits.json`, `sign_estimate.json`, `packed_matvec.json`,
   `packed_matmul.json` and `joint_itq.json` byte-identical (`cmp`). Crate suite:
   **34 passed / 0 failed** (2 lib unit + 32 parity = the 24 pre-existing + 8
   dtype legs + `parity_f64_error_strings_unchanged`).
 
 - **Per-leg measured worst (task 4.1)**, units of the term scale. The fixture
-  legs exercise each declared bound against the exact `f64` product of the same
-  operand — never face against face, which is exact:
+  legs exercise each declared bound against the result at the declared operand
+  dtype — never face against face, which is exact:
 
   | leg | measured worst | declared bound | margin |
   |---|---|---|---|

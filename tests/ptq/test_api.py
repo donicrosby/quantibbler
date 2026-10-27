@@ -1,6 +1,6 @@
 """Tasks 6.1-6.3: public API entry point, qpk1 round trip, float32 opt-in
 (scenarios caller_supplied_model_and_data, qpk1_round_trip_byte_exact,
-rust_matches_reference_probes, float32_opt_in)."""
+rust_matches_parity_fixtures, float32_opt_in)."""
 
 import ast
 from pathlib import Path
@@ -126,7 +126,7 @@ def test_scn_entry_point_signature():
 
 
 def test_scn_qpk1_round_trip():
-    """qpk1_round_trip_byte_exact + rust_matches_reference_probes: serialize
+    """qpk1_round_trip_byte_exact + rust_matches_parity_fixtures: serialize
     -> reload is byte-exact on bits, bit-exact on float64 scales, and the
     reload-then-forward equals the serialize-time forward."""
     model = _TinyApiModel(seed=3)

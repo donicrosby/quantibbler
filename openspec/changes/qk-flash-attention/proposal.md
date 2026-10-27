@@ -16,8 +16,8 @@ N×N score matrix. [FA] Theorem 2 bounds the IO win.
 ## What Changes
 
 - Add a tiled, online-softmax, EXACT attention forward to
-  `quantibbler-kernels` as a NumPy tiled reference (f64) — the executable
-  specification and parity oracle, per config's reference-first rule.
+  `quantibbler-kernels` as a NumPy tiled reference — the verification
+  fixture at the declared dtype and the parity gate, per config's reference-first rule.
 - Adopt `cubek-attention` 0.3.0 (tracel-ai/cubek — the CubeCL team's
   kernel collection; same `cubecl 0.11` we are pinned to, registry
   evidence 2026-10-06, 447k recent downloads, Apache-2.0, pure Rust) as

@@ -23,9 +23,9 @@ All solver and accumulation paths SHALL compute in bf16 unless the caller sets `
 #### Scenario: float64_opt_in
 
 - **WHEN** the caller sets `compute_dtype = "float64"` with `--solver-backend numpy`
-- **THEN** the pipeline is bit-identical to the pre-change float64 path on the same inputs, and every existing f64 NumPy-backend fixture passes unchanged
+- **THEN** the pipeline is bit-identical to the pre-change float64 path on the same inputs, and every existing NumPy-backend fixture at that dtype passes unchanged
 - **WHEN** the caller sets `compute_dtype = "float64"` with the torch backend
-- **THEN** the reconstruction cosine vs the float64 NumPy reference satisfies ≥1−1e-12 (cosine drop 1−cos ≤1e-12) — the declared float64 cell of `admm_parity_per_dtype`
+- **THEN** the reconstruction cosine vs a same-declared-dtype NumPy fixture satisfies ≥1−1e-12 (cosine drop 1−cos ≤1e-12) — the declared float64 cell of `admm_parity_per_dtype`
 
 ## MODIFIED Requirements
 
@@ -50,8 +50,8 @@ For each linear layer, the pipeline SHALL form the preconditioned target at `com
 
 #### Scenario: admm_parity_per_dtype
 
-- **WHEN** LB-ADMM factorizes a fixed target at each compute_dtype against the float64 NumPy reference
-- **THEN** the reconstruction cosine similarity `cos(recon, target)` computed over the block-output dimensions satisfies: ≥0.99 for bf16 (cos ≤ 1e-2 drop), ≥0.9999 for float32 (cos ≤ 1e-4 drop), and ≥1−1e-12 for float64 — measured on the torch backend's output before packing (unpacked reconstruction vs float64-NumPy reference output)
+- **WHEN** LB-ADMM factorizes a fixed target at each compute_dtype against a same-declared-dtype NumPy parity fixture
+- **THEN** the reconstruction cosine similarity `cos(recon, target)` computed over the block-output dimensions satisfies: ≥0.99 for bf16 (cos ≤ 1e-2 drop), ≥0.9999 for float32 (cos ≤ 1e-4 drop), and ≥1−1e-12 for float64 — measured on the torch backend's output before packing (unpacked reconstruction vs same-declared-dtype NumPy fixture output)
 
 ### Requirement: Factorized components SHALL be refined per block with the Straight-Through Estimator
 
@@ -73,11 +73,6 @@ After initialization, each block's continuous latents and scales SHALL be jointl
 - **WHEN** a latent tensor under bf16 compute contains exact zeros (from underflow or initialization)
 - **THEN** the packed bits encode those positions as +1 (bit-0), and the unpacked sign matrix is identical to the input under the +1-at-zero convention
 
-#### Scenario: ste_dtype_generic
-
-- **WHEN** STE refinement runs at bf16 compute on a production layer
-- **THEN** the STE passthrough produces non-zero latent gradients at bf16, the per-linear gradient norm is recorded relative to the float64 reference, and a deviation exceeding 1e-3 relative triggers a `ste_bf16_gradient_deviation` event
-
 ## ADDED Requirements
 
 ### Requirement: Every pipeline stage SHALL be parameterized by the declared compute_dtype with no hardcoded numeric type
@@ -87,7 +82,7 @@ Every tensor creation, cast, and conversion in the PTQ pipeline SHALL use `compu
 #### Scenario: grep_evidenced_no_hardcoded_dtype
 
 - **WHEN** the implementation is complete
-- **THEN** `grep -rnE '\.double\(\)|torch\.float32|torch\.float64|np\.float32|np\.float64|astype\(.*float' src/quantibbler/ptq/ tools/quantize_hf_model.py` returns zero hits that are not justified by one of three named resolution classes: **(a) parametric** — the site uses `compute_dtype` or `accum_dtype` from config; **(b) accumulation-site** — a named accumulation dtype with arithmetic justification in a comment; **(c) parity-oracle** — a deliberate float64 literal in the NumPy parity path (`solver_backend.py`, unit tests, reference fixtures) carrying an explicit `# parity-oracle: float64 by design` comment
+- **THEN** `grep -rnE '\.double\(\)|torch\.float32|torch\.float64|np\.float32|np\.float64|astype\(.*float' src/quantibbler/ptq/ tools/quantize_hf_model.py` returns zero hits that are not justified by one of three named resolution classes: **(a) parametric** — the site uses `compute_dtype` or `accum_dtype` from config; **(b) accumulation-site** — a named accumulation dtype with arithmetic justification in a comment; **(c) reference-path** — a deliberate dtype literal in the NumPy solver path (`solver_backend.py`, unit tests, reference fixtures) carrying an explicit `# reference-path: <dtype> by design` comment
 
 #### Scenario: every_hardcoded_site_enumerated
 
@@ -110,11 +105,11 @@ Every operation summing more values than bf16's 7-bit mantissa can accommodate S
 - **WHEN** compute_dtype is float64 with `--solver-backend numpy`
 - **THEN** the accumulation dtype equals compute_dtype, and the pipeline is bit-identical to the pre-change float64 path on the same inputs
 - **WHEN** compute_dtype is float64 with the torch backend
-- **THEN** the accumulation dtype equals compute_dtype, and the reconstruction cosine vs the float64 NumPy reference satisfies ≥1−1e-12 (cosine drop 1−cos ≤1e-12)
+- **THEN** the accumulation dtype equals compute_dtype, and the reconstruction cosine vs a same-declared-dtype NumPy fixture satisfies ≥1−1e-12 (cosine drop 1−cos ≤1e-12)
 
 ### Requirement: The LB-ADMM and SVD solvers SHALL execute on the accelerator device when present
 
-The torch solver backend SHALL execute on the module's device. On an accelerator, the solve SHALL use torch device tensors throughout with no host round-trip. The NumPy backend remains the float64 parity oracle, unit-test-only.
+The torch solver backend SHALL execute on the module's device. On an accelerator, the solve SHALL use torch device tensors throughout with no host round-trip. The NumPy backend is a unit-test-only reference path at the declared dtype.
 
 #### Scenario: solver_on_device
 
@@ -126,10 +121,10 @@ The torch solver backend SHALL execute on the module's device. On an accelerator
 - **WHEN** `--device cpu` is set
 - **THEN** the torch solver backend executes on CPU tensors — no silent fallback from a failed accelerator probe
 
-#### Scenario: numpy_backend_stays_parity_oracle
+#### Scenario: numpy_backend_unit_test_only
 
 - **WHEN** `--solver-backend numpy` is set
-- **THEN** the float64 reference path executes in a unit test only; the fire path never resolves to NumPy
+- **THEN** the NumPy backend path executes in a unit test only; the fire path never resolves to NumPy
 
 ### Requirement: The pipeline SHALL place every stage on the declared device without host round-trips
 

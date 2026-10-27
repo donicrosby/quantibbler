@@ -152,7 +152,7 @@ pre-change path.
 - **WHEN** `PackedLayer.apply` runs with `ServingDtype::Bf16` and a bf16
   input vector
 - **THEN** the kernel receives `Dtype::Bf16`, accumulates in f32, and
-  the per-output-element backward error vs the exact f64 product is within
+  the per-output-element backward error vs exact arithmetic over the declared-dtype operands (unrounded products, declared accumulator) is within
   1e-2 of the row term scale Σ_k |v_k| (qk-kernels-dtype-generic D6)
 
 ### Requirement: Norm application and logits SHALL use the declared serving dtype

@@ -46,7 +46,7 @@ that the run images would then need their dependency source re-thought).
 
 `kernels` stays the only extra, and is justified as genuinely-optional product
 surface: `src/quantibbler/kernels/__init__.py` documents the NumPy references as
-the executable specification, so the Rust extension is opt-in for a product user
+the verification fixtures at the declared dtype, so the Rust extension is opt-in for a product user
 (and `openspec/specs/qk-kernels/spec.md` requires the Rust pytest leg to skip
 cleanly when it is absent). It is ALSO added to the `dev` group, because the
 suite exercises the parity tier and the acceptance forbids skip-when-absent
