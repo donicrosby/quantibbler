@@ -491,7 +491,7 @@ fn validate_section_metadata(
         if section.name.is_empty() || !name_is_declared(&section.name, header) {
             return Err(format!(
                 "unknown section name {:?}; expected a declared layer, embedding, lm_head, norms, \
-                 or tokenizer.*",
+                 tokenizer.*, or the chat-template sidecar",
                 section.name
             ));
         }

@@ -472,11 +472,7 @@ fn resolve_chat_template(
             return Ok(Some(text.to_string()));
         }
     }
-    let config = match &dir.tokenizer_config_json {
-        Some(bytes) => Some(bytes.clone()),
-        None => read_beside_model(model_path, "tokenizer_config.json")?,
-    };
-    if let Some(bytes) = config {
+    if let Some(bytes) = read_beside_model(model_path, "tokenizer_config.json")? {
         if let Some(template) = declared_chat_template(&bytes) {
             return Ok(Some(template));
         }

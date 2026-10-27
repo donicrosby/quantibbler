@@ -106,9 +106,9 @@ today. This change adds it: when `source/chat_template.jinja` exists, emit a
 after the tokenizer sections. The qpk1 crate's `build_from_blob` reads that
 optional section (raw → UTF-8, lossy-invalid → refused with a diagnostic) into
 a new `ModelDirectory.chat_template_jinja: Option<String>`, and the server's
-`compose` consults it first. Blobs produced before this change fall back
-through the precedence (their `tokenizer_config.json`/`tokenizer.json`
-sections, if any).
+`compose` consults it first. Blobs produced before this change carry no
+chat-template sidecar and fall back through the precedence via their
+`tokenizer.json` section, if any.
 
 ## Fixtures and golden
 
@@ -152,6 +152,21 @@ actually executes, not merely skips.
 - **Write the template into `tokenizer_config.json` instead.** Rejected: HF
   v5 actively removed that save path ("legacy load-only"); writing it would be
   exactly the backwards move Lemonade corrected.
+
+## Implementation crystallization (2026-10-27)
+
+**The `tokenizer_config.json` blob section never existed; the loader no longer
+models one.** `read_optional_raw_section(TOKENIZER_CONFIG)` could not return
+`Some`: `tokenizer_config.json` (underscore) is outside the closed section-name
+vocabulary — the `tokenizer.` prefix is dotted — no packer emits it
+(`write_blob_from_directory` selects `tokenizer.*` only), and a forged blob
+carrying it is refused wholesale by BF-3.7. `ModelDirectory.tokenizer_config_json`
+was therefore `None` by construction, and the "Blob container" paragraph above
+was wrong to name that section as reachable. The field, its reader helper, and
+its const are removed; directory-sourced legacy resolution is unchanged (the
+`tokenizer_config.json` file beside the model, via `read_beside_model`), and a
+pre-canonical BLOB falls through to its `tokenizer.json` `chat_template` field —
+the deprecated last resort — never a `tokenizer_config.json` section.
 
 ## Open questions
 
