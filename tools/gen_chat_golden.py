@@ -14,9 +14,10 @@ The golden records BOTH halves BS-5.1 pins: the rendered prompt STRING (from
 the committed fixture tokenizer produces for that string (from the ``tokenizers``
 crate's Python face — the same implementation the server links).
 
-The chat template itself is MODEL DATA, carried verbatim in the fixture
-``tokenizer.json``; its provenance (source model + revision) is recorded in
-``tools/gen_server_fixtures.py`` next to the string.
+The chat template itself is MODEL DATA, carried verbatim in the fixture's
+canonical ``chat_template.jinja`` sidecar — the same file a real export's
+``save_pretrained`` writes — with its provenance (source model + revision)
+recorded in ``tools/gen_server_fixtures.py`` next to the string.
 
 Regeneration is deterministic: no timestamps are written, so a diff here is a
 real behavioural change (template, tokenizer, or tokenizer version), not noise.
@@ -27,11 +28,12 @@ from __future__ import annotations
 
 import json
 import sys
-import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-FIXTURE_TOKENIZER = REPO_ROOT / "tests" / "fixtures" / "server-model" / "tokenizer.json"
+FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "server-model"
+FIXTURE_TOKENIZER = FIXTURE_DIR / "tokenizer.json"
+FIXTURE_TEMPLATE = FIXTURE_DIR / "chat_template.jinja"
 GOLDEN = REPO_ROOT / "tests" / "fixtures" / "chat_golden.json"
 
 #: The pinned probing messages (BS-5.1).
@@ -42,10 +44,9 @@ ENABLE_THINKING = False
 
 
 def main() -> int:
-    document = json.loads(FIXTURE_TOKENIZER.read_text(encoding="utf-8"))
-    template = document.get("chat_template")
-    if not isinstance(template, str) or not template.strip():
-        raise SystemExit(f"{FIXTURE_TOKENIZER}: no usable chat_template")
+    template = FIXTURE_TEMPLATE.read_text(encoding="utf-8")
+    if not template.strip():
+        raise SystemExit(f"{FIXTURE_TEMPLATE}: the sidecar carries no template")
 
     import jinja2
     import tokenizers
@@ -53,20 +54,10 @@ def main() -> int:
     from tokenizers import Tokenizer
     from transformers import PreTrainedTokenizerFast
 
-    # The `tokenizers` crate (both its Rust and Python faces) REJECTS an unknown
-    # top-level key, so the fixture's own document — which carries
-    # `chat_template` by design — is not loadable as a BPE definition. Hand the
-    # stack the same document with that one key removed; the server's loader
-    # does exactly the same (see `model::tokenizer_from_json`).
-    stripped = {k: v for k, v in document.items() if k != "chat_template"}
-    with tempfile.NamedTemporaryFile(
-        "w", suffix=".tokenizer.json", delete=False, encoding="utf-8"
-    ) as handle:
-        json.dump(stripped, handle)
-        stripped_path = handle.name
-
     # 1) The render, through the HF stack (transformers' apply_chat_template).
-    hf = PreTrainedTokenizerFast(tokenizer_file=stripped_path, chat_template=template)
+    #    The fixture's tokenizer document is the BPE definition alone; the
+    #    template rides in its own sidecar, exactly as a real export writes it.
+    hf = PreTrainedTokenizerFast(tokenizer_file=str(FIXTURE_TOKENIZER), chat_template=template)
     prompt = hf.apply_chat_template(
         MESSAGES,
         tokenize=False,
@@ -89,7 +80,7 @@ def main() -> int:
     # 2) The token ids, from the committed fixture tokenizer — the same
     #    implementation the server links (add_special_tokens=False mirrors
     #    `Engine::encode`'s `tokenizer.encode(text, false)`).
-    ids = Tokenizer.from_file(stripped_path).encode(prompt, add_special_tokens=False).ids
+    ids = Tokenizer.from_file(str(FIXTURE_TOKENIZER)).encode(prompt, add_special_tokens=False).ids
 
     golden = {
         # The pinned inputs (BS-5.1 / design S5) — the same context the server
@@ -103,7 +94,7 @@ def main() -> int:
         "provenance": {
             "generator": "tools/gen_chat_golden.py",
             "tokenizer": "tests/fixtures/server-model/tokenizer.json",
-            "chat_template_source": "Qwen/Qwen3-0.6B tokenizer_config.json:chat_template",
+            "chat_template_source": "tests/fixtures/server-model/chat_template.jinja",
             "chat_template_revision": "c1899de289a04d12100db370d81485cdf75e47ca",
             "python": {
                 "transformers": transformers.__version__,

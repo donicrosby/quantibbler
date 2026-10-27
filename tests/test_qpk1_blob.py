@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -80,6 +81,30 @@ def test_tokenizer_section_is_the_raw_file_b9():
     tokenizer = sections["tokenizer.json"]
     assert tokenizer["tag"] == blob_writer.TAG_RAW
     assert tokenizer["data"] == (DIR_FIXTURE / "tokenizer.json").read_bytes()
+
+
+def test_chat_template_sidecar_is_packed_raw_ct_1_4(tmp_path):
+    """CT-1.4 (writer half): a directory that carries the canonical
+    chat-template sidecar packs it as its own RAW section after the tokenizer
+    sections, and the blob reader hands the same bytes back — so a blob
+    resolves the same template its source directory does."""
+    source = tmp_path / "model"
+    shutil.copytree(DIR_FIXTURE, source)
+    template = "{% for m in messages %}{{ m.role }}: {{ m.content }}\n{% endfor %}"
+    (source / blob_writer.CHAT_TEMPLATE_FILE).write_text(template, encoding="utf-8")
+
+    out = tmp_path / "with-template.qpk"
+    blob_writer.write_blob_from_directory(source, out, created_by="quantibbler-test")
+
+    parsed = quantibbler_qpk1.read_blob(str(out))
+    sidecar = _sections(parsed)[blob_writer.CHAT_TEMPLATE_FILE]
+    assert sidecar["tag"] == blob_writer.TAG_RAW
+    assert sidecar["data"] == template.encode("utf-8")
+    names = [section["name"] for section in parsed["sections"]]
+    assert names.index("tokenizer.json") < names.index(blob_writer.CHAT_TEMPLATE_FILE), (
+        "the sidecar rides in canonical order, after the tokenizer sections"
+    )
+    assert quantibbler_qpk1.load_blob(str(out))["model_id"] == "server-model-fixture"
 
 
 def test_header_roundtrips_through_the_rust_reader_bf2_1():

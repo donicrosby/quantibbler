@@ -120,8 +120,21 @@ class _FakeQuantizedModel:
 
 
 class _FakeTokenizer:
+    """Only the surface ``export_model_directory`` consumes.
+
+    A real ``save_pretrained`` writes the model's chat template to the canonical
+    sidecar beside the tokenizer document, and the export verifies that sidecar
+    before it emits anything. The fake does the same: these legs are about the
+    remainder encoding, and a tokenizer that emits no template would stop the
+    export for a reason unrelated to what they pin.
+    """
+
+    chat_template = "{{ messages[0].content }}"
+
     def save_pretrained(self, out_dir) -> None:
-        (Path(out_dir) / "tokenizer.json").write_text("{}", encoding="utf-8")
+        out = Path(out_dir)
+        (out / "tokenizer.json").write_text("{}", encoding="utf-8")
+        (out / qhf.CHAT_TEMPLATE_FILE).write_text(self.chat_template, encoding="utf-8")
 
 
 def _export(tmp_path: Path, remainder_dtype: str, **overrides) -> Path:

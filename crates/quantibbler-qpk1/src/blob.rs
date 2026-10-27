@@ -449,15 +449,18 @@ fn require_zero(bytes: &[u8], start: usize, end: usize, what: &str) -> Result<()
 }
 
 /// The closed section-name vocabulary (BF-3.7): a declared layer name, one of
-/// the fixed remainder names, or a `tokenizer.*` file.
+/// the fixed remainder names, a `tokenizer.*` file, or the canonical
+/// chat-template sidecar.
 fn name_is_declared(name: &str, header: &BlobHeader) -> bool {
     header.layers.iter().any(|l| l == name)
         || matches!(name, "embedding" | "lm_head" | "norms")
         || name.starts_with("tokenizer.")
+        || name == crate::CHAT_TEMPLATE_FILE
 }
 
 /// Canonical-order key (B5): layers in declared order, then remainder
-/// (embedding, lm_head, norms), then `tokenizer.*` by name.
+/// (embedding, lm_head, norms), then `tokenizer.*` by name, then the
+/// chat-template sidecar.
 fn order_key(name: &str, header: &BlobHeader) -> (u8, String) {
     if let Some(index) = header.layers.iter().position(|l| l == name) {
         return (0, format!("{index:08}"));
@@ -467,6 +470,7 @@ fn order_key(name: &str, header: &BlobHeader) -> (u8, String) {
         "lm_head" => (1, "1".into()),
         "norms" => (1, "2".into()),
         _ if name.starts_with("tokenizer.") => (2, name.to_string()),
+        _ if name == crate::CHAT_TEMPLATE_FILE => (3, name.to_string()),
         _ => (9, name.to_string()),
     }
 }
@@ -520,7 +524,8 @@ fn validate_section_metadata(
             if *previous >= key {
                 return Err(format!(
                     "section {:?} is out of canonical order (after {:?}); the order is layers, \
-                     then embedding/lm_head/norms, then tokenizer.*",
+                     then embedding/lm_head/norms, then tokenizer.*, then the chat-template \
+                     sidecar",
                     section.name, previous.1
                 ));
             }

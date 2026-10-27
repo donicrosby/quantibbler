@@ -406,52 +406,108 @@ pub struct LoadedModel {
     /// The byte source the blob loader used (BS-1); `None` for a directory
     /// source, which is never mapped.
     pub blob_load_method: Option<BlobLoadMethod>,
-    /// The model's own Jinja2 chat template, read from the artifact's
-    /// `tokenizer.json` `chat_template` field (BS-5). `None` = the artifact
+    /// The model's own Jinja2 chat template, resolved once at load from the
+    /// artifact's canonical `chat_template.jinja` sidecar (a model directory's
+    /// file, or a blob's same-named section), falling back to the legacy
+    /// `chat_template` string field in `tokenizer_config.json` and then to the
+    /// deprecated same-named field in `tokenizer.json`. `None` = the artifact
     /// declares none, and `/v1/chat/completions` refuses (400) rather than
     /// guessing a prompt format.
     pub chat_template: Option<String>,
 }
 
-/// Build the tokenizer from an artifact `tokenizer.json` AND take the model's
-/// chat template out of the same document (BS-5, design S5).
+/// Build the tokenizer from an artifact `tokenizer.json`.
 ///
-/// The document serves both purposes: it is the BPE definition the `tokenizers`
-/// crate consumes, and it carries the model's Jinja2 `chat_template` (the crate
-/// exposes no arbitrary metadata field).
-///
-/// The key must NOT reach the crate: `tokenizers` 0.23.x rejects any unknown
-/// top-level key outright — measured, a real HF `tokenizer.json` plus one extra
-/// key fails to parse at all ("expected `,` or `}`") — so the template is read
-/// here and removed from the document the tokenizer is built from. Only a
-/// document that actually declares the key is re-serialized; an artifact
-/// without one is handed over byte-for-byte. A blank or non-string declaration
-/// loads fine and yields `None`, so the chat endpoint refuses (BS-5.2) rather
-/// than inventing a prompt format.
-pub fn tokenizer_from_json(
-    bytes: &[u8],
-    label: &str,
-) -> Result<(tokenizers::Tokenizer, Option<String>), String> {
+/// The document is the BPE definition the `tokenizers` crate consumes. A
+/// `chat_template` key must NOT reach the crate: `tokenizers` 0.23.x rejects
+/// any unknown top-level key outright — measured, a real HF `tokenizer.json`
+/// plus one extra key fails to parse at all ("expected `,` or `}`") — so a
+/// document that declares the key is re-serialized without it, and one that
+/// does not is handed over byte-for-byte. The template's own resolution is
+/// [`resolve_chat_template`]'s job, never this one's.
+pub fn tokenizer_from_json(bytes: &[u8], label: &str) -> Result<tokenizers::Tokenizer, String> {
     let mut parsed: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|e| format!("{label}: {e}"))?;
-    let declared = {
+    let declares_template = {
         let object = parsed
             .as_object_mut()
             .ok_or_else(|| format!("{label}: the tokenizer document is not a JSON object"))?;
-        object.remove("chat_template")
+        object.remove("chat_template").is_some()
     };
-    let template = declared
-        .as_ref()
-        .and_then(serde_json::Value::as_str)
-        .filter(|t| !t.trim().is_empty())
-        .map(str::to_string);
-    let tokenizer = if declared.is_some() {
+    if declares_template {
         let stripped = serde_json::to_vec(&parsed).map_err(|e| format!("{label}: {e}"))?;
-        tokenizers::Tokenizer::from_bytes(&stripped).map_err(|e| format!("{label}: {e}"))?
+        tokenizers::Tokenizer::from_bytes(&stripped).map_err(|e| format!("{label}: {e}"))
     } else {
-        tokenizers::Tokenizer::from_bytes(bytes).map_err(|e| format!("{label}: {e}"))?
+        tokenizers::Tokenizer::from_bytes(bytes).map_err(|e| format!("{label}: {e}"))
+    }
+}
+
+/// Resolve the model's chat template in the artifact's declared precedence:
+/// the canonical [`CHAT_TEMPLATE_FILE`] sidecar, then the legacy
+/// `chat_template` string field in `tokenizer_config.json`, then the same
+/// field in `tokenizer.json` (deprecated, kept so artifacts written before the
+/// sidecar existed keep loading).
+///
+/// The canonical sidecar arrives differently per source: a blob carries it as
+/// a section, already decoded into `dir.chat_template_jinja`; a directory
+/// names the file beside the model. Every step ignores an absent, blank, or
+/// non-string declaration, and an artifact that declares none resolves to
+/// `None` — the chat endpoint then refuses (400) rather than inventing a
+/// prompt format.
+///
+/// [`CHAT_TEMPLATE_FILE`]: quantibbler_qpk1::CHAT_TEMPLATE_FILE
+fn resolve_chat_template(
+    model_path: &Path,
+    dir: &loader::ModelDirectory,
+    tokenizer_json: &[u8],
+) -> Result<Option<String>, String> {
+    if let Some(template) = &dir.chat_template_jinja {
+        return Ok(Some(template.clone()));
+    }
+    let sidecar = quantibbler_qpk1::CHAT_TEMPLATE_FILE;
+    if let Some(bytes) = read_beside_model(model_path, sidecar)? {
+        let path = model_path.join(sidecar).display().to_string();
+        let text = std::str::from_utf8(&bytes).map_err(|e| format!("{path}: {e}"))?;
+        if !text.trim().is_empty() {
+            return Ok(Some(text.to_string()));
+        }
+    }
+    let config = match &dir.tokenizer_config_json {
+        Some(bytes) => Some(bytes.clone()),
+        None => read_beside_model(model_path, "tokenizer_config.json")?,
     };
-    Ok((tokenizer, template))
+    if let Some(bytes) = config {
+        if let Some(template) = declared_chat_template(&bytes) {
+            return Ok(Some(template));
+        }
+    }
+    Ok(declared_chat_template(tokenizer_json))
+}
+
+/// Read a sidecar file that sits beside a model DIRECTORY. `None` for a blob
+/// source, whose files live in sections inside the artifact rather than beside
+/// it, and for a file that is not there; any other read failure names the
+/// path.
+fn read_beside_model(model_path: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
+    if !model_path.is_dir() {
+        return Ok(None);
+    }
+    let path = model_path.join(name);
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// The `chat_template` string field of a tokenizer document, when it declares
+/// a non-blank one. A document that is not JSON, or whose field is not a
+/// string, declares none — the document's JSON validity is the tokenizer
+/// load's concern, not this lookup's.
+fn declared_chat_template(bytes: &[u8]) -> Option<String> {
+    let document: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let declared = document.get("chat_template")?.as_str()?;
+    (!declared.trim().is_empty()).then(|| declared.to_string())
 }
 
 /// The byte source the blob loader used (BS-1): mmap where the platform and
@@ -640,21 +696,27 @@ fn compose(
 
     // The tokenizer arrives differently per source: a blob CARRIES it as a
     // required section (design B9), a directory names it beside the model.
-    // Either way the SAME document also carries the model's chat template
-    // (BS-5), so both are taken out of it in one pass (see
-    // `tokenizer_from_json` for why the key must leave the tokenizer's view).
-    let (tokenizer, chat_template) = match &dir.tokenizer_json {
-        Some(bytes) => tokenizer_from_json(
-            bytes,
-            &format!("{}: tokenizer.json section", model_path.display()),
-        )?,
+    // The model's chat template is resolved separately, from its own
+    // canonical sidecar (see `resolve_chat_template`).
+    let (tokenizer, tokenizer_document) = match &dir.tokenizer_json {
+        Some(bytes) => (
+            tokenizer_from_json(
+                bytes,
+                &format!("{}: tokenizer.json section", model_path.display()),
+            )?,
+            bytes.clone(),
+        ),
         None => {
             let tokenizer_path = model_path.join("tokenizer.json");
             let bytes = std::fs::read(&tokenizer_path)
                 .map_err(|e| format!("{}: {e}", tokenizer_path.display()))?;
-            tokenizer_from_json(&bytes, &tokenizer_path.display().to_string())?
+            (
+                tokenizer_from_json(&bytes, &tokenizer_path.display().to_string())?,
+                bytes,
+            )
         }
     };
+    let chat_template = resolve_chat_template(model_path, &dir, &tokenizer_document)?;
 
     // The `gpu:sage` startup gate (qk-sage-attention 3.2): checked HERE, before
     // any device is touched and before the weights exist, so a model whose
@@ -708,4 +770,132 @@ fn compose(
         blob_load_method: method,
         chat_template,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SIDECAR: &str = quantibbler_qpk1::CHAT_TEMPLATE_FILE;
+
+    /// A throwaway copy of the committed model directory, so one leg can plant
+    /// or remove a template source without touching the fixture.
+    fn temp_copy(tag: &str) -> PathBuf {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/server-model");
+        let dest = std::env::temp_dir().join(format!(
+            "chat-template-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        copy_rec(&source, &dest);
+        dest
+    }
+
+    fn copy_rec(source: &Path, dest: &Path) {
+        std::fs::create_dir_all(dest).expect("mkdir");
+        for entry in std::fs::read_dir(source).expect("read_dir") {
+            let entry = entry.expect("dir entry");
+            let to = dest.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy_rec(&entry.path(), &to);
+            } else {
+                std::fs::copy(entry.path(), &to).expect("copy file");
+            }
+        }
+    }
+
+    fn drop_if_present(path: &Path) {
+        if path.exists() {
+            std::fs::remove_file(path).expect("remove");
+        }
+    }
+
+    /// The tokenizer document with any `chat_template` field replaced by
+    /// `template` (or removed when `None`) — the shape a pre-sidecar artifact
+    /// carries.
+    fn document_with(path: &Path, template: Option<&str>) -> Vec<u8> {
+        let bytes = std::fs::read(path.join("tokenizer.json")).expect("tokenizer bytes");
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("tokenizer JSON");
+        let object = value.as_object_mut().expect("tokenizer object");
+        object.remove("chat_template");
+        if let Some(template) = template {
+            object.insert(
+                "chat_template".to_string(),
+                serde_json::Value::String(template.to_string()),
+            );
+        }
+        serde_json::to_vec(&value).expect("re-serialize")
+    }
+
+    /// The canonical sidecar decides on its own, even when a legacy field
+    /// disagrees with it.
+    #[test]
+    fn canonical_jinja_read_first_ct_1_1() {
+        let dir_path = temp_copy("canonical");
+        std::fs::write(dir_path.join(SIDECAR), "{{ canonical }}").expect("write sidecar");
+        std::fs::write(
+            dir_path.join("tokenizer_config.json"),
+            r#"{"chat_template": "{{ legacy }}"}"#,
+        )
+        .expect("write config");
+        let dir = loader::load(&dir_path).expect("directory loads");
+        let document = document_with(&dir_path, Some("{{ deprecated }}"));
+        let resolved = resolve_chat_template(&dir_path, &dir, &document).expect("resolve");
+        assert_eq!(resolved.as_deref(), Some("{{ canonical }}"));
+        std::fs::remove_dir_all(&dir_path).expect("cleanup");
+    }
+
+    /// With no sidecar, the legacy load-only `tokenizer_config.json` field
+    /// answers.
+    #[test]
+    fn legacy_config_field_fallback_ct_1_2() {
+        let dir_path = temp_copy("legacy-config");
+        drop_if_present(&dir_path.join(SIDECAR));
+        std::fs::write(
+            dir_path.join("tokenizer_config.json"),
+            r#"{"chat_template": "{{ legacy }}"}"#,
+        )
+        .expect("write config");
+        let dir = loader::load(&dir_path).expect("directory loads");
+        let document = document_with(&dir_path, Some("{{ deprecated }}"));
+        let resolved = resolve_chat_template(&dir_path, &dir, &document).expect("resolve");
+        assert_eq!(resolved.as_deref(), Some("{{ legacy }}"));
+        std::fs::remove_dir_all(&dir_path).expect("cleanup");
+    }
+
+    /// With neither, the deprecated `tokenizer.json` field still loads — the
+    /// one concession to artifacts written before the sidecar existed.
+    #[test]
+    fn deprecated_tokenizer_json_fallback_ct_1_2() {
+        let dir_path = temp_copy("deprecated");
+        drop_if_present(&dir_path.join(SIDECAR));
+        drop_if_present(&dir_path.join("tokenizer_config.json"));
+        let dir = loader::load(&dir_path).expect("directory loads");
+        let document = document_with(&dir_path, Some("{{ deprecated }}"));
+        let resolved = resolve_chat_template(&dir_path, &dir, &document).expect("resolve");
+        assert_eq!(resolved.as_deref(), Some("{{ deprecated }}"));
+        std::fs::remove_dir_all(&dir_path).expect("cleanup");
+    }
+
+    /// No declaration anywhere leaves the template absent (the chat endpoint
+    /// then refuses rather than guessing a format).
+    #[test]
+    fn no_template_yields_none_ct_1_3() {
+        let dir_path = temp_copy("none");
+        drop_if_present(&dir_path.join(SIDECAR));
+        drop_if_present(&dir_path.join("tokenizer_config.json"));
+        let dir = loader::load(&dir_path).expect("directory loads");
+        let document = document_with(&dir_path, None);
+        let resolved = resolve_chat_template(&dir_path, &dir, &document).expect("resolve");
+        assert_eq!(resolved, None);
+        // A blank sidecar is the same as no sidecar at all.
+        std::fs::write(dir_path.join(SIDECAR), "  \n\t ").expect("write blank sidecar");
+        let blank = resolve_chat_template(&dir_path, &dir, &document).expect("resolve");
+        assert_eq!(blank, None);
+        std::fs::remove_dir_all(&dir_path).expect("cleanup");
+    }
 }

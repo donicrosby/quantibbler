@@ -5,8 +5,14 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
+      # The chat-template sidecars under tests/fixtures are MODEL DATA: they
+      # have to stay byte-identical to the template a real export writes (a
+      # stored prompt-format string, whitespace included), so the whitespace
+      # hooks must not rewrite them.
       - id: trailing-whitespace
+        exclude: ^tests/fixtures/.*/chat_template\.jinja$
       - id: end-of-file-fixer
+        exclude: ^tests/fixtures/.*/chat_template\.jinja$
       - id: check-yaml
         args: [--allow-multiple-documents]
       - id: check-toml

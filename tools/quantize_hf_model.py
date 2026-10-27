@@ -154,6 +154,12 @@ def _wikitext_cache_root() -> Path:
 WIKITEXT_TEST = _wikitext_cache_root()
 BATCH = 8  # eval/calibration microbatch (bf16 0.6B fits easily on CPU)
 
+#: The canonical chat-template sidecar an exported artifact carries. The
+#: tokenizer's own `save_pretrained` writes it; the serving stack reads it from
+#: here and nowhere else, so the export proves it landed before the artifact is
+#: registered.
+CHAT_TEMPLATE_FILE = "chat_template.jinja"
+
 
 class LayerBlock(nn.Module):
     """One decoder layer as a pipeline block: callable on bare activations.
@@ -560,6 +566,45 @@ def _run_identity(
     }
 
 
+def verify_canonical_chat_template(out_dir: Path, chat_template: str | None) -> None:
+    """Refuse an export whose artifact does not carry the canonical template.
+
+    ``save_pretrained`` is expected to have written the loaded tokenizer's own
+    chat template to :data:`CHAT_TEMPLATE_FILE`, so the artifact describes its
+    own prompt format. The loader reads that file — not a copy injected into
+    the tokenizer documents — so this check is what makes the export
+    self-certifying: without it, a tokenizer whose `save_pretrained` stops
+    emitting the sidecar (or a run that lands a different template than the one
+    the driver loaded) would ship an artifact no server can render chat from,
+    and the loss would only surface at serving time.
+
+    Raises on a missing file, a blank one, or one whose trimmed content differs
+    from the trimmed loaded tokenizer's template. Nothing is written back: the
+    point is a single source, not a second copy.
+    """
+    path = out_dir / CHAT_TEMPLATE_FILE
+    if not path.is_file():
+        raise RuntimeError(
+            f"{path}: the export carries no chat template; the tokenizer's "
+            "save_pretrained did not write it, so the artifact cannot render chat. "
+            "Refusing to emit it."
+        )
+    on_disk = path.read_text(encoding="utf-8")
+    if not on_disk.strip():
+        raise RuntimeError(
+            f"{path}: the chat template file is empty; refusing to emit an artifact "
+            "that declares no prompt format"
+        )
+    declared = (chat_template or "").strip()
+    if on_disk.strip() != declared:
+        raise RuntimeError(
+            f"{path}: the template on disk disagrees with the loaded tokenizer's chat "
+            f"template (on disk {len(on_disk)} chars starting {on_disk[:40]!r}; loaded "
+            f"{len(declared)} chars starting {declared[:40]!r}); refusing to emit the "
+            "artifact"
+        )
+
+
 def export_model_directory(
     out_dir: Path,
     qm: QuantizedModel,
@@ -666,6 +711,11 @@ def export_model_directory(
     # local snapshot paths both work, and the in-memory object is by
     # definition the exact tokenizer the pipeline used.
     tokenizer.save_pretrained(out_dir)
+    # The artifact must describe its own prompt format: the canonical sidecar
+    # the loader reads has to be there, non-empty, and byte-equal to the
+    # template the driver loaded. Fail-closed, so a partial export is never
+    # registered as an artifact.
+    verify_canonical_chat_template(out_dir, getattr(tokenizer, "chat_template", None))
 
     # Self-check the loader-facing contract (cheap, byte-level — this is the
     # tripwire that catches a half-updated export before 30 GPU-minutes are

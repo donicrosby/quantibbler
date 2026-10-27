@@ -101,6 +101,16 @@ pub struct ModelDirectory {
     /// required there, design B9); `None` for a directory source, where the
     /// server reads `tokenizer.json` beside the model.
     pub tokenizer_json: Option<Vec<u8>>,
+    /// The canonical chat-template sidecar's text when the source was a BLOB
+    /// that carried the section; `None` for a directory source (the server
+    /// reads the sidecar beside the model) and for a blob without it, or
+    /// whose section is blank after trim.
+    pub chat_template_jinja: Option<String>,
+    /// The `tokenizer_config.json` bytes when the source was a BLOB that
+    /// carried the section (the legacy load-only home of a `chat_template`
+    /// field); `None` otherwise. A pre-canonical blob resolves its template
+    /// from here.
+    pub tokenizer_config_json: Option<Vec<u8>>,
 }
 
 /// One declared norm slot and the width of its vector per block.
@@ -313,6 +323,8 @@ pub fn load(model_dir: &Path) -> Result<ModelDirectory, String> {
         lm_head,
         norm_weights,
         tokenizer_json: None,
+        chat_template_jinja: None,
+        tokenizer_config_json: None,
     })
 }
 
@@ -579,6 +591,14 @@ pub fn build_from_blob(path: &Path, blob: &Blob, bytes: &[u8]) -> Result<ModelDi
     }
     let tokenizer_json = Some(blob.slice(bytes, tokenizer_section).to_vec());
 
+    // The canonical chat-template sidecar, carried as its own raw section
+    // (a model's template is a text file, not a `tokenizer.*` blob entry).
+    let chat_template_jinja = read_chat_template_section(path, blob, bytes)?;
+    // The legacy load-only home of a `chat_template` field: optional, and
+    // absent from a directory-sourced artifact (the server reads the file
+    // beside the model).
+    let tokenizer_config_json = read_optional_raw_section(path, blob, bytes, TOKENIZER_CONFIG)?;
+
     Ok(ModelDirectory {
         model_id: header.model_id.clone(),
         layers,
@@ -598,7 +618,64 @@ pub fn build_from_blob(path: &Path, blob: &Blob, bytes: &[u8]) -> Result<ModelDi
         lm_head,
         norm_weights,
         tokenizer_json,
+        chat_template_jinja,
+        tokenizer_config_json,
     })
+}
+
+/// The legacy load-only `tokenizer_config.json` section name a blob may carry.
+const TOKENIZER_CONFIG: &str = "tokenizer_config.json";
+
+/// The optional canonical chat-template sidecar: a raw section decoded as
+/// UTF-8. Absent, or blank after trim, reads as "the artifact declares no
+/// template" (`None`); a section tagged anything but raw, or payload that is
+/// not UTF-8, is refused naming the section.
+fn read_chat_template_section(
+    path: &Path,
+    blob: &Blob,
+    bytes: &[u8],
+) -> Result<Option<String>, String> {
+    let Some(section) = blob.section(crate::CHAT_TEMPLATE_FILE) else {
+        return Ok(None);
+    };
+    if section.tag != BlobTag::Raw {
+        return Err(format!(
+            "{}: section {:?} is tagged {}; the chat-template sidecar is raw (tag 4)",
+            path.display(),
+            section.name,
+            section.tag.as_str()
+        ));
+    }
+    let raw = blob.slice(bytes, section);
+    let text = std::str::from_utf8(raw).map_err(|e| {
+        format!(
+            "{}: section {:?} is not valid UTF-8: {e}",
+            path.display(),
+            section.name
+        )
+    })?;
+    Ok((!text.trim().is_empty()).then(|| text.to_string()))
+}
+
+/// An optional raw section carried verbatim: absent reads as `None`, and a
+/// non-raw tag is refused naming the section.
+fn read_optional_raw_section(
+    path: &Path,
+    blob: &Blob,
+    bytes: &[u8],
+    name: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(section) = blob.section(name) else {
+        return Ok(None);
+    };
+    if section.tag != BlobTag::Raw {
+        return Err(format!(
+            "{}: section {name:?} is tagged {}; a carried tokenizer file is raw (tag 4)",
+            path.display(),
+            section.tag.as_str()
+        ));
+    }
+    Ok(Some(blob.slice(bytes, section).to_vec()))
 }
 
 /// One remainder section: the tag must equal the header's `remainder_dtype`

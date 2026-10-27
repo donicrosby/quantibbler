@@ -32,6 +32,7 @@ from pathlib import Path
 __all__ = [
     "BLOB_MAGIC",
     "BLOB_VERSION",
+    "CHAT_TEMPLATE_FILE",
     "PAGE_SIZE",
     "TAG_BF16_LE",
     "TAG_FP32_LE",
@@ -48,6 +49,11 @@ __all__ = [
 BLOB_MAGIC = b"QKPB"
 BLOB_VERSION = 1
 PAGE_SIZE = 4096
+
+#: The canonical chat-template sidecar. It is neither a layer nor a
+#: `tokenizer.*` file, so it is packed as its own raw section, in the canonical
+#: order the reader enforces (after every `tokenizer.*` section).
+CHAT_TEMPLATE_FILE = "chat_template.jinja"
 
 # The closed dtype-tag vocabulary (design B3), identical to BlobTag in
 # crates/quantibbler-qpk1/src/blob.rs.
@@ -95,8 +101,9 @@ def pack(sections: list[Section], header: dict, *, created_by: str | None = None
 
     The caller passes sections already in the canonical order (BF-5): layers in
     the header's ``layers`` order, then ``embedding`` / ``lm_head`` / ``norms``,
-    then ``tokenizer.*`` sorted. This function enforces the layout, not the
-    order — a mis-ordered table is refused by the reader, never silently fixed.
+    then ``tokenizer.*`` sorted, then the chat-template sidecar. This function
+    enforces the layout, not the order — a mis-ordered table is refused by the
+    reader, never silently fixed.
     """
     for section in sections:
         name = section.name.encode("utf-8")
@@ -256,6 +263,14 @@ def write_blob_from_directory(
     )
     for name in tokenizer_files:
         sections.append(Section(name=name, tag=TAG_RAW, data=(source / name).read_bytes()))
+
+    # The canonical chat-template sidecar is a plain text file, not a
+    # `tokenizer.*` entry, so it rides as its own raw section after them — the
+    # position the reader's canonical order puts it in. A directory without one
+    # packs exactly as before.
+    sidecar = source / CHAT_TEMPLATE_FILE
+    if sidecar.is_file():
+        sections.append(Section(name=CHAT_TEMPLATE_FILE, tag=TAG_RAW, data=sidecar.read_bytes()))
 
     header = {
         "model_id": manifest.get("model_id"),

@@ -123,6 +123,11 @@ def build_fixture(directory: Path) -> Path:
     fast = PreTrainedTokenizerFast(
         tokenizer_file=str(directory / "tokenizer.json"), eos_token="<|endoftext|>"
     )
+    # A real model's tokenizer declares a chat template, and `save_pretrained`
+    # writes it to the canonical sidecar the export verifies before emitting an
+    # artifact; a synthetic model has to declare one too, or the export refuses
+    # for a reason unrelated to what this fixture exercises.
+    fast.chat_template = "{% for m in messages %}{{ m.role }}: {{ m.content }}\n{% endfor %}"
 
     # All draws in this fixture are generator-explicit. ``torch.manual_seed()``
     # at module scope plus ``torch.randn_like()`` consumed the GLOBAL stream, so

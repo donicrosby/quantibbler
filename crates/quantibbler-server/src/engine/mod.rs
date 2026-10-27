@@ -1996,14 +1996,13 @@ mod tests {
     }
 
     fn test_tokenizer() -> tokenizers::Tokenizer {
-        // The fixture tokenizer json also carries the model's chat template,
-        // which the `tokenizers` crate refuses to parse (BS-5); the loader's
-        // own helper takes the template out and hands back the BPE.
+        // A tokenizer document that also carries a chat template would not
+        // parse as a BPE definition; the loader's own helper strips the key
+        // and hands back the tokenizer.
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/server-model/tokenizer.json");
         let bytes = std::fs::read(&path).expect("read fixture tokenizer");
         crate::model::tokenizer_from_json(&bytes, &path.display().to_string())
             .expect("fixture tokenizer loads")
-            .0
     }
 }

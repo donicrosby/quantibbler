@@ -34,9 +34,9 @@ fn golden_messages(golden: &serde_json::Value) -> Vec<api::types::ChatMessage> {
     serde_json::from_value(golden["messages"].clone()).expect("golden messages")
 }
 
-/// BS-5.1 — the fixture's `chat_template` field is the model's own template, and
-/// the minijinja render of the pinned probing messages equals BOTH the committed
-/// Python-HF render string AND its tokenization.
+/// BS-5.1 — the fixture's canonical `chat_template.jinja` sidecar is the model's
+/// own template, and the minijinja render of the pinned probing messages equals
+/// BOTH the committed Python-HF render string AND its tokenization.
 #[test]
 fn chat_template_render_and_tokens_match_the_golden_bs_5_1() {
     let golden = golden();
@@ -72,9 +72,9 @@ fn chat_template_render_and_tokens_match_the_golden_bs_5_1() {
     );
 }
 
-/// BS-5.1 (blob leg) — a BLOB artifact carries the same tokenizer section, so
-/// the template and the golden hold for it too: a blob serves chat exactly the
-/// way the directory does (the loader strips the non-tokenizer key either way).
+/// BS-5.1 (blob leg) — a BLOB artifact carries the same sidecar as a raw
+/// section, so the template and the golden hold for it too: a blob serves chat
+/// exactly the way the directory does.
 #[test]
 fn blob_artifact_carries_the_same_chat_template_bs_5_1() {
     let golden = golden();
@@ -86,6 +86,14 @@ fn blob_artifact_carries_the_same_chat_template_bs_5_1() {
     let rendered =
         api::chat_template::render(&template, &golden_messages(&golden)).expect("render");
     assert_eq!(rendered, golden["prompt"].as_str().expect("golden prompt"));
+    // The two container forms of the same model resolve the SAME template
+    // string, so they render identical prompts.
+    let directory = model::load(&fixture_dir()).expect("directory loads");
+    assert_eq!(
+        directory.chat_template.as_deref(),
+        Some(template.as_str()),
+        "the blob and the directory must resolve the identical chat template"
+    );
 }
 
 /// BS-5.2 — a message array the template cannot accept is a 400 in the error
@@ -158,4 +166,37 @@ fn served_chat_completion_tokenizes_the_templated_prompt_bs_5_1() {
             "the served prompt_tokens must be the TEMPLATE-rendered prompt's count"
         );
     });
+}
+
+/// CT-3.2 — the committed fixture reproduces the shape a real export has: the
+/// template in the canonical sidecar, and no `chat_template` field in the
+/// tokenizer document. This is the structural half of the regression the real
+/// artifact leg covers — a fixture that puts the template where no export puts
+/// it is a suite that cannot see the gap.
+#[test]
+fn fixture_reproduces_the_real_artifact_shape_ct_3_2() {
+    let dir = fixture_dir();
+    let sidecar_path = dir.join("chat_template.jinja");
+    let sidecar = std::fs::read_to_string(&sidecar_path)
+        .unwrap_or_else(|e| panic!("{}: {e}", sidecar_path.display()));
+    assert!(
+        !sidecar.trim().is_empty(),
+        "the sidecar must carry the model's template"
+    );
+
+    let document: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.join("tokenizer.json")).expect("read the fixture tokenizer document"),
+    )
+    .expect("the fixture tokenizer document is JSON");
+    assert!(
+        document.get("chat_template").is_none(),
+        "a real export's tokenizer.json carries no chat_template field"
+    );
+
+    let loaded = model::load(&dir).expect("the fixture loads");
+    assert_eq!(
+        loaded.chat_template.as_deref(),
+        Some(sidecar.as_str()),
+        "the loader must resolve the fixture's own sidecar bytes"
+    );
 }

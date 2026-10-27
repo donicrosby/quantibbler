@@ -420,6 +420,57 @@ fn rejects_unknown_section_name_bf3_7() {
     assert!(err.contains("bogus.section"), "{err}");
 }
 
+#[test]
+fn blob_section_roundtrips_ct_1_4() {
+    let (header, sections) = parts();
+    let template = "{% for m in messages %}{{ m.role }}: {{ m.content }}\n{% endfor %}";
+    // The committed fixture already carries a sidecar; these legs craft their
+    // own payload, so each starts from the same section list without one.
+    let without_sidecar = |sections: &[(String, u8, Vec<u8>)]| -> Vec<(String, u8, Vec<u8>)> {
+        sections
+            .iter()
+            .filter(|(name, _, _)| name != "chat_template.jinja")
+            .cloned()
+            .collect()
+    };
+    // The sidecar rides as its own raw section, after the tokenizer sections
+    // in canonical order.
+    let mut with_template = without_sidecar(&sections);
+    with_template.push((
+        "chat_template.jinja".to_string(),
+        4,
+        template.as_bytes().to_vec(),
+    ));
+    let blob = build(&header, &refs(&with_template));
+    let dir = load_variant("template", &blob).expect("the blob carrying a sidecar loads");
+    assert_eq!(dir.chat_template_jinja.as_deref(), Some(template));
+
+    // Payload that is not UTF-8 refuses, naming the section.
+    let mut bad = without_sidecar(&sections);
+    bad.push(("chat_template.jinja".to_string(), 4, vec![0xff, 0xfe, 0xfd]));
+    let blob = build(&header, &refs(&bad));
+    let err = load_variant("bad-template", &blob).expect_err("non-UTF-8 refuses");
+    assert!(
+        err.contains("chat_template.jinja"),
+        "names the section: {err}"
+    );
+    assert!(err.contains("UTF-8"), "names the reason: {err}");
+
+    // A blank sidecar reads as "no template declared", never as an empty one.
+    let mut blank = without_sidecar(&sections);
+    blank.push(("chat_template.jinja".to_string(), 4, b"\n \t\n".to_vec()));
+    let blob = build(&header, &refs(&blank));
+    let dir = load_variant("blank-template", &blob).expect("a blank sidecar loads");
+    assert_eq!(dir.chat_template_jinja, None);
+
+    // And the committed fixture's own sidecar resolves from the blob, exactly
+    // as the same model's directory resolves it.
+    let dir = load_variant("committed-template", &fixture()).expect("the fixture blob loads");
+    let on_disk = std::fs::read_to_string(format!("{DIR_FIXTURE}/chat_template.jinja"))
+        .expect("the fixture directory's sidecar");
+    assert_eq!(dir.chat_template_jinja.as_deref(), Some(on_disk.as_str()));
+}
+
 // --- BF-4 / BF-5 / BF-7 ----------------------------------------------------
 
 #[test]
@@ -479,6 +530,9 @@ fn sections_in_canonical_order_bf5_1() {
     expected.push("embedding".into());
     expected.push("norms".into());
     expected.push("tokenizer.json".into());
+    // The chat-template sidecar is the last canonical key: it is neither a
+    // layer nor a `tokenizer.*` file, and the fixture carries it.
+    expected.push("chat_template.jinja".into());
     assert_eq!(
         names,
         expected.iter().map(|s| s.as_str()).collect::<Vec<_>>()

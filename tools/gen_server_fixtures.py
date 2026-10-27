@@ -124,9 +124,15 @@ def write_norms_sidecar(root: Path) -> None:
     (root / "norms.f32.bin").write_bytes(norms.tobytes())
 
 
-#: The model's OWN chat template (qk-serve-bf16 BS-5), the genuine Qwen3
-#: artifact carried verbatim into the fixture tokenizer.json. This is MODEL
-#: DATA, not implementation-sourced (clean-room rule). Provenance:
+#: The canonical chat-template sidecar's file name: the location a real
+#: export's ``save_pretrained`` writes the model's template to, and the one the
+#: serving stack reads it back from.
+CHAT_TEMPLATE_FILE = "chat_template.jinja"
+
+#: The model's OWN chat template, the genuine Qwen3 artifact written verbatim
+#: to the fixture's canonical ``chat_template.jinja`` sidecar — the file
+#: `save_pretrained` emits and the serving stack reads. This is MODEL DATA, not
+#: implementation-sourced (clean-room rule). Provenance:
 #: Qwen/Qwen3-0.6B tokenizer_config.json `chat_template`, HF revision
 #: c1899de289a04d12100db370d81485cdf75e47ca (fetched 2026-10-26).
 CHAT_TEMPLATE = (
@@ -238,9 +244,6 @@ CHAT_TEMPLATE = (
 )
 
 TOKENIZER_JSON = {
-    # The chat template rides in the tokenizer JSON (the tokenizers crate
-    # exposes no arbitrary metadata; qk-serve-bf16 design S5).
-    "chat_template": CHAT_TEMPLATE,
     "version": "1.0",
     "truncation": None,
     "padding": None,
@@ -509,6 +512,10 @@ def build_model(root: Path, *, model_id: str, version: int) -> None:
     (root / "tokenizer.json").write_text(
         json.dumps(TOKENIZER_JSON, indent=1) + "\n", encoding="utf-8"
     )
+    # The model's chat template lives in its canonical sidecar, not in the
+    # tokenizer document: this is the shape `save_pretrained` writes for a real
+    # export, so the fixture cannot pass on a location no artifact uses.
+    (root / CHAT_TEMPLATE_FILE).write_text(CHAT_TEMPLATE, encoding="utf-8")
     # Sidecar: fp32 embedding/lm_head weights, weight-tied, byte layout in
     # the manifest (OQ2 minimally: raw LE f32, row-major).
     import array

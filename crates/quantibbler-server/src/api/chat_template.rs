@@ -5,9 +5,9 @@
 //! comparison corpus for benchmarking is chat-format scenarios, so a drifted
 //! prompt breaks prompt-token parity.
 //!
-//! The model's own Jinja2 `chat_template` (Qwen3) is the authority: it rides in
-//! the artifact's `tokenizer.json` (`chat_template`) and is read at load —
-//! the `tokenizers` crate does not expose arbitrary metadata fields.
+//! The model's own Jinja2 `chat_template` (Qwen3) is the authority: it rides
+//! in the artifact's canonical `chat_template.jinja` sidecar and is resolved
+//! at load — the `tokenizers` crate does not expose arbitrary metadata fields.
 //!
 //! Rendering uses `minijinja` with a PINNED context (`add_generation_prompt =
 //! true`, `enable_thinking = false`, design S5). The Qwen3 template calls

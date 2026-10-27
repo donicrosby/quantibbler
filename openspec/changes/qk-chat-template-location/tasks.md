@@ -2,12 +2,13 @@
 
 ## Task 1 — Loader resolves the canonical template (Rust)
 
-- [ ] Add `resolve_chat_template(model_path, dir)` in
+- [x] Add `resolve_chat_template(model_path, dir, tokenizer_json)` in
   `crates/quantibbler-server/src/model/mod.rs`: read `chat_template.jinja`
   from the model directory first (blob source consults
   `dir.chat_template_jinja`, added in Task 2), then the `chat_template` string
   field from `tokenizer_config.json`, then the deprecated `tokenizer.json`
-  field. A blank/non-string value yields `None`. Simplify
+  field. A blank or non-string declaration falls through to the next
+  source; only an artifact with none of the three resolves `None`. Simplify
   `tokenizer_from_json` so it returns only the tokenizer (drop its
   `chat_template` extraction); `compose` calls `resolve_chat_template` and
   stores the result in `LoadedModel.chat_template`.
@@ -20,7 +21,7 @@
 
 ## Task 2 — qpk1 blob reader exposes the `chat_template.jinja` section
 
-- [ ] In `crates/quantibbler-qpk1/src/loader.rs`, read the optional raw
+- [x] In `crates/quantibbler-qpk1/src/loader.rs`, read the optional raw
   `chat_template.jinja` section from the blob (raw tag → UTF-8; invalid UTF-8
   refused with a diagnostic naming the section) into a new
   `ModelDirectory.chat_template_jinja: Option<String>`. `build_from_blob` sets
@@ -32,7 +33,7 @@
 
 ## Task 3 — Blob writer packs the canonical sidecar
 
-- [ ] In `src/quantibbler/blob.py::write_blob_from_directory`, when
+- [x] In `src/quantibbler/blob.py::write_blob_from_directory`, when
   `source/chat_template.jinja` exists, append a raw `chat_template.jinja`
   section in canonical order after the `tokenizer.*` sections. Leave the
   directory untouched.
@@ -43,10 +44,10 @@
 
 ## Task 4 — Exporter fail-closed self-check (Python)
 
-- [ ] In `tools/quantize_hf_model.py::export_model_directory`, after
+- [x] In `tools/quantize_hf_model.py::export_model_directory`, after
   `tokenizer.save_pretrained(out_dir)`, read `out_dir/chat_template.jinja` and
-  assert it exists, is non-empty after trim, and equals the tokenizer's
-  `chat_template` string; on failure raise with a diagnostic naming the file
+  assert it exists, is non-empty after trim, and equals the trimmed loaded
+  tokenizer's `chat_template` string; on failure raise with a diagnostic naming the file
   and the disagreement (no artifact emitted). Do NOT write `chat_template`
   into `tokenizer.json` or `tokenizer_config.json`.
 - **Verification**: `python -m pytest tests/ptq/test_driver_stage_map.py -q`
@@ -56,7 +57,7 @@
 
 ## Task 5 — Regenerate fixtures and golden to the real-artifact shape
 
-- [ ] `tools/gen_server_fixtures.py`: write the pinned Qwen3 `chat_template`
+- [x] `tools/gen_server_fixtures.py`: write the pinned Qwen3 `chat_template`
   to `chat_template.jinja` instead of injecting `chat_template` into the
   fixture `tokenizer.json` (provenance unchanged). `tools/gen_chat_golden.py`:
   read the template from `tests/fixtures/server-model/chat_template.jinja`
@@ -69,7 +70,8 @@
 
 ## Task 6 — Real-artifact regression leg (gated)
 
-- [ ] Add a gated integration test (e.g. `tests/chat_template_real_artifact.rs`)
+- [x] Add a gated integration test
+  (`crates/quantibbler-server/tests/chat_template_real_artifact.rs`)
   that reads `QKB_REAL_ARTIFACT_DIR` and SKIPs when unset; when set, it loads
   that REAL directory artifact, posts the pinned probe message
   `[{"role":"user","content":"hello"}]` to
@@ -85,7 +87,7 @@
 
 ## Task 7 — Gate suite
 
-- [ ] Run the full gate suite from the worktree and record results.
+- [x] Run the full gate suite from the worktree and record results.
 - **Verification**:
   - `cargo test -p quantibbler-server --locked` → RC=0.
   - `cargo test -p quantibbler-qpk1 --locked` → RC=0.
@@ -94,8 +96,12 @@
   - `cargo fmt --all -- --check` → RC=0.
   - `npx --yes @fission-ai/openspec validate qk-chat-template-location --strict` → RC=0.
   - `maturin build --manifest-path crates/quantibbler-kernels/Cargo.toml` → RC=0.
-  - Python tier: `uv run pytest tests/ -q` (clean tier-skips acceptable; the
-  full suite covers the three touched tools `quantize_hf_model.py`,
-  `gen_server_fixtures.py`, `gen_chat_golden.py`).
+  - Python tier: the whole suite, chunked one file per process (this box's
+    5 GiB memcg SIGKILLs a single whole-suite run) with the worktree's `src`
+    and a freshly built qpk1 extension pinned ahead of site-packages — the
+    shared venv carries another checkout's editable install and a pre-change
+    qpk1 face, so a bare `uv run pytest tests/ -q` would import both. The full
+    suite covers the three touched tools `quantize_hf_model.py`,
+    `gen_server_fixtures.py`, `gen_chat_golden.py`.
   - The real-artifact leg (Task 6) executes against the v6b artifact with the
     env-var set (not skipped).

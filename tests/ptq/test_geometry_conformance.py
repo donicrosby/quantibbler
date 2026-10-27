@@ -101,6 +101,11 @@ def tiny_model(tmp_path_factory):
     fast = PreTrainedTokenizerFast(
         tokenizer_file=str(directory / "tokenizer.json"), eos_token="<|endoftext|>"
     )
+    # A real model's tokenizer declares a chat template, and `save_pretrained`
+    # writes it to the canonical sidecar the export verifies before emitting an
+    # artifact; a synthetic model has to declare one too, or the export refuses
+    # for a reason unrelated to what this fixture exercises.
+    fast.chat_template = "{% for m in messages %}{{ m.role }}: {{ m.content }}\n{% endfor %}"
 
     torch.manual_seed(0)
     config = Qwen3Config(

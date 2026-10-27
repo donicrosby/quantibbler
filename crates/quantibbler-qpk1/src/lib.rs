@@ -155,6 +155,11 @@ const MAGIC: [u8; 4] = *b"QPK1";
 pub const VERSION: u32 = 2;
 /// Pre-bias artifacts. Read-only legacy: parsed with an empty bias vector.
 pub const LEGACY_VERSION: u32 = 1;
+/// The canonical chat-template sidecar an artifact carries (a model
+/// directory's file, or a blob's same-named raw section). This is the file
+/// the trainer's `save_pretrained` writes and the serving stack reads, so it
+/// is the one source both a directory and a blob artifact resolve from.
+pub const CHAT_TEMPLATE_FILE: &str = "chat_template.jinja";
 const TAG_FLOAT16: u32 = 1;
 const TAG_FLOAT32: u32 = 2;
 

@@ -260,9 +260,23 @@ impl HttpResult {
 }
 
 pub fn http_request(port: u16, request: &str) -> std::io::Result<HttpResult> {
+    http_request_within(port, request, Duration::from_secs(15))
+}
+
+/// [`http_request`] with a caller-chosen read/write budget.
+///
+/// The fixture-sized default is not a statement about the server: a REAL
+/// artifact's first generated token takes tens of seconds in a debug build
+/// (196 layers, no optimization), so a leg that serves one has to say how long
+/// it is prepared to wait rather than read the default as a failure.
+pub fn http_request_within(
+    port: u16,
+    request: &str,
+    budget: Duration,
+) -> std::io::Result<HttpResult> {
     let mut stream = TcpStream::connect(("127.0.0.1", port))?;
-    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(15)))?;
+    stream.set_read_timeout(Some(budget))?;
+    stream.set_write_timeout(Some(budget))?;
     stream.write_all(request.as_bytes())?;
     stream.flush()?;
     let mut bytes = Vec::new();
@@ -278,12 +292,24 @@ pub fn get(port: u16, path: &str) -> std::io::Result<HttpResult> {
 }
 
 pub fn post_json(port: u16, path: &str, body: &str) -> std::io::Result<HttpResult> {
-    http_request(
+    post_json_within(port, path, body, Duration::from_secs(15))
+}
+
+/// [`post_json`] with a caller-chosen read/write budget (see
+/// [`http_request_within`]).
+pub fn post_json_within(
+    port: u16,
+    path: &str,
+    body: &str,
+    budget: Duration,
+) -> std::io::Result<HttpResult> {
+    http_request_within(
         port,
         &format!(
             "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         ),
+        budget,
     )
 }
 
