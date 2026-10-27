@@ -541,7 +541,8 @@ change what the event should assert. It is therefore declared here and routed
 to the planner rather than improvised under this card. The shipped record —
 `gradient_norm` at the declared compute dtype — is honest as far as it goes;
 the relative-to-f64 record and the `ste_bf16_gradient_deviation` event are
-named debt, tracked by the open task row and by OQ-3.
+named debt, tracked by the open task row and by OQ-3, and routed to the planner
+card `t_76cceaa5`.
 
 ### C5: `bias_zero_assertion_gate`'s zero-bias-fails arm re-ruled — the gate fires on dropped bias, never on bias-free architecture
 
