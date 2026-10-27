@@ -68,7 +68,9 @@ def _fixture(d: int = 8):
     pinned shut. ``factorized_in_block=1`` keeps the call on the post-factorization
     side of the guard.
     """
-    cfg = PTQConfig(solver_backend="numpy", rank=4, stage_pre=StageHyper(1e-4, 4, 2))
+    cfg = PTQConfig(
+        solver_backend="numpy", compute_dtype="float64", rank=4, stage_pre=StageHyper(1e-4, 4, 2)
+    )
     block = _TwoLinearBlock(d, seed=0)
     gen = torch.Generator().manual_seed(11)
     x_b = torch.randn(4, d, generator=gen, dtype=torch.float64)
@@ -157,7 +159,12 @@ def _ste_fixture(d_in: int = 16, d_out: int = 12, rank: int = 6):
         linear.bias.zero_()
     fac = FactorizedLinear.from_weight(linear.weight.detach(), rank)
     _set_linear(linear, fac)
-    cfg = PTQConfig(solver_backend="numpy", rank=rank, stage_latent=StageHyper(1e-3, 1, 4))
+    cfg = PTQConfig(
+        solver_backend="numpy",
+        compute_dtype="float64",
+        rank=rank,
+        stage_latent=StageHyper(1e-3, 1, 4),
+    )
     x_b = torch.randn(8, 4, d_in, generator=gen, dtype=torch.float64)
     with torch.no_grad():
         y_b = linear(x_b).detach() + (
@@ -254,7 +261,13 @@ def _stat_entry(name: str, d_out_raw, d_in_raw=None):
 
 
 def _plain_cfg(**kw):
-    return PTQConfig(solver_backend="numpy", rank=4, stage_pre=StageHyper(1e-4, 4, 2), **kw)
+    return PTQConfig(
+        solver_backend="numpy",
+        compute_dtype="float64",
+        rank=4,
+        stage_pre=StageHyper(1e-4, 4, 2),
+        **kw,
+    )
 
 
 @pytest.mark.parametrize("arch", sorted(_ARCHS))
@@ -391,6 +404,7 @@ def test_scn_uniform_fallback_recorded_on_down_proj_less_block(mode):
 
     cfg = PTQConfig(
         solver_backend="numpy",
+        compute_dtype="float64",
         rank=4,
         block_loss_weight=mode,
         stage_pre=StageHyper(1e-4, 4, 2),

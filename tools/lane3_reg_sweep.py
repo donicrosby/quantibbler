@@ -76,8 +76,18 @@ def load_targets(path: Path) -> dict[str, np.ndarray]:
 
 
 def _cos(a: np.ndarray, b: np.ndarray) -> float:
+    """Cosine similarity, clamped into its own range.
+
+    The solve runs at the pipeline's declared compute dtype, so this dot product
+    is a float32-grade reduction as often as a float64 one; rounding can push the
+    quotient a few 1e-8 above 1. The cosine's range is the contract its consumers
+    read (`0 < cos <= 1`), so the clamp is arithmetic honesty rather than a
+    tolerance widening.
+    """
     den = float(np.linalg.norm(a) * np.linalg.norm(b))
-    return float(np.sum(a * b) / den) if den > 0.0 else float("nan")
+    if den <= 0.0:
+        return float("nan")
+    return float(np.clip(np.sum(a * b) / den, -1.0, 1.0))
 
 
 def run_point(name: str, w: np.ndarray, reg: float, *, provisional: bool) -> dict:
@@ -93,7 +103,13 @@ def run_point(name: str, w: np.ndarray, reg: float, *, provisional: bool) -> dic
     # tool exists to emit.
     os.environ[SOLVER_PROBE_ENV] = "1"
     try:
-        cfg = PTQConfig(rank=min(4, min(w.shape)))
+        # The sweep decides the REG default, which is a float64-regime question:
+        # the column-normalized design's scale-equivariance and the reg floor's
+        # eigenvalue bound are float64-grade properties, and at bf16 the same
+        # target rescaled by 1e3 no longer returns the same post-ADMM cos. The
+        # dtype is declared here, recorded in every row, and NOT varied by this
+        # tool -- a bf16 sweep would confound the reg decision with dtype noise.
+        cfg = PTQConfig(rank=min(4, min(w.shape)), compute_dtype="float64")
         res = lb_admm(w, cfg)
         # Read the effective value back through the SAME helper the solve used,
         # so the row attests what ran rather than what was requested.
@@ -120,6 +136,10 @@ def run_point(name: str, w: np.ndarray, reg: float, *, provisional: bool) -> dic
         "name": name,
         "reg": effective,
         "reg_source": "env",
+        # The solve ran at the pipeline's declared compute dtype, which is a real
+        # regime axis: a row that cannot name it cannot be compared with a row
+        # from the other arm. Recorded, never inferred from the tool's version.
+        "compute_dtype": cfg.compute_dtype,
         "rho_start": float(cfg.rho_start),
         "rho_end": float(rho_end_value),
         "normalization": NORMALIZATION,

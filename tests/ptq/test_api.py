@@ -85,11 +85,19 @@ def _calib(seed: int = 5, vocab: int = 10) -> list[torch.Tensor]:
 
 
 def _gate_cfg() -> PTQConfig:
-    """Test-speed stage overrides per A-10 (paper defaults stay in config)."""
+    """Test-speed stage overrides per A-10 (paper defaults stay in config).
+
+    compute_dtype is declared float64 because this fixture runs the NUMPY
+    backend, and the NumPy backend is the float64 parity oracle: bf16/float32
+    compute require the torch backend and the config refuses them by name. A
+    numpy-arm fixture that left it unset would be asking the oracle for a dtype
+    it does not carry.
+    """
     from quantibbler.ptq.config import StageHyper
 
     return PTQConfig(
         solver_backend="numpy",
+        compute_dtype="float64",
         rank=4,
         stage_pre=StageHyper(1e-4, 4, 0),
         stage_latent=StageHyper(2e-3, 4, 3),
@@ -291,11 +299,12 @@ def test_scn_export_gate_refuses_nonfinite_scales():
 
 
 def test_scn_float32_opt_in():
-    """float32_opt_in: default config runs float64; compute_dtype="float32"
-    flips the solver entry dtype — opt-in observable via config only."""
-    assert PTQConfig(
-        solver_backend="numpy",
-    ).np_compute_dtype == np.dtype(np.float64)
+    """float32_opt_in: compute_dtype="float32" flips the solver entry dtype —
+    opt-in observable via config only. (The bare config is bf16, which the
+    NumPy oracle refuses by name; the float64 arm is the oracle's own.)"""
+    assert PTQConfig(solver_backend="numpy", compute_dtype="float64").np_compute_dtype == np.dtype(
+        np.float64
+    )
     opt_in = PTQConfig(solver_backend="numpy", compute_dtype="float32")
     assert opt_in.np_compute_dtype == np.dtype(np.float32)
 
@@ -307,5 +316,8 @@ def test_scn_float32_opt_in():
     w = (gen.standard_normal((8, 6)) @ gen.standard_normal((6, 8))).astype(np.float32)
     res = lb_admm(w, PTQConfig(solver_backend="numpy", rank=3, compute_dtype="float32"))
     assert res.U.dtype == np.float32 and res.V.dtype == np.float32
-    res64 = lb_admm(w.astype(np.float64), PTQConfig(solver_backend="numpy", rank=3))
+    res64 = lb_admm(
+        w.astype(np.float64),
+        PTQConfig(solver_backend="numpy", rank=3, compute_dtype="float64"),
+    )
     assert res64.U.dtype == np.float64

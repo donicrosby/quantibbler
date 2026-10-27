@@ -31,6 +31,7 @@ __all__ = [
     "TorchBackend",
     "available_backends",
     "get_backend",
+    "host_np_dtype",
     "resolve_device",
     "to_host_np",
     "solver_backend_provenance",
@@ -61,7 +62,26 @@ def solver_backend_provenance(default: str) -> tuple[str, str]:
     return value, "env"
 
 
-def to_host_np(value, dtype=np.float64) -> np.ndarray:
+def host_np_dtype(value) -> np.dtype:
+    """The NumPy grade a backend-native value lands at on the host.
+
+    bf16 has no NumPy scalar type, so a bf16 tensor lands as float32 — an exact
+    widening (bf16 -> f32 zero-fills the low 16 bits) — and float32/float64 keep
+    their own width. This is the declared host grade, NOT a silent fp64 upcast:
+    widening every artifact to float64 is the precision laundering the one-dtype
+    pipeline exists to forbid.
+    """
+    kind = getattr(value, "dtype", None)
+    if kind is None:
+        return np.dtype(np.float64)
+    for spec, np_kind in (("float64", np.float64), ("float32", np.float32)):
+        if kind == spec or kind == getattr(np, spec):
+            return np.dtype(np_kind)
+    # bf16 (and any other no-NumPy-scalar dtype) lands at its f32 widening.
+    return np.dtype(np.float32)
+
+
+def to_host_np(value, dtype=None) -> np.ndarray:
     """The host-side boundary idiom for solver artifacts.
 
     Solver outputs are backend-native: a NumPy array on the oracle, a torch tensor
@@ -71,9 +91,22 @@ def to_host_np(value, dtype=np.float64) -> np.ndarray:
     here, so the accelerator path is inspected by exactly the same code as a CPU
     run and nobody decides the copy policy twice. NumPy inputs pass through
     unchanged.
+
+    ``dtype`` unset means the value's OWN host grade (:func:`host_np_dtype`) —
+    float32 for a bf16 or float32 tensor/array, float64 for float64. It is
+    deliberately not a float64 default: a bf16-compute run whose host hops widened
+    to fp64 would be the accumulation the declared dtype forbids, invisibly.
     """
     if hasattr(value, "detach"):  # torch tensor: move to host before converting
-        value = value.detach().cpu().numpy()
+        tensor = value.detach().cpu()
+        try:
+            value = tensor.numpy()
+        except TypeError:
+            # bf16 and other dtypes NumPy has no scalar for: widen through
+            # torch's own float32, which is exact for bf16.
+            value = tensor.float().numpy()
+    if dtype is None:
+        return np.asarray(value)
     return np.asarray(value, dtype=dtype)
 
 
@@ -288,6 +321,20 @@ class NumpyBackend(_BaseBackend):
         return self._m.ascontiguousarray(x, dtype=dtype)
 
     def dtype(self, spec: str) -> Any:
+        """NumPy carries no bf16 scalar type, so bf16 is refused BY NAME.
+
+        The alternative — letting numpy raise ``data type 'bf16' not
+        understood`` — names neither the backend nor the fix, and a caller
+        reading it cannot tell a typo from a request this backend cannot serve.
+        """
+        if spec == "bf16":
+            from .config import NumPyBackendUnsupportedDtypeError  # noqa: PLC0415
+
+            raise NumPyBackendUnsupportedDtypeError(
+                "the NumPy backend is the float64 parity oracle and has no bf16 "
+                "scalar type; bf16 compute requires the torch backend "
+                "(solver_backend='torch')"
+            )
         return self._m.dtype(spec)
 
     def scalar(self, value: Any, dtype: Any = None) -> Any:
@@ -386,7 +433,22 @@ class TorchBackend(_BaseBackend):
         return tensor.contiguous()
 
     def dtype(self, spec: str) -> Any:
-        return getattr(self.torch, spec)
+        """The declared dtype as a torch dtype.
+
+        Routed through the shared name map (:mod:`accumulation`), because the
+        pipeline spells bf16 ``bf16`` and torch spells it ``bfloat16``: a
+        ``getattr`` here would fail on the pipeline's own default.
+        """
+        from .accumulation import TORCH_DTYPE_SPECS  # noqa: PLC0415
+
+        # The float vocabulary goes through the name map; non-float specs
+        # (int8, the pack path's dtype) resolve directly, which is what they
+        # always did.
+        name = TORCH_DTYPE_SPECS.get(spec, spec)
+        try:
+            return getattr(self.torch, name)
+        except AttributeError:
+            raise ValueError(f"unknown dtype {spec!r}") from None
 
     def scalar(self, value: Any, dtype: Any = None) -> Any:
         return self.torch.tensor(value, dtype=dtype, device=self.device)

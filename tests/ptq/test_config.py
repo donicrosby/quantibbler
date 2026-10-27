@@ -7,7 +7,11 @@ import numpy as np
 import pytest
 
 from quantibbler.ptq.checkpoints import config_fingerprint
-from quantibbler.ptq.config import PTQConfig, StageHyper
+from quantibbler.ptq.config import (
+    NumPyBackendUnsupportedDtypeError,
+    PTQConfig,
+    StageHyper,
+)
 
 
 def test_scn_config_defaults():
@@ -15,6 +19,7 @@ def test_scn_config_defaults():
     informed-assumption values (A-1..A-7)."""
     cfg = PTQConfig(
         solver_backend="numpy",
+        compute_dtype="float64",
     )
 
     # Representation / global knobs.
@@ -46,14 +51,23 @@ def test_scn_config_defaults():
     assert cfg.cosine_schedule is True
 
 
-def test_scn_default_numerics_float64():
-    """default_numerics_float64: float64 is the default compute dtype and the
-    mapped numpy dtype follows it."""
-    cfg = PTQConfig(
-        solver_backend="numpy",
-    )
-    assert cfg.compute_dtype == "float64"
-    assert cfg.np_compute_dtype == np.dtype(np.float64)
+def test_scn_default_numerics_bf16():
+    """default_numerics_bf16 (qk-ptq ADDED requirement: "The pipeline SHALL
+    compute in bf16 by default with float32 and float64 as documented opt-in
+    only"): a bare PTQConfig is bf16, and bf16 has no NumPy scalar type — the
+    NumPy-backed property refuses by name rather than widening silently."""
+    cfg = PTQConfig(solver_backend="numpy")
+    assert cfg.compute_dtype == "bf16"
+    with pytest.raises(NumPyBackendUnsupportedDtypeError):
+        _ = cfg.np_compute_dtype
+
+
+def test_scn_float64_opt_in():
+    """float64_opt_in: float64 stays the paper-regime reference — selectable,
+    never default — and maps to the NumPy oracle dtype by name."""
+    f64 = PTQConfig(solver_backend="numpy", compute_dtype="float64")
+    assert f64.compute_dtype == "float64"
+    assert f64.np_compute_dtype == np.dtype(np.float64)
 
 
 def test_scn_float32_opt_in():
@@ -70,32 +84,38 @@ def test_scn_float32_opt_in():
     assert (
         PTQConfig(
             solver_backend="numpy",
+            compute_dtype="float64",
         ).scale_dtype
         == "float32"
     )
-    assert PTQConfig(solver_backend="numpy", scale_dtype="float32").scale_dtype == "float32"
+    assert (
+        PTQConfig(
+            solver_backend="numpy", compute_dtype="float64", scale_dtype="float32"
+        ).scale_dtype
+        == "float32"
+    )
     with pytest.raises(ValueError):
-        PTQConfig(solver_backend="numpy", scale_dtype="float64")
+        PTQConfig(solver_backend="numpy", compute_dtype="float64", scale_dtype="float64")
 
 
 def test_scn_config_validation():
     """Out-of-range hyperparameters are construction errors, never silent."""
     with pytest.raises(ValueError):
-        PTQConfig(solver_backend="numpy", rank=0)
+        PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=0)
     with pytest.raises(ValueError):
-        PTQConfig(solver_backend="numpy", gamma=1.5)
+        PTQConfig(solver_backend="numpy", compute_dtype="float64", gamma=1.5)
     with pytest.raises(ValueError):
-        PTQConfig(solver_backend="numpy", admm_max_iter=0)
+        PTQConfig(solver_backend="numpy", compute_dtype="float64", admm_max_iter=0)
     # rho_start = 0.0 is the recalibrated default (the admm_reg floor keeps the
     # subproblem SPD); a NEGATIVE endpoint is what must fail closed.
     with pytest.raises(ValueError):
-        PTQConfig(solver_backend="numpy", rho_start=-1e-3)
+        PTQConfig(solver_backend="numpy", compute_dtype="float64", rho_start=-1e-3)
     with pytest.raises(ValueError):
-        PTQConfig(solver_backend="numpy", admm_reg=0.0)
+        PTQConfig(solver_backend="numpy", compute_dtype="float64", admm_reg=0.0)
     with pytest.raises(ValueError):
-        PTQConfig(solver_backend="numpy", rho_end=1e-4, rho_start=1e-2)
+        PTQConfig(solver_backend="numpy", compute_dtype="float64", rho_end=1e-4, rho_start=1e-2)
     with pytest.raises(ValueError):
-        PTQConfig(solver_backend="numpy", temperature=0.0)
+        PTQConfig(solver_backend="numpy", compute_dtype="float64", temperature=0.0)
 
 
 def test_scn_loss_weight_knob_joins_checkpoint_fingerprint():
@@ -108,11 +128,12 @@ def test_scn_loss_weight_knob_joins_checkpoint_fingerprint():
     construction -- this pin holds that construction to account rather than
     assuming it.
     """
-    assert PTQConfig(solver_backend="numpy").block_loss_weight == "terminal_grad", (
-        "the paper-anchored mode is the default"
-    )
+    assert (
+        PTQConfig(solver_backend="numpy", compute_dtype="float64").block_loss_weight
+        == "terminal_grad"
+    ), "the paper-anchored mode is the default"
 
-    terminal = PTQConfig(solver_backend="numpy")
+    terminal = PTQConfig(solver_backend="numpy", compute_dtype="float64")
     uniform = dataclasses.replace(terminal, block_loss_weight="uniform")
     assert uniform.block_loss_weight == "uniform", "the knob must be a plain dataclass field"
 
@@ -123,4 +144,4 @@ def test_scn_loss_weight_knob_joins_checkpoint_fingerprint():
     # The knob accepts exactly the two modes the spec names: an unknown mode is a
     # construction error, never a silent fallback to the default.
     with pytest.raises(ValueError):
-        PTQConfig(solver_backend="numpy", block_loss_weight="rowwise")
+        PTQConfig(solver_backend="numpy", compute_dtype="float64", block_loss_weight="rowwise")

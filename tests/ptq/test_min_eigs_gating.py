@@ -41,7 +41,9 @@ def _target(m: int = 16, n: int = 12, r: int = 4, seed: int = 7) -> np.ndarray:
 
 
 def _cfg() -> PTQConfig:
-    return PTQConfig(rank=4, rho_start=1e-2, rho_end=1e2, solver_backend="numpy")
+    return PTQConfig(
+        rank=4, rho_start=1e-2, rho_end=1e2, solver_backend="numpy", compute_dtype="float64"
+    )
 
 
 @pytest.fixture

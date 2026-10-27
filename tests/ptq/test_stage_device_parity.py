@@ -127,6 +127,7 @@ def _cfg() -> PTQConfig:
     """Stage configuration, identical for both legs (the scenario's point)."""
     return PTQConfig(
         solver_backend="numpy",
+        compute_dtype="float64",
         rank=RANK,
         stage_pre=StageHyper(1e-4, BATCH, 8),
         stage_latent=StageHyper(1e-5, 1, 8),

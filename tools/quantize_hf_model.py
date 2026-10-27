@@ -87,23 +87,48 @@ os.environ.setdefault("QUANTIBBLER_KD_TMPDIR", _scratch_root())
 # BLAS/torch thread pools (each thread's stacks and scratch count against
 # the cgroup this sandbox shares).
 os.environ.setdefault("MALLOC_ARENA_MAX", "2")
-os.environ.setdefault("OMP_NUM_THREADS", "4")
-os.environ.setdefault("MKL_NUM_THREADS", "4")
-# numpy's scipy-openblas is PTHREADS-backed: OMP/MKL pins do NOT size its
-# pool, which defaults to visible-CPU count. Measured: unpinned 235.5s vs
-# pinned-to-optimum 3.98s — a 59x thread-thrash artifact, not algorithm
-# scaling. Pin it with the others.
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
-
+# Good-guest thread sizing runs HERE, above the BLAS/torch imports below: the
+# libraries read their pool sizes when they LOAD, so a sizing assignment after
+# the import is a no-op (measured). The counts come from this process's affinity
+# set and the host's 1-minute load average — never a constant, because a
+# hardcoded 16 on a shared 48-core host is what left 0 free cores and drove the
+# host's load average to 47-70 during a BLAS-heavy solve. numpy's scipy-openblas
+# is PTHREADS-backed, so OMP/MKL pins do NOT size its pool (unpinned 235.5s vs
+# pinned-to-optimum 3.98s measured — a thread-thrash artifact, not algorithm
+# scaling); all three variables move together.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
+
+# Imported from the installed/`src` package (the path insert above is what makes
+# a checkout importable without an install); the module is stdlib-only, so this
+# does not drag torch in before the sizing is applied.
+from quantibbler.good_guest import (  # noqa: E402
+    apply_gpu_memory_cap,
+    apply_thread_env,
+    apply_torch_threads,
+    is_unified_memory_device,
+    plan_from_argv,
+)
+
+GOOD_GUEST = plan_from_argv(sys.argv)
+apply_thread_env(GOOD_GUEST)
 
 import numpy as np
 import pyarrow.parquet as pq
 import torch
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# torch does not read TORCH_NUM_THREADS (or any of the env trio above) — its
+# intra-op pool is a separate knob, so the same good-guest count is applied to it
+# here, after the import that had to come second.
+GOOD_GUEST_TORCH_THREADS = apply_torch_threads(GOOD_GUEST)
+# GPU memory cap, on the same startup contract: bounded by default, opt-out by
+# flag. On a unified-memory APU the absolute --gpu-memory-gb bound is the one
+# that protects the host, so it is resolved into the same fraction here.
+GOOD_GUEST_GPU_FRACTION = apply_gpu_memory_cap(GOOD_GUEST)
+GOOD_GUEST_UNIFIED_MEMORY = is_unified_memory_device()
 
 from quantibbler.ptq.api import QuantizedModel, quantize_model
 from quantibbler.ptq.block_recon import VacuousTeacherError
@@ -139,6 +164,7 @@ from quantibbler.qk_report import (
 from quantibbler.qpk1 import REPRESENTATION_VERSION as qpk1_version
 from quantibbler.remainder_dtype import REMAINDER_DTYPES
 from quantibbler.remainder_dtype import encode as encode_remainder
+from quantibbler.remainder_dtype import host_array as remainder_host_array
 from quantibbler.remainder_dtype import itemsize as remainder_itemsize
 from quantibbler.serialization import LaunchAttributionRecord
 
@@ -475,6 +501,23 @@ def quantized_config(
     )
 
 
+def remainder_dtype_for_compute_dtype(compute_dtype: str) -> str:
+    """The remainder sidecar dtype a compute dtype defaults to.
+
+    bf16 compute exports bf16 sidecars (the one-dtype-end-to-end default);
+    fp32 and float64 compute both map to fp32, the widest storage dtype the
+    manifest vocabulary carries — float64 is a COMPUTE arm, not a storage width,
+    and a silent fp64 sidecar is exactly the upcast the export path forbids.
+    """
+    if compute_dtype == "bf16":
+        return "bf16"
+    if compute_dtype in ("float32", "float64"):
+        return "fp32"
+    raise ValueError(
+        f"unknown compute_dtype {compute_dtype!r}: expected one of ('bf16', 'float32', 'float64')"
+    )
+
+
 def _reportable_stage_payload(value: Any) -> Any:
     """Strip non-report material (tensors, modules) from a stage record.
 
@@ -573,6 +616,11 @@ def _run_identity(
         "model": args.model,
         "rank": args.rank,
         "solver": prov["solver"],
+        # The ONE dtype the pipeline computed in. It is not inferable from any
+        # other key: a bf16 run and an fp64 run over the same model, rank and
+        # data produce different bytes, so an artifact that does not name this is
+        # unidentifiable from its own report.
+        "compute_dtype": args.compute_dtype,
         "scale_dtype": prov["scale_dtype"],
         # The artifact's OTHER storage dtype. A report naming only the scale
         # dtype under-identifies the bytes: two artifacts of the same run can
@@ -610,9 +658,25 @@ def _run_identity(
         "resume": resume,
         "regime": {
             "baseline_eval": "bfloat16 (checkpoint native; papers' pedestal)",
-            "solver": "float64, per-layer just-in-time (sign margins + parity reference)",
+            "solver": (
+                f"{args.compute_dtype}, per-layer just-in-time (the float64 NumPy "
+                "backend stays the parity oracle, unit-test-only)"
+            ),
             "kd_and_ste": "model dtype (the papers' distillation regime)",
             "artifact": prov["regime_artifact"],
+        },
+        # Good-guest evidence: the bounds this run actually applied, with the
+        # host state they were derived from. Recorded rather than asserted —
+        # "the default is considerate" is only checkable against measurements.
+        "resources": {
+            "good_guest": GOOD_GUEST.enabled,
+            "cpu_cores": GOOD_GUEST.n_cores,
+            "loadavg_1m": GOOD_GUEST.loadavg,
+            "threads": GOOD_GUEST.n_threads,
+            "threads_reason": GOOD_GUEST.reason,
+            "torch_threads": GOOD_GUEST_TORCH_THREADS,
+            "gpu_memory_fraction": GOOD_GUEST_GPU_FRACTION,
+            "unified_memory_device": GOOD_GUEST_UNIFIED_MEMORY,
         },
     }
 
@@ -659,7 +723,7 @@ def verify_canonical_chat_template(out_dir: Path, chat_template: str | None) -> 
 def export_model_directory(
     out_dir: Path,
     qm: QuantizedModel,
-    embedding_f64: np.ndarray,
+    embedding_host: np.ndarray,
     model_id: str,
     eos_token_id: int,
     bos_token_id: int,
@@ -667,7 +731,7 @@ def export_model_directory(
     geometry: dict,
     inventory: list[str],
     norm_weights: np.ndarray,
-    lm_head_f64: np.ndarray | None,
+    lm_head_host: np.ndarray | None,
     tied: bool = True,
     remainder_dtype: str = "fp32",
 ) -> None:
@@ -706,16 +770,16 @@ def export_model_directory(
         layer_files[name] = rel
 
     if tied:
-        assert lm_head_f64 is None, "tied export must not pass a head matrix"
-    (out_dir / emb_name).write_bytes(encode_remainder(embedding_f64, remainder_dtype))
+        assert lm_head_host is None, "tied export must not pass a head matrix"
+    (out_dir / emb_name).write_bytes(encode_remainder(embedding_host, remainder_dtype))
     if not tied:
-        assert lm_head_f64 is not None, "untied export requires the head matrix"
-        (out_dir / head_name).write_bytes(encode_remainder(lm_head_f64, remainder_dtype))
+        assert lm_head_host is not None, "untied export requires the head matrix"
+        (out_dir / head_name).write_bytes(encode_remainder(lm_head_host, remainder_dtype))
 
     (out_dir / "config.toml").write_text(
         f"# generated by tools/quantize_hf_model.py for {model_id}\n"
-        f"vocab_size = {embedding_f64.shape[0]}\n"
-        f"d_model = {embedding_f64.shape[1]}\n"
+        f"vocab_size = {embedding_host.shape[0]}\n"
+        f"d_model = {embedding_host.shape[1]}\n"
         f"eos_token_id = {eos_token_id}\n"
         f"bos_token_id = {bos_token_id}\n"
         # `e1` is the tied SENTINEL (it names the embedding sidecar, not a
@@ -781,7 +845,7 @@ def export_model_directory(
     # d_model as the loader computes it: the embedding column count (the
     # GQA rule n_kv*head_dim == d_model is enforced server-side; heads/width
     # need not equal it per-axis, so derive the count from the same place).
-    d_model = embedding_f64.shape[1]
+    d_model = embedding_host.shape[1]
     width = {"d_model": d_model, "head_dim": geometry["head_dim"]}
     per_block = sum(width[_NORM_SLOT_WIDTH[s]] for s in inventory)
     expected_norm_floats = per_block * geometry["n_layers"] + d_model
@@ -867,9 +931,9 @@ def _export_norm_weights(causal, inventory) -> np.ndarray:
     for layer in causal.model.layers:
         for slot in inventory:
             w = _NORM_SLOT_MODULES[slot](layer)
-            parts.append(w.detach().to(torch.float32).reshape(-1))
-    parts.append(causal.model.norm.weight.detach().to(torch.float32))
-    return torch.cat(parts).cpu().numpy()
+            parts.append(remainder_host_array(w, "fp32").reshape(-1))
+    parts.append(remainder_host_array(causal.model.norm.weight, "fp32"))
+    return np.concatenate(parts)
 
 
 def _resolve_rev() -> str:
@@ -1146,12 +1210,15 @@ def main() -> int:
     parser.add_argument(
         "--remainder-dtype",
         choices=REMAINDER_DTYPES,
-        default="fp32",
+        default=None,
         help="storage dtype of the exported artifact's remainder sidecars "
         "(embedding, lm_head, norms), declared in the manifest — the only thing "
-        "the loader reads to size them. fp32 is the default and reproduces every "
-        "pre-existing artifact byte-for-byte; bf16 halves those bytes and is "
-        "lossy (8 mantissa bits)",
+        "the loader reads to size them. UNSET (the default) tracks the pipeline "
+        "compute dtype (bf16 compute -> bf16 sidecars, fp32/float64 compute -> "
+        "fp32 sidecars): one declared dtype end to end unless the operator asks "
+        "otherwise. bf16 halves those bytes and is lossy (8 mantissa bits); "
+        "compute and storage dtypes are separately declared, so 'compute bf16 + "
+        "store fp32' is a legal, declared combination",
     )
     parser.add_argument(
         "--checkpoint-dir",
@@ -1191,17 +1258,18 @@ def main() -> int:
     )
     parser.add_argument(
         "--compute-dtype",
-        default="float64",
-        choices=("float64", "float32"),
-        help="solver compute dtype for the per-layer factorization (consumed by "
-        "lb_admm and block_recon). float64 is the default and the only value a "
-        "faithful run gets for free; float32 is an opt-in accelerator -- ~2x on "
-        "the BLAS-bound ADMM solve -- whose Cholesky stability on real weights is "
-        "characterized by the layers.0 A/B, not assumed. It is recorded in "
-        "launch.env and in every solver-probe row, so an fp32 artifact is "
-        "identifiable from its own directory rather than from someone's "
-        "scrollback: two arms whose rows are indistinguishable are the same "
-        "provenance gap as an unlabelled rho_end.",
+        default="bf16",
+        choices=("bf16", "float32", "float64"),
+        help="the ONE dtype the pipeline computes in (consumed by lb_admm, "
+        "block_recon and every stage). bf16 is the default; float32 and float64 "
+        "are selectable non-defaults (float64 remains the paper-regime reference, "
+        "reachable but never default). bf16/float32 require the torch backend — "
+        "the NumPy parity oracle is float64-only and refuses them by name. The "
+        "value is recorded in launch.env, the run report and every solver-probe "
+        "row, so an artifact is identifiable from its own directory rather than "
+        "from someone's scrollback: two arms whose rows are indistinguishable are "
+        "the same provenance gap as an unlabelled rho_end. Accumulation dtypes are "
+        "derived from this (float32 under bf16), never a second knob.",
     )
     parser.add_argument(
         "--device",
@@ -1218,6 +1286,43 @@ def main() -> int:
         "not require porting the solver. Timed on the CPU path: the torch stages are "
         "about 69%% of wall, which is what this moves.",
     )
+    parser.add_argument(
+        "--max-threads",
+        type=int,
+        default=None,
+        help="cap on the CPU thread count the good-guest sizing computes "
+        "(min(computed, N)). The default is the computed value — cores minus a "
+        "load-aware margin — so this flag only ever TIGHTENS the bound. For an "
+        "explicit opt-out of the sizing entirely, use --no-good-guest",
+    )
+    parser.add_argument(
+        "--no-good-guest",
+        action="store_true",
+        help="disable the good-guest bounds: no thread-pool environment is set "
+        "and the GPU memory cap is skipped. For benchmarking on a dedicated "
+        "host; the default is considerate",
+    )
+    parser.add_argument(
+        "--gpu-memory-fraction",
+        type=float,
+        default=None,
+        help="override the 0.85 per-process GPU memory cap",
+    )
+    parser.add_argument(
+        "--gpu-memory-gb",
+        type=float,
+        default=None,
+        help="absolute per-process GPU memory cap in GB. On a unified-memory "
+        "APU (device memory IS host RAM) this is the bound that actually "
+        "protects co-tenants — the fraction alone can still drain the host",
+    )
+    parser.add_argument(
+        "--device-audit",
+        action="store_true",
+        help="fail closed on any tensor argument whose device disagrees with the "
+        "module's own parameters, naming the call site. For debugging a device "
+        "mismatch; off by default (a long run must not die to its own instrument)",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path, default=Path("artifacts") / "model-qpk1")
     parser.add_argument(
@@ -1229,6 +1334,13 @@ def main() -> int:
         "qk-artifact-blob BW-1; the report records the blob's sha256.",
     )
     args = parser.parse_args()
+
+    # Remainder storage dtype tracks the compute dtype when unset: one declared
+    # dtype end to end. The two are separately settable (compute bf16 + store
+    # fp32 is a legal declared combination), so an explicit flag always wins —
+    # this only fills a default the operator did not state.
+    if args.remainder_dtype is None:
+        args.remainder_dtype = remainder_dtype_for_compute_dtype(args.compute_dtype)
 
     # Ownership BEFORE anything is written: a run that cannot name its owner is
     # refused, and a refused run leaves no trail line claiming to be a launch.
@@ -1272,6 +1384,11 @@ def main() -> int:
     # for "which device" can disagree with where the parameters actually are, and
     # the mismatch then surfaces frames away from its cause.
     causal.to(_device)
+    # --device-audit is the operator's switch; the auditor itself reads the env
+    # because it is installed by wrapping nn.Module.__call__, and a wrapper the
+    # pipeline could opt out of per call site would not be fail-closed.
+    if args.device_audit:
+        os.environ["QUANTIBBLER_DEVICE_AUDIT"] = "1"
     from quantibbler.ptq.device_audit import install_device_auditor
 
     if install_device_auditor():
@@ -1431,7 +1548,7 @@ def main() -> int:
                     ratio=ratio,
                 )
 
-    _stage("[4/6] PTQ: bf16 model, per-layer float64 solver (block recon + scale KD)")
+    _stage(f"[4/6] PTQ: {args.compute_dtype} compute, per-layer solver (block recon + scale KD)")
     _bread("entering quantize_model: block recon first, then KD scale calibration")
     solver_t = time.time()
     aborted: PrefixProbeAbort | None = None
@@ -1572,8 +1689,8 @@ def main() -> int:
         artifact_exported = False
         if measured_artifact:
             print("[6/6] exporting qk-server model directory ->", out_dir, flush=True)
-            embedding_f64 = (
-                causal.get_input_embeddings().weight.detach().to(torch.float64).cpu().numpy()
+            embedding_host = remainder_host_array(
+                causal.get_input_embeddings().weight, args.remainder_dtype
             )
             # Attention geometry + norm inventory + norm weights straight from the
             # live model (never hardcoded): the exported artifact must be
@@ -1582,8 +1699,8 @@ def main() -> int:
             # here must match the engine's slot semantics exactly. Head tying is
             # the MODEL's property, not an export choice (Qwen3 ships untied).
             tied = bool(getattr(causal.config, "tie_word_embeddings", False))
-            lm_head_f64 = (
-                causal.get_output_embeddings().weight.detach().to(torch.float64).cpu().numpy()
+            lm_head_host = (
+                remainder_host_array(causal.get_output_embeddings().weight, args.remainder_dtype)
                 if not tied
                 else None
             )
@@ -1594,7 +1711,7 @@ def main() -> int:
             export_model_directory(
                 out_dir,
                 qm,
-                embedding_f64=embedding_f64,
+                embedding_host=embedding_host,
                 model_id=args.model.replace("/", "-"),
                 eos_token_id=cfg.eos_token_id,
                 bos_token_id=cfg.bos_token_id,
@@ -1602,7 +1719,7 @@ def main() -> int:
                 geometry=geometry,
                 inventory=inventory,
                 norm_weights=norm_weights,
-                lm_head_f64=lm_head_f64,
+                lm_head_host=lm_head_host,
                 tied=tied,
                 remainder_dtype=args.remainder_dtype,
             )
@@ -1661,6 +1778,13 @@ def main() -> int:
             "model": args.model,
             "rank": args.rank,
             "solver": prov["solver"],
+            # The ONE dtype the pipeline computed in, and the good-guest bounds
+            # actually applied. Both are identity fields shared by EVERY exit
+            # path (`_run_identity`): a completion report that omitted them
+            # would not have the same key set as the abort and stage-failure
+            # reports, which spread the helper directly.
+            "compute_dtype": args.compute_dtype,
+            "resources": identity["resources"],
             "scale_dtype": prov["scale_dtype"],
             "remainder_dtype": args.remainder_dtype,
             "seq_len": args.seq_len,
@@ -1681,7 +1805,10 @@ def main() -> int:
             "qpk1_layer_bytes": total_qpk1,
             "regime": {
                 "baseline_eval": "bfloat16 (checkpoint native; papers' pedestal)",
-                "solver": "float64, per-layer just-in-time (sign margins + parity reference)",
+                "solver": (
+                    f"{args.compute_dtype}, per-layer just-in-time (the float64 NumPy "
+                    "backend stays the parity oracle, unit-test-only)"
+                ),
                 "kd_and_ste": "model dtype (the papers' distillation regime)",
                 "artifact": prov["regime_artifact"],
             },

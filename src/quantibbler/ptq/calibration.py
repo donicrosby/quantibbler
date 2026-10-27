@@ -103,6 +103,11 @@ def _accumulate(rows: torch.Tensor, total: torch.Tensor, count: int) -> tuple[to
     # boundary rather than guessing at creation: the activation's device is the
     # only authority on where the sum must happen. A no-op on CPU.
     if torch.is_tensor(total):
+        # The accumulator's grade owns BOTH the device and the width: squaring
+        # and summing at a bf16 activation's own dtype is the mantissa loss the
+        # accumulation contract exists to prevent, and it cannot be recovered by
+        # widening the finished sum.
+        flat = flat.to(total.dtype)
         total = total.to(flat.device)
     return total + flat.pow(2).sum(dim=0), count + int(flat.shape[0])
 
@@ -193,7 +198,12 @@ def _to_numpy_stat(t: torch.Tensor) -> np.ndarray:
 
 
 def collect_stats(
-    module: nn.Module, calibration_batches, *, chunk_rows: int | None = None, cotangent=None
+    module: nn.Module,
+    calibration_batches,
+    *,
+    chunk_rows: int | None = None,
+    cotangent=None,
+    accum_dtype: torch.dtype | None = None,
 ) -> LayerStatsBook:
     """Run calibration batches forward (and backward) once through ``module``.
 
@@ -202,6 +212,11 @@ def collect_stats(
     output-gradient feature (backward pass). ``module`` may be a single
     layer or a whole model; gradients are enabled for the statistics pass
     and the module's parameter ``.grad`` fields are restored afterwards.
+
+    ``accum_dtype`` is the declared accumulation grade for the running
+    sum-of-squares (float32 under bf16 compute). ``None`` derives it from each
+    weight's own dtype by the same pure mapping, so a bf16 model cannot end up
+    accumulating statistics in bf16.
 
     ``chunk_rows`` splits each batch's backward into row chunks (the raw f64
     gradient is accumulated across chunks and squared once, preserving the
@@ -237,16 +252,28 @@ def collect_stats(
     # concatenates exactly as landed.
     streaming = chunk_rows is not None
     feats_in: dict[str, list[torch.Tensor]] = {name: [] for name, _ in linears}
-    # Accumulators are born on the weights' device, not the default (CPU) one:
-    # the hook feeds them activations from wherever the model ran. A no-op on CPU.
-    sum_sq_in = {
-        name: torch.zeros(m.weight.shape[1], dtype=m.weight.dtype, device=m.weight.device)
-        for name, m in linears
-    }
-    sum_sq_out = {
-        name: torch.zeros(m.weight.shape[0], dtype=m.weight.dtype, device=m.weight.device)
-        for name, m in linears
-    }
+
+    # Accumulation grade for the running sum-of-squares: the declared one when
+    # the caller knows it (the pipeline does), else the pure-function default —
+    # float32 under a low-precision weight dtype, identity above. A sum of
+    # squares is exactly the site bf16's 7-bit mantissa cannot carry, so the
+    # accumulator must never be born at the weight dtype of a bf16 model.
+    # Born on the weights' device, not the default (CPU) one: the hook feeds
+    # them activations from wherever the model ran. A no-op on CPU.
+    def _accumulator_dtype(weight_dtype: torch.dtype) -> torch.dtype:
+        if accum_dtype is not None:
+            return accum_dtype
+        if weight_dtype in (torch.bfloat16, torch.float16):
+            return torch.float32
+        return weight_dtype
+
+    def _acc_zeros(features: int, m) -> torch.Tensor:
+        """A zero accumulator at the declared grade, on the weight's own device."""
+        dev = m.weight.device
+        return torch.zeros(features, dtype=_accumulator_dtype(m.weight.dtype), device=dev)
+
+    sum_sq_in = {name: _acc_zeros(m.weight.shape[1], m) for name, m in linears}
+    sum_sq_out = {name: _acc_zeros(m.weight.shape[0], m) for name, m in linears}
     rows_in = {name: 0 for name, _ in linears}
     rows_out = {name: 0 for name, _ in linears}
     # d_out = E[g^2] from the REAL loss gradient at each layer's output ([NQ]
@@ -254,14 +281,15 @@ def collect_stats(
     # feed an INPUT-side gradient term is retired: it was loss-blind, and on a
     # benign unit-norm fixture it inflated d_in by ~6e6 (measured 2911800.35
     # against an analytic 0.5).
-    grad_sq_out = {
-        name: torch.zeros(m.weight.shape[0], dtype=m.weight.dtype, device=m.weight.device)
-        for name, m in linears
-    }
+    grad_sq_out = {name: _acc_zeros(m.weight.shape[0], m) for name, m in linears}
 
     def _accumulate_grad(key: str, g: torch.Tensor) -> None:
-        rows = g.reshape(-1, g.shape[-1])
-        grad_sq_out[key] = grad_sq_out[key] + cotangent_grad_sq_sum(rows).to(grad_sq_out[key].dtype)
+        # Widen BEFORE the square-sum, not after: the statistic SUMS over every
+        # row of the capture, so the accumulator's grade is what decides the
+        # result — squaring at the gradient's own (bf16) width and widening the
+        # finished sum would carry bf16 mantissa loss through the whole pass.
+        rows = g.reshape(-1, g.shape[-1]).to(grad_sq_out[key].dtype)
+        grad_sq_out[key] = grad_sq_out[key] + cotangent_grad_sq_sum(rows)
 
     handles = []
     for name, m in linears:
@@ -397,7 +425,7 @@ def collect_stats(
     return book
 
 
-def robust_diag(d_in_raw, d_out_raw=None, *, tau=None, gamma=0.2):
+def robust_diag(d_in_raw, d_out_raw=None, *, tau=None, gamma=0.2, dtype="float64"):
     """Robust diagonal preconditioners D~_in / D~_out (Eq. 3, [NQ] Step 2-1).
 
     Entries are clipped to the ceiling tau **before** shrinkage
@@ -414,11 +442,18 @@ def robust_diag(d_in_raw, d_out_raw=None, *, tau=None, gamma=0.2):
     A tiny positive floor keeps zero-variance statistics finite and
     positive. Returns a ``(d_in, d_out)`` tuple; with ``d_out_raw=None`` the
     scalar form returns a single vector.
+
+    ``dtype`` names the working grade: the preconditioner is derived from the
+    raw statistic by a CLIP and a convex shrink, so it is not an accumulation —
+    but it is a compute-path tensor and takes the pipeline's declared grade
+    (float32 under bf16), never an implicit widen. ``float64`` is the default
+    and the grade every NumPy-oracle fixture pins.
     """
+    work = np.dtype(dtype)
     scalar = d_out_raw is None
-    vecs = [np.asarray(d_in_raw, dtype=np.float64).copy()]
+    vecs = [np.asarray(d_in_raw, dtype=work).copy()]
     if not scalar:
-        vecs.append(np.asarray(d_out_raw, dtype=np.float64).copy())
+        vecs.append(np.asarray(d_out_raw, dtype=work).copy())
     out = []
     for vec in vecs:
         if vec.ndim != 1:

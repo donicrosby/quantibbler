@@ -21,6 +21,7 @@ import torch
 from torch import nn
 
 from ._probe import _note_ptq_progress
+from .accumulation import accumulation_np_dtype, accumulation_torch_dtype
 from .block_recon import QuantizedLayerState, _quantizable_names, reconstruct_model
 from .calibration import collect_stats
 from .config import PTQConfig
@@ -139,7 +140,14 @@ def quantize_model(
     # stream, which is line 9's TUNING input, not the paper's statistics input.
     chunk_rows = _phase1_chunk_rows(model)
     _note_ptq_progress(f"phase 1 statistics: {len(batches)} batches", time.monotonic() - _ptq_t0)
-    stats_book = collect_stats(model, batches, chunk_rows=chunk_rows)
+    # The whole-model statistics pass accumulates at the declared grade (float32
+    # under bf16): the sum-of-squares is the site bf16's mantissa cannot carry.
+    stats_book = collect_stats(
+        model,
+        batches,
+        chunk_rows=chunk_rows,
+        accum_dtype=accumulation_torch_dtype(config.compute_dtype),
+    )
     _note_ptq_progress("phase 1 statistics done", time.monotonic() - _ptq_t0)
     if recorder is not None:
         recorder(
@@ -225,8 +233,8 @@ def quantize_model(
         # +~0.03 BPW); if float16 is ever opted back in, an
         # overflow must die HERE with a message naming the real stage,
         # not downstream at the export gate.
-        s1_cast = st.s1.astype(scale_dt).astype(np.float64)
-        s2_cast = st.s2.astype(scale_dt).astype(np.float64)
+        s1_cast = st.s1.astype(scale_dt).astype(accumulation_np_dtype(config.compute_dtype))
+        s2_cast = st.s2.astype(scale_dt).astype(accumulation_np_dtype(config.compute_dtype))
         if not (np.isfinite(s1_cast).all() and np.isfinite(s2_cast).all()):
             from ..qpk1 import Qpk1Error
 
@@ -237,7 +245,7 @@ def quantize_model(
             )
         st.s1 = s1_cast
         st.s2 = s2_cast
-    _write_scales_to_host(model, layers)
+    _write_scales_to_host(model, layers, config)
 
     stem, post = _split_stem_post(model)
     return QuantizedModel(
@@ -248,22 +256,27 @@ def quantize_model(
     )
 
 
-def _write_scales_to_host(model: nn.Module, layers: dict[str, QuantizedLayerState]) -> None:
+def _write_scales_to_host(
+    model: nn.Module, layers: dict[str, QuantizedLayerState], config: PTQConfig
+) -> None:
     """Rebuild each quantized linear's frozen weight from the final scales.
 
     Phase 3 tunes the scale vectors held in the layer artifacts; until this
     write-back the host model still carries the Phase-2 weights, so the host
     forward would disagree with the serialized artifact after reload.
+
+    The reconstruction ``diag(s1) Ub Vbᵀ diag(s2)`` is a sum over the rank, so
+    it runs at the declared accumulation grade — float32 under bf16 — and the
+    product is cast once by the ``copy_`` into the linear's own weight dtype.
     """
+    work = accumulation_np_dtype(config.compute_dtype)
     modules = dict(model.named_modules())
     for name, st in layers.items():
         linear = modules.get(name)
         if not isinstance(linear, nn.Linear):
             raise RuntimeError(f"layer {name!r} not found in the host model")
         with torch.no_grad():
-            w_q = (st.s1[:, None] * st.Ub.astype(np.float64)) @ (
-                st.s2[:, None] * st.Vb.astype(np.float64)
-            ).T
+            w_q = (st.s1[:, None] * st.Ub.astype(work)) @ (st.s2[:, None] * st.Vb.astype(work)).T
             linear.weight.copy_(torch.from_numpy(np.ascontiguousarray(w_q)))
             if linear.bias is not None and st.bias is not None:
                 linear.bias.copy_(torch.from_numpy(np.ascontiguousarray(st.bias)))
@@ -389,9 +402,8 @@ class QuantizedModel:
             linear = modules.get(name)
             if not isinstance(linear, nn.Linear):
                 raise RuntimeError(f"layer {name!r} not found in the host model")
-            w_q = (st.s1[:, None] * st.Ub.astype(np.float64)) @ (
-                st.s2[:, None] * st.Vb.astype(np.float64)
-            ).T
+            work = accumulation_np_dtype(self.config.compute_dtype)
+            w_q = (st.s1[:, None] * st.Ub.astype(work)) @ (st.s2[:, None] * st.Vb.astype(work)).T
             with torch.no_grad():
                 linear.weight.copy_(torch.from_numpy(np.ascontiguousarray(w_q)))
                 if linear.bias is not None and st.bias is not None:

@@ -4,9 +4,11 @@ Defaults follow [NQ] (nanoquant-2602.06694v3) Appendix C where the paper
 states values; everything else is a qk-ptq design informed assumption and is
 commented with its assumption ID (design.md section 8).
 
-Numerics policy (config.yaml method invariants): solvers compute in float64
-by default; float32 is a documented, opt-in accelerator, never a silent
-default — ``compute_dtype`` accepts only ``"float64"`` / ``"float32"`` and
+Numerics policy (config.yaml method invariants): the pipeline computes in bf16
+by default; float32 and float64 are selectable non-defaults. ONE declared dtype
+flows through every stage — no stage silently upcasts, and widening to an
+accumulation dtype is an explicit per-site declaration (``accumulation.py``).
+``compute_dtype`` accepts only ``"bf16"`` / ``"float32"`` / ``"float64"`` and
 anything else raises.
 """
 
@@ -19,9 +21,14 @@ import numpy as np
 
 from ..qk_report import COLLAPSE_LINE
 
-__all__ = ["PTQConfig", "StageHyper", "PrefixProbeAbort"]
+__all__ = [
+    "NumPyBackendUnsupportedDtypeError",
+    "PTQConfig",
+    "StageHyper",
+    "PrefixProbeAbort",
+]
 
-_COMPUTE_DTYPES = ("float64", "float32")
+_COMPUTE_DTYPES = ("bf16", "float32", "float64")
 _SOLVER_BACKENDS = ("torch", "numpy")
 _SCALE_DTYPES = ("float16", "float32")
 # Root-cause ablation knobs: each isolates ONE
@@ -31,6 +38,36 @@ _FACTOR_MODES = ("binary", "fp")
 _ABLATIONS = ("none", "untuned-signs")
 _LAYER_SCOPES = ("all", "self_attn", "mlp")
 _LOSS_WEIGHT_MODES = ("terminal_grad", "uniform")
+
+
+class NumPyBackendUnsupportedDtypeError(RuntimeError):
+    """A compute dtype the NumPy backend cannot represent was requested.
+
+    The NumPy backend carries float32 and float64 by name (it is the float64
+    parity oracle), but has no bfloat16 scalar type at all — so bf16 compute
+    must be refused BY NAME rather than mapped to a nearest neighbour. A silent
+    mapping would make a bf16 run execute and report at a different precision
+    than its own provenance claims.
+    """
+
+
+def np_compute_dtype_spec(compute_dtype: str) -> str:
+    """The NumPy scalar dtype a declared compute dtype maps to.
+
+    ``bf16`` is refused by name — NumPy has no bf16 scalar type, so mapping it
+    to float32 would silently run a bf16-declared run at a precision its
+    provenance does not name.
+    """
+    if compute_dtype == "bf16":
+        raise NumPyBackendUnsupportedDtypeError(
+            "compute_dtype='bf16' has no NumPy scalar type: the NumPy backend is "
+            "the float64 parity oracle and cannot represent bf16. bf16 compute "
+            "requires the torch backend; request solver_backend='torch', or "
+            "declare compute_dtype='float64' (or 'float32')."
+        )
+    if compute_dtype not in ("float32", "float64"):
+        raise ValueError(f"compute_dtype must be one of {_COMPUTE_DTYPES}, got {compute_dtype!r}")
+    return compute_dtype
 
 
 class PrefixProbeAbort(RuntimeError):
@@ -101,8 +138,10 @@ class PTQConfig:
     Attributes:
         rank: factorization rank r (a single global default; per-layer
             schedules are OQ-3, out of v0.1 scope).
-        compute_dtype: solver numerics — ``"float64"`` default per
-            config.yaml, ``"float32"`` only by explicit opt-in.
+        compute_dtype: the ONE dtype the pipeline computes in — ``"bf16"``
+            default per the bf16-end-to-end ruling, ``"float32"`` and
+            ``"float64"`` selectable non-defaults (float64 stays the
+            paper-regime reference, selectable, never default).
         scale_dtype: qpk1 scale storage dtype (qk-representation container
             stores float16 by default; float32 opt-in).
         seed: global seed ([NQ] App. C uses seed 0).
@@ -153,7 +192,7 @@ class PTQConfig:
     """
 
     rank: int = 8
-    compute_dtype: str = "float64"
+    compute_dtype: str = "bf16"
     # Torch is the production backend; NumPy is the parity oracle.
     solver_backend: str = "torch"
     scale_dtype: str = "float32"
@@ -244,8 +283,16 @@ class PTQConfig:
 
     @property
     def np_compute_dtype(self) -> np.dtype:
-        """The numpy scalar dtype for solver entry points."""
-        return np.dtype(self.compute_dtype)
+        """The numpy scalar dtype for solver entry points.
+
+        bf16 has no NumPy scalar type, so it is REFUSED by name rather than
+        mapped to float32: a silent widening here would run the bf16 arm's
+        NumPy-touching paths at a precision the run's own provenance does not
+        name. NumPy-compute is the float64 parity oracle, reachable only by
+        declaring ``compute_dtype`` accordingly.
+        """
+        spec = np_compute_dtype_spec(self.compute_dtype)
+        return np.dtype(spec)
 
     def __post_init__(self) -> None:
         if self.block_loss_weight not in _LOSS_WEIGHT_MODES:
@@ -257,8 +304,9 @@ class PTQConfig:
             )
         if self.compute_dtype not in _COMPUTE_DTYPES:
             raise ValueError(
-                f"compute_dtype must be one of {_COMPUTE_DTYPES} (float32 is opt-in "
-                f"only, never a default), got {self.compute_dtype!r}"
+                f"compute_dtype must be one of {_COMPUTE_DTYPES} (bf16 is the "
+                f"default; float32 and float64 are opt-in only), got "
+                f"{self.compute_dtype!r}"
             )
         if self.solver_backend not in _SOLVER_BACKENDS:
             raise ValueError(

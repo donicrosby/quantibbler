@@ -2,7 +2,7 @@
 
 ## Phase 1: config + validation (dtype knob)
 
-- [ ] 1.1 **Add bf16 to PTQConfig.compute_dtype and change default.**
+- [x] 1.1 **Add bf16 to PTQConfig.compute_dtype and change default.**
   `config.py`: `_COMPUTE_DTYPES = ("bf16", "float32", "float64")`, default
   `"bf16"`. Validation accepts all three. `np_compute_dtype` mapping: `"bf16"`
   → **raises `NumPyBackendUnsupportedDtypeError`** (NumPy backend is
@@ -11,7 +11,7 @@
   `uv run pytest tests/ptq/test_config.py -v`. Expected: new test covering
   bf16 validation + default + error on NumPy bf16 attempt.
 
-- [ ] 1.2 **Accumulation dtype constants.** Define named per-site
+- [x] 1.2 **Accumulation dtype constants.** Define named per-site
   accumulation dtype in a new `accumulation.py` (or inline in each module).
   Each site: `ACCUM_DTYPE = torch.float32 if compute_dtype == torch.bfloat16
   else compute_dtype`. The mapping is a pure function of compute_dtype, not
@@ -19,18 +19,18 @@
 
 ## Phase 2: FactorizedLinear dtype generic
 
-- [ ] 2.1 **Remove hardcoded float64 from FactorizedLinear.__init__.**
+- [x] 2.1 **Remove hardcoded float64 from FactorizedLinear.__init__.**
   `_factorized.py`: latents stored at `compute_dtype` (not `.double()`).
   Scales `s1`/`s2` at `compute_dtype`. Bias at `compute_dtype`. Constructor
   takes `compute_dtype` parameter. Run `uv run pytest tests/ptq/test_factorized.py -v`.
 
-- [ ] 2.2 **FactorizedLinear.from_weight dtype-generic.**
+- [x] 2.2 **FactorizedLinear.from_weight dtype-generic.**
   SVD init: on GPU, use `torch.linalg.svd` at **float32** accumulation
   dtype (justified accumulation site — bf16 SVD is platform-dependent); on
   CPU, use NumPy float64 path then cast. The NumPy path stays the parity
   reference. Run `uv run pytest tests/ptq/test_factorized.py -v`.
 
-- [ ] 2.3 **_factor_terms at compute_dtype.**
+- [x] 2.3 **_factor_terms at compute_dtype.**
   The activation_dtype parameter equals `compute_dtype`. The STE passthrough
   operates at compute_dtype (identical algebra). Verify STE gradient parity
   at float64 vs old path. Run
@@ -38,7 +38,7 @@
 
 ## Phase 3: Solver dtype generic + GPU
 
-- [ ] 3.1 **solver_backend.py: dtype-aware to_host_np.**
+- [x] 3.1 **solver_backend.py: dtype-aware to_host_np.**
   `to_host_np` parameterized by compute_dtype. Default maps to `np.float32`
   for bf16/float32, `np.float64` for float64. The NumPy parity backend stays
   float64-only. Run `uv run pytest tests/ptq/test_solver_backend.py -v`.
@@ -49,6 +49,12 @@
   compute_dtype. Dead-channel scale floor at `compute_dtype`. Run
   `uv run pytest tests/ptq/test_lb_admm.py -v`.
   Expected: per-dtype tolerance assertions (1e-2 bf16, 1e-4 float32, 1e-12 float64).
+  **OPEN SUB-CLAUSE (measured, 2026-10-27):** the normal equations, Cholesky, SVID
+  rank-1 and balance norms all execute at the accumulation dtype and the iterate
+  is cast to `compute_dtype` only at the storage boundary — but the dead-channel
+  scale floor is still the named float64-eps constant `DEFAULT_SCALE_FLOOR`. A
+  per-dtype floor is a numerics change (float32 eps x64 is ~7.6e-6 vs 1.4e-14)
+  and is NOT made here; the row stays open for that one clause.
 
 - [ ] 3.3 **lb_admm.py: torch device tensors.**
   ADMM entry: tensors stay on the module's device (no `.cpu().numpy()`).
@@ -56,18 +62,43 @@
   SVD init: `torch.linalg.svd` on device tensors at float32. The two
   host↔device round-trips per layer are eliminated. Run
   `uv run pytest tests/ptq/test_lb_admm.py -v`.
+  **OPEN (measured, 2026-10-27):** the torch backend solves on device tensors,
+  but the ENTRY still takes host arrays (`_block_stage` does
+  `to_host_np(linear.weight)` then hands NumPy to `lb_admm`), so the per-layer
+  host↔device crossing is reduced, not eliminated. Closing it means threading a
+  device tensor through `lb_admm`/`magnitude_balance`'s signatures — a solver
+  API change that belongs with the device-placement measurement, and it cannot be
+  verified on an accelerator-less host.
 
-- [ ] 3.4 **Parity suite: dtype×device matrix.**
+- [x] 3.4 **Parity suite: dtype×device matrix.**
   Extend parity tests across `{bf16, float32, float64} × {CPU, GPU}`.
   Per-dtype tolerances: bf16 1e-2, float32 1e-4, float64 1e-12.
-  CPU path runs always. GPU path runs only on the designated GPU hardware
-  lane (`quantibbler-ptq:rocm-official` container, digest-pinned, on Strix
-  Halo/gfx1151), with exact skip-count discipline — every skipped GPU cell
-  MUST produce a documented skip event. Run `uv run pytest tests/ptq/ -k parity -v`.
+  CPU path runs always. GPU path runs on the designated GPU hardware lane
+  (`quantibbler-ptq:rocm-official-v6` container, digest-pinned
+  `sha256:7e397b0d…`, on Strix Halo/gfx1151 — the `-v6` variant because
+  `rocm-official`'s own interpreter has neither `pytest` nor `pydantic` and dies
+  at collection), with exact skip-count discipline: the accelerator cells carry
+  `@pytest.mark.integration` so the default tier DESELECTS them rather than
+  counting them as skips (CI's `full-python` job refuses any skip —
+  `tools/ci/pytest_summary.py --expect-skipped 0`), and the leg's `skipif` still
+  reports the named reason wherever the lane runs without an accelerator.
+  Run `uv run pytest tests/ptq/ -k parity -v`.
+  **CPU cells: SHIPPED** (`tests/ptq/test_pipeline_dtype_generic.py`, three
+  parametrized cells + the float64 NumPy reference). **GPU cells: SHIPPED**
+  (`tests/ptq/test_pipeline_dtype_gpu.py::test_scn_admm_parity_gpu_cell[bf16|float32|float64]`,
+  same fixture, same reachable metric, same classes) — measured on the GPU lane
+  card `t_f8e3b1d8` 2026-10-27: all six cells inside their declared class
+  (bf16 CPU 1.017e-3 / GPU 1.022e-3 vs the 1e-2 class; float32 3.132e-7 / 3.264e-6
+  vs 1e-4; float64 7.578e-16 / 5.873e-15 vs 1e-12), every arm converged and
+  returned its latents on the declared device. Evidence:
+  `openspec/changes/qk-pipeline-dtype/gpu-lane-evidence.md` §2. The converged
+  output cosine is recorded there and does NOT separate dtypes on either device
+  (0.73–0.86 for the float64 torch-vs-NumPy control), corroborating design.md C1
+  on the accelerator; the ruling on that metric is `t_5a964ad9`.
 
 ## Phase 4: Pipeline stages dtype generic
 
-- [ ] 4.1 **calibration.py: dtype-generic statistics.**
+- [x] 4.1 **calibration.py: dtype-generic statistics.**
    `collect_stats`: activations captured at `compute_dtype`. Chunked
    statistics: sum-of-squares accumulator at accumulation dtype (float32
    under bf16). `to_host_np` at compute_dtype. Chunk path stays bit-identical
@@ -78,40 +109,58 @@
    Diagonal entries at `compute_dtype`. Clipping and shrinkage at
    `compute_dtype`. The `DEFAULT_SCALE_FLOOR` at `compute_dtype`. Run
    `uv run pytest tests/ptq/test_robust_diag.py -v`.
+   **OPEN SUB-CLAUSE (measured, 2026-10-27):** `robust_diag` is now
+   dtype-parametric (clip and shrinkage at the passed working grade, wired from
+   `_block_stage` at the declared accumulation dtype), but `DEFAULT_SCALE_FLOOR`
+   is unchanged — same open clause as 3.2.
 
-- [ ] 4.3 **block_recon.py: dtype-generic block reconstruction.**
+- [x] 4.3 **block_recon.py: dtype-generic block reconstruction.**
    TuneFP: teacher output Y_b, quantized prefix throughput at
    `compute_dtype`. Loss and backward at `compute_dtype`. STE refinement:
    `_actor_terms` at `compute_dtype`. Run
    `uv run pytest tests/ptq/test_block_recon.py -v`.
 
-- [ ] 4.4 **bit_polish.py: dtype-generic polish.**
+- [x] 4.4 **bit_polish.py: dtype-generic polish.**
    Greedy polish at `compute_dtype`. Bit-flip proposals and objective
    evaluation at `compute_dtype`. Run
    `uv run pytest tests/ptq/test_bit_polish.py -v`.
 
-- [ ] 4.5 **TuneScalesKD: dtype-generic.**
+- [x] 4.5 **TuneScalesKD: dtype-generic.**
    Scales are already at `compute_dtype` (from FactorizedLinear). KL loss
    computation at `compute_dtype`. Teacher logit cache at `compute_dtype`.
    Run `uv run pytest tests/ptq/test_tune_scales_kd.py -v`.
 
+- 4.6 **`ste_dtype_generic` — FOLDED into OQ-3 (planner ruling, 2026-10-27), not a task of this change.**
+   The bf16-relative-to-f64 STE gradient record and the 1e-3 deviation bound are
+   a first-production-run diagnostic owned by design.md OQ-3 (which states the
+   same measurement verbatim); the `ste_bf16_gradient_deviation` event is retired
+   from this change's delta (zero producers/readers; its correct shape depends on
+   OQ-3's outcome). The `ste_dtype_generic` scenario now asserts only the shipped
+   behavior — non-zero bf16 latent gradients + `gradient_norm` at the declared
+   compute dtype. A follow-up spec change defines the then-appropriate
+   instrumentation/event once OQ-3's verdict is measured. See design.md C4 + OQ-3.
+
 ## Phase5: Device placement
 
-- [ ] 5.1 **Per-stage device placement map.**
+- [x] 5.1 **Per-stage device placement map.**
    Every stage reads the device from the owning module's parameters
    (`next(m.parameters()).device`) — never from a global or threaded-out
    state. Accelerator stages: capture, TuneFP, solver (ADMM/SVD), STE,
    TuneScalesKD, eval. Host-side stages: sign/extract/pack (latent-to-bit
    conversion boundary — `x >= 0` convention, not `torch.sign`), qpk1 export
    (disk write). Run `uv run pytest tests/ptq/ -k device -v`.
+   **Accelerator confirmation (t_f8e3b1d8, 2026-10-27):** on the GPU lane the
+   accelerator stages report `cuda:0` (`ste`, `ste.per_linear[].device`,
+   `tune_scales_kd`) and the torch solver returns its latents on `cuda:0` for all
+   three dtypes — see `gpu-lane-evidence.md` §2, §4.
 
-- [ ] 5.2 **Device-mismatch auditor.**
+- [x] 5.2 **Device-mismatch auditor.**
    Opt-in `nn.Module.__call__` wrapper that raises on tensor args whose
    device differs from the module's device. Enabled by `--device-audit` flag
    for debugging; off by default. Run
    `uv run pytest tests/ptq/test_device_audit.py -v`.
 
-- [ ] 5.3 **CPU path: good-guest thread sizing.**
+- [x] 5.3 **CPU path: good-guest thread sizing.**
    At driver startup, BEFOR any import of torch or BLAS: execute sizing
    block — `sched_getaffinity` → n_cores, `/proc/loadavg` → 1-min load,
    compute `n_threads` per design.md formula (light/moderate/heavy branches).
@@ -121,24 +170,40 @@
    override. `--no-good-guest` disables. Run
    `uv run pytest tests/ptq/test_good_guest.py -v`.
 
-- [ ] 5.4 **GPU memory fraction cap.**
+- [x] 5.4 **GPU memory fraction cap.**
    `torch.cuda.set_per_process_memory_fraction(0.85)` at startup when discrete
    GPU present. On APU/iGPU devices (Strix Halo/gfx1151), additionally enforce
    absolute-GB cap (`--gpu-memory-gb G`) to prevent host-RAM drain. Record
    `max_memory_reserved()` in report. `--gpu-memory-fraction F` and
    `--gpu-memory-gb G` overrides. Run
    `uv run pytest -k gpu_memory` (GPU-present gate).
+   **Run on the GPU lane card `t_f8e3b1d8` 2026-10-27** (the row's own acceptance
+   is a GPU-present gate, unconstructable on a CPU-only host):
+   `tests/ptq/test_pipeline_dtype_gpu.py::test_scn_gpu_memory_cap_recorded` PASSED
+   on `quantibbler-ptq:rocm-official-v6` / gfx1151 — `apply_gpu_memory_cap` →
+   0.85 on device 0; `is_unified_memory_device()` → True (this box IS the APU
+   case, so the absolute-GB bound is the operative one);
+   `resolve_memory_fraction(0.85, gb=8, total=133 143 986 176)` → 0.0645
+   (the `--gpu-memory-gb` narrowing, ~13x below the bare fraction); and
+   `max_memory_reserved()` recorded at 16 777 216 B under a live allocation,
+   inside the cap. Evidence: `gpu-lane-evidence.md` §5.1.
 
-- [ ] 5.5 **Per-stage timing rows.**
+- [x] 5.5 **Per-stage timing rows.**
    Every pipeline stage (capture, TuneFP, solver, STE, sign/extract/pack,
    TuneScalesKD, eval, export) records elapsed-wall seconds as a JSONL row,
    appended as each stage produces its timing. The per-layer aggregate enables
    comparison against the ~8h v6-class baseline. Run
    `uv run pytest tests/ptq/ -k timing`.
+   **GPU rows measured (t_f8e3b1d8, 2026-10-27):** every stage of the map emits a
+   row on the accelerator (capture 0.0005 s, TuneFP 0.139 s, solver 1.355 s,
+   STE 0.147 s, sign/extract/pack 0.030 s, TuneScalesKD 0.063 s, export 0.0001 s,
+   eval 0.0003 s; pipeline wall 1.85 s at load1 ≈ 7–15, 3.39 s at load1 ≈ 41.5 —
+   the box was shared). The CPU column's solver share is 93 % of the tiny-path
+   wall. Evidence: `gpu-lane-evidence.md` §4.
 
 ## Phase6: Hardcoded-dtype elimination
 
-- [ ] 6.1 **Grep-evidenced elimination in PTQ pipeline.**
+- [x] 6.1 **Grep-evidenced elimination in PTQ pipeline.**
    Every `.double()`, `torch.float32`, `torch.float64`, `np.float32`,
    `np.float64`, and `astype(…float…)` call site in `src/quantibbler/ptq/`
    and `tools/quantize_hf_model.py` is either made parametric or justified.
@@ -148,32 +213,32 @@
    (a) parametric, (b) accumulation-site, (c) parity-oracle. Populate the
    enumeration in design.md's crystallization section. Run after Phase4.
 
-- [ ] 6.2 **Driver: remove float64 hardcodes in export path.**
+- [x] 6.2 **Driver: remove float64 hardcodes in export path.**
    `tools/quantize_hf_model.py`: embedding/lm_head export at remainder_dtype
    (no `.to(torch.float64).cpu().numpy()` intermediate). Norm weights at
    remainder_dtype. `remainder_dtype` default `"bf16"` (tracks compute_dtype
    when unset). Run `uv run pytest tests/ptq/test_e2e.py -v`.
 
-- [ ] 6.3 **Container wapper: update defaults.**
+- [x] 6.3 **Container wapper: update defaults.**
    `tools/run-ptq-container.sh`: `COMPUTE_DTYPE:-bf16` (was `:-float64`).
    `OMP_NUM_THREADS` derived from container's visible cores, not hardcoded
    16. Run: wrapper DRY_RUN test.
 
-- [ ] 6.4 **config.yaml method-invariant update.**
+- [x] 6.4 **config.yaml method-invariant update.**
    Config line: "solvers compute in float64 by default" → "solvers compute in
    bf16 by default; float32 and float64 are selectable non-defaults."
    Run: `npx --yes @fission-ai/openspec validate qk-pipeline-dtype --strict`.
 
 ## Phase7: Spec delta + validation
 
-- [ ] 7.1 **Spec delta: MODIFED requirements.**
+- [x] 7.1 **Spec delta: MODIFED requirements.**
    Two MODIFED requirements in `qk-ptq`:
    - ADMM solver (dtype-generic, device placement).
    - Factorized components STE refinement (dtype-generic).
    Every MODIFED preserves all existing scenarios + adds new ones.
    Default-numerics requirement was REMOVED + ADDED (not MODIFED).
 
-- [ ] 7.2 **Spec delta: ADDED requirements.**
+- [x] 7.2 **Spec delta: ADDED requirements.**
    Ten ADDED requirements (one in first ADDED section: bf16-default numerics;
    nine in second ADDED section):
    - Bf16 default numerics (replaces REMOVED float64 default).
@@ -192,7 +257,7 @@
    section's first (grep-evidenced) requirement — 10 ADDED total, matching
    proposal.md's impact count.
 
-- [ ] 7.3 **Validate spec.**
+- [x] 7.3 **Validate spec.**
    `npx --yes @fission-ai/openspec validate qk-pipeline-dtype --strict`.
    Expected: "Change 'qk-pipeline-dtype' is valid" — zero warnings.
 
@@ -205,14 +270,14 @@
    design.md. Two peripheral findings routed to t_373bdeff — no scope
    expansion for this change.
 
-- [ ] 8.2 **Bias dtype path in FactorizedLinear.**
+- [x] 8.2 **Bias dtype path in FactorizedLinear.**
    Bias tensor stored at `compute_dtype` (not `.double()`). Bias carried
    through solver, STE, and export at `compute_dtype`. Zero-bias assertion
    test at bf16 compute: `uv run pytest tests/ptq/ -k bias`.
 
 ## Phase9: Gates
 
-- [ ] 9.1 **Full gate suite.**
+- [x] 9.1 **Full gate suite.**
    `uv sync --all-groups && uv run pytest -x -q &&
    cargo test --manifest-path crates/quantibbler-kernels/Cargo.toml &&
    cargo clippy --manifest-path crates/quantibbler-kernels/Cargo.toml --all-targets -- -D warnings &&
@@ -220,3 +285,12 @@
    maturin develop --manifest-path crates/quantibbler-kernels/Cargo.toml &&
    pre-commit run --all-files`
    All gates green. Record per-dtype tolerance evidence in the test output.
+   **Run as shipped (2026-10-27), with the interpreter named because the row's
+   `uv run` forms are wrong from a linked worktree** — `uv sync`/`uv run` here
+   re-point the SHARED `/opt/venv` at the calling tree for every other lane, so
+   the gates ran as `/opt/venv/bin/python -m pytest` with
+   `PYTHONPATH=<worktree>/src` asserted to win (`quantibbler.__file__`), the
+   ptq tier file-by-file (46 fast files + the 6 slow driver/e2e files), then
+   `cargo test` in `crates/quantibbler-kernels`, `uv run --no-sync maturin build
+   --manifest-path crates/quantibbler-kernels/Cargo.toml`, and
+   `pre-commit run --all-files` (11/11 after `git add -N -A`).

@@ -69,10 +69,10 @@ def _factor_terms(
 class FactorizedLinear(nn.Module):
     """A linear layer replaced by its latent factorization.
 
-    Holds the continuous latents (u_latent, v_latent) and scales (s1, s2)
-    as float64 parameters for refinement; the effective terms come from
-    :func:`_factor_terms` — the single definition every forward and write-back
-    site consults — and the forward maps
+    Holds the continuous latents (u_latent, v_latent), scales (s1, s2) and bias
+    as parameters at the declared ``compute_dtype`` — the ONE dtype the pipeline
+    computes in. The effective terms come from :func:`_factor_terms` — the single
+    definition every forward and write-back site consults — and the forward maps
     ``x -> ((s2 ⊙ f(V)) V-side) ((f(U)) (s1 ⊙ U))ᵀ x + b``.
     """
 
@@ -82,25 +82,70 @@ class FactorizedLinear(nn.Module):
         v_latent: torch.Tensor,
         bias: torch.Tensor,
         factor_mode: str = "binary",
+        compute_dtype: torch.dtype | None = None,
     ):
         super().__init__()
         dout, r = u_latent.shape
         din, r_v = v_latent.shape
         if r != r_v:
             raise ValueError("factor ranks disagree")
-        self.u_latent = nn.Parameter(u_latent.clone().double())
-        self.v_latent = nn.Parameter(v_latent.clone().double())
-        self.s1 = nn.Parameter(torch.ones(dout, dtype=torch.float64))
-        self.s2 = nn.Parameter(torch.ones(din, dtype=torch.float64))
-        self.bias = nn.Parameter(bias.clone().double())
+        # Unset means "the dtype this layer's own latents already carry": a caller
+        # that built device-native latents at the pipeline dtype must not be
+        # silently re-cast to a default. bf16 has no NumPy scalar type, so a
+        # float64 default here would be unreachable for the bf16 arm anyway.
+        dtype = compute_dtype if compute_dtype is not None else u_latent.dtype
+        self.u_latent = nn.Parameter(u_latent.clone().to(dtype))
+        self.v_latent = nn.Parameter(v_latent.clone().to(dtype))
+        self.s1 = nn.Parameter(torch.ones(dout, dtype=dtype))
+        self.s2 = nn.Parameter(torch.ones(din, dtype=dtype))
+        self.bias = nn.Parameter(bias.clone().to(dtype))
         self.dout, self.din, self.rank = dout, din, r
+        self.compute_dtype = dtype
         # The ablation mode is solver state carried by the layer, so every
         # forward site agrees without re-deriving it (D-1/D-6).
         self.factor_mode = factor_mode
 
     @classmethod
-    def from_weight(cls, weight: torch.Tensor, rank: int, bias: torch.Tensor | None = None):
-        """Seed the latents from a truncated SVD of the weight (A-6)."""
+    def from_weight(
+        cls,
+        weight: torch.Tensor,
+        rank: int,
+        bias: torch.Tensor | None = None,
+        compute_dtype: torch.dtype | None = None,
+    ):
+        """Seed the latents from a truncated SVD of the weight (A-6).
+
+        Two lanes, because bf16 SVD is platform-dependent and may not converge:
+
+        * accelerator: ``torch.linalg.svd`` at float32 accumulation dtype — an
+          explicit, named accumulation site, not the device dtype;
+        * CPU: the NumPy float64 reference path, the executable specification the
+          accelerator lane is accepted against, cast to ``compute_dtype`` before
+          it is stored.
+
+        Either way the returned module's parameters are ``compute_dtype``: the
+        SVD is an initialization, not a storage decision.
+        """
+        target = compute_dtype if compute_dtype is not None else weight.dtype
+        if weight.device.type == "cuda":
+            # float32 accumulation: a bf16 SVD of a d_out x d_in matrix has ~7
+            # mantissa bits in the vectors and is device-dependent; float32 is
+            # stable for the ranks the pipeline uses and stays one ulp class
+            # below the reference it is compared against.
+            u_mat, s_vec, vt_mat = torch.linalg.svd(
+                weight.detach().to(torch.float32), full_matrices=False
+            )
+            rr = min(rank, int(s_vec.numel()))
+            root = s_vec[:rr].sqrt()
+            u0 = (u_mat[:, :rr] * root).contiguous()
+            v0 = (vt_mat[:rr].T * root).contiguous()
+            if bias is None:
+                b0 = torch.zeros(weight.shape[0], device=weight.device, dtype=target)
+            else:
+                b0 = bias.detach().to(target)
+            return cls(u0, v0, b0, compute_dtype=target)
+        # parity-oracle: float64 by design (the NumPy SVD init is the executable
+        # specification the accelerator lane is measured against).
         w_np = weight.detach().to(torch.float64).cpu().numpy()
         u_mat, s_vec, vt_mat = np.linalg.svd(w_np, full_matrices=False)
         rr = min(rank, s_vec.size)
@@ -111,11 +156,14 @@ class FactorizedLinear(nn.Module):
         _dev = weight.device
         u0 = torch.from_numpy(np.ascontiguousarray(u_mat[:, :rr] * np.sqrt(s_vec[:rr]))).to(_dev)
         v0 = torch.from_numpy(np.ascontiguousarray(vt_mat[:rr].T * np.sqrt(s_vec[:rr]))).to(_dev)
+        # Built in the WEIGHT's own dtype and cast once by the constructor: the
+        # width of the transient host numpy array above is the oracle's, not the
+        # module's storage decision.
         if bias is None:
-            b0 = torch.zeros(w_np.shape[0], dtype=torch.float64, device=weight.device)
+            b0 = torch.zeros(w_np.shape[0], device=weight.device, dtype=weight.dtype)
         else:
-            b0 = bias.detach().to(torch.float64)
-        return cls(u0, v0, b0)
+            b0 = bias.detach().to(weight.dtype)
+        return cls(u0, v0, b0, compute_dtype=target)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Effective weight W_q = (s1 ⊙ f(U)) @ (s2 ⊙ f(V))ᵀ, shape (dout, din)
@@ -132,8 +180,8 @@ class QuantizedLayerState:
     Attributes:
         name: module name in declaration order.
         Ub / Vb: int8 ±1 binary factors (sign(0) = +1).
-        s1 / s2: float64 scale vectors.
-        bias: float64 bias vector (fp, unfactorized).
+        s1 / s2: scale vectors at the pipeline's declared host grade.
+        bias: bias vector (fp, unfactorized) at the same grade.
     """
 
     __slots__ = ("name", "Ub", "Vb", "s1", "s2", "bias")
@@ -170,7 +218,10 @@ def _set_linear(linear: nn.Linear, fac: FactorizedLinear, factor_mode: str = "bi
     under ``no_grad`` the helper returns literal ``sign``.
     """
     with torch.no_grad():
-        left, right = _factor_terms(fac, torch.float64, factor_mode)
+        # The layer's OWN dtype — the declared compute dtype it stores its
+        # parameters at (D-1). A hardcoded width here would write a weight the
+        # pipeline's other stages never computed.
+        left, right = _factor_terms(fac, fac.u_latent.dtype, factor_mode)
         linear.weight.copy_((left @ right.T).to(linear.weight.dtype))
         if linear.bias is not None:
             linear.bias.copy_(fac.bias.to(linear.bias.dtype))
@@ -297,6 +348,12 @@ def check_layer_magnitude(name, U, V, s1, s2, W, cfg) -> float:
     of the solve phase instead of surfacing as garbage perplexity after
     the full pipeline.
     """
+    # accumulation-site: float64 by arithmetic justification. This gate decides
+    # CATASTROPHE (band [1/F, F] with F ~ 1e4), and the statistic is a Frobenius
+    # norm summing over every d_out x d_in entry — a bf16 accumulator would carry
+    # ~7 mantissa bits into a ratio whose whole job is to be right about orders of
+    # magnitude. The host arrays it consumes are already at the declared host
+    # grade (to_host_np); widening them here is the gate's, not the pipeline's.
     s1 = np.asarray(s1, dtype=np.float64)
     s2 = np.asarray(s2, dtype=np.float64)
     if not (np.all(np.isfinite(s1)) and np.all(np.isfinite(s2))):

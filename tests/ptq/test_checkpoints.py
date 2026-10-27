@@ -27,6 +27,7 @@ from quantibbler.ptq.config import PTQConfig, StageHyper
 def _cfg() -> PTQConfig:
     return PTQConfig(
         solver_backend="numpy",
+        compute_dtype="float64",
         rank=4,
         stage_pre=StageHyper(1e-4, 4, 0),
         stage_latent=StageHyper(2e-3, 4, 3),

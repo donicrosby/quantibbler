@@ -23,6 +23,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from .accumulation import accumulation_np_dtype
 from .block_recon import QuantizedLayerState
 from .config import PTQConfig
 
@@ -110,25 +111,31 @@ def calibrate_scales(
             break
     if device is None:
         device = next(model.parameters()).device
+    # Working grade for the KL stage: the pipeline's declared accumulation dtype.
+    # bf16 has no host scalar type, so a bf16-compute run's scales ARE a float32
+    # host array -- widening them to float64 here (the pre-change form) would be
+    # an undeclared upcast, and the scales this stage hands back are the ones the
+    # artifact carries.
+    work_np = accumulation_np_dtype(cfg.compute_dtype)
     # Scale tensors live outside the modules so no Linear weight is ever in
     # the autograd graph of this phase.
     s1_params = {
-        name: torch.from_numpy(np.ascontiguousarray(st.s1, dtype=np.float64)).to(device)
+        name: torch.from_numpy(np.ascontiguousarray(st.s1, dtype=work_np)).to(device)
         for name, st in layers.items()
     }
     s2_params = {
-        name: torch.from_numpy(np.ascontiguousarray(st.s2, dtype=np.float64)).to(device)
+        name: torch.from_numpy(np.ascontiguousarray(st.s2, dtype=work_np)).to(device)
         for name, st in layers.items()
     }
     # The packed factors are frozen for the whole stage, so they are built ONCE
     # here (on the device, at stage scope) rather than rebuilt from NumPy inside
     # every step: the per-step rebuild was both the device mismatch and pure cost.
     ub_params = {
-        name: torch.from_numpy(np.ascontiguousarray(st.Ub.astype(np.float64))).to(device)
+        name: torch.from_numpy(np.ascontiguousarray(st.Ub.astype(work_np))).to(device)
         for name, st in layers.items()
     }
     vb_params = {
-        name: torch.from_numpy(np.ascontiguousarray(st.Vb.astype(np.float64))).to(device)
+        name: torch.from_numpy(np.ascontiguousarray(st.Vb.astype(work_np))).to(device)
         for name, st in layers.items()
     }
     # Pre-stage snapshots (trust-region references + restore sources).
@@ -297,15 +304,15 @@ def calibrate_scales(
             # st.s1 arrays are themselves NaN and rebinding is not optional; on
             # the accelerator the .to(device) copy left them untouched and the
             # rebind is simply idempotent.
-            st.s1 = np.array(pre_s1[name], dtype=np.float64, copy=True)
-            st.s2 = np.array(pre_s2[name], dtype=np.float64, copy=True)
+            st.s1 = np.array(pre_s1[name], dtype=work_np, copy=True)
+            st.s2 = np.array(pre_s2[name], dtype=work_np, copy=True)
             continue
         pre1 = np.maximum(np.abs(pre_s1[name]), 1e-30)
         pre2 = np.maximum(np.abs(pre_s2[name]), 1e-30)
         t1 = s1_params[name].detach().cpu().numpy()
         t2 = s2_params[name].detach().cpu().numpy()
-        st.s1 = np.clip(t1, 0.5 * pre1, 2.0 * pre1).astype(np.float64).copy()
-        st.s2 = np.clip(t2, 0.5 * pre2, 2.0 * pre2).astype(np.float64).copy()
+        st.s1 = np.clip(t1, 0.5 * pre1, 2.0 * pre1).astype(work_np).copy()
+        st.s2 = np.clip(t2, 0.5 * pre2, 2.0 * pre2).astype(work_np).copy()
     n_restored = sum(
         1
         for name in layers

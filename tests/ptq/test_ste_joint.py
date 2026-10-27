@@ -119,6 +119,7 @@ def _quiet():
 def _block_cfg(*, stage_latent: StageHyper | None = None) -> PTQConfig:
     return PTQConfig(
         solver_backend="numpy",
+        compute_dtype="float64",
         rank=3,
         stage_latent=stage_latent or StageHyper(1e-3, 4, 8),
     )
@@ -379,7 +380,9 @@ def test_joint_pass_frees_every_factorized_linear_at_once():
     ordering is non-monotone, because the composition gets two bounded passes
     where the joint pass gets one.
     """
-    cfg = PTQConfig(solver_backend="numpy", rank=4, stage_latent=StageHyper(0.3, 1, 1))
+    cfg = PTQConfig(
+        solver_backend="numpy", compute_dtype="float64", rank=4, stage_latent=StageHyper(0.3, 1, 1)
+    )
     steps = 48
 
     # Control: the per-target unit's free set is one linear.

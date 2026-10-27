@@ -100,8 +100,10 @@ context: |
   - LB path (QAT): SVD init (Dual-SVID) or Joint-ITQ init ([LB2]), sign
     estimation with Straight-Through Estimator, multi-scale compensation,
     knowledge distillation from the fp32 teacher ([LB] Sec 3).
-  - Numerics: solvers compute in float64 by default; float32 is a
-    documented, opt-in accelerator, never the silent default.
+  - Numerics: solvers compute in bf16 by default; float32 and float64 are
+    selectable non-defaults. One declared compute dtype flows through every
+    stage — widening to an accumulation dtype is an explicit per-site
+    declaration, never a silent upcast.
   - No network access at runtime; model and calibration data are user
     supplied. Downloading models is the caller's job (documented, not built).
 

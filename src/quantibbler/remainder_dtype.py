@@ -31,6 +31,7 @@ __all__ = [
     "cast_to_bf16",
     "decode",
     "encode",
+    "host_array",
     "itemsize",
 ]
 
@@ -78,6 +79,32 @@ def cast_to_bf16(values) -> torch.Tensor:
             "bf16 encoding refuses values outside bf16's finite range (they overflow to inf)"
         )
     return cast
+
+
+def host_array(values, dtype: str) -> np.ndarray:
+    """Host-side numpy view of a weight, at the grade this codec reads.
+
+    The ONE hop from a torch weight to the arrays :func:`encode` writes. float32
+    is the HOST grade, not a compute or an accumulation dtype: bf16 storage is
+    written from an f32 host array because bf16 -> f32 widening is exact and the
+    round-to-nearest-even storage cast is applied by :func:`encode`; fp32 storage
+    is written from the same array word-for-word. A float64 host array here would
+    be the silent upcast the artifact contract forbids, and the export path takes
+    no such intermediate.
+
+    Kept here, beside the byte contract, so every exporter reaches the bytes the
+    same way — the dtype vocabulary and the hop that feeds it stay one story.
+
+    ``dtype`` is the artifact's declared STORAGE grade, not this hop's grade:
+    the host array is always float32 (a bf16 sidecar is written from it by
+    :func:`encode`). It is still read here — through :func:`itemsize`, the same
+    refusal ``encode``/``decode`` use — so an undeclared or misspelled token is
+    refused by name at this boundary instead of riding silently into the writer.
+    """
+    itemsize(dtype)
+    if hasattr(values, "detach"):  # torch tensor: widen then move to host
+        return values.detach().to(torch.float32).cpu().numpy()
+    return np.asarray(values, dtype=np.float32)
 
 
 def encode(values, dtype: str) -> bytes:

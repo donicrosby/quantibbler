@@ -201,7 +201,9 @@ def test_scn_ste_records_its_own_objective_effect():
     # starting at its own optimum would make the effect assertion vacuous.
     y_b = linear(x_b).detach() + torch.randn(8, 4, 12, generator=gen, dtype=torch.float64) * 0.5
 
-    cfg = PTQConfig(solver_backend="numpy", rank=6, stage_latent=StageHyper(1e-2, 4, 4))
+    cfg = PTQConfig(
+        solver_backend="numpy", compute_dtype="float64", rank=6, stage_latent=StageHyper(1e-2, 4, 4)
+    )
     stats = _tune_latent_ste(linear, {"": fac}, x_b, y_b, cfg, 4, steps=256, label="probe")
     rec = stats["per_linear"][""]
     assert rec["gradient_norm"] > 0.0, (
@@ -232,7 +234,9 @@ def test_scn_paper_ste_crosses_a_near_zero_latent_and_records_counts():
     x_b = torch.randn(8, 4, 16, generator=gen, dtype=torch.float64)
     y_b = torch.randn(8, 4, 12, generator=gen, dtype=torch.float64)
 
-    cfg = PTQConfig(solver_backend="numpy", rank=6, stage_latent=StageHyper(1e-3, 4, 4))
+    cfg = PTQConfig(
+        solver_backend="numpy", compute_dtype="float64", rank=6, stage_latent=StageHyper(1e-3, 4, 4)
+    )
     stats = _tune_latent_ste(linear, {"": fac}, x_b, y_b, cfg, 4, steps=8, label="probe")
     rec = stats["per_linear"][""]
     assert rec["steps"] == 8
@@ -252,7 +256,9 @@ def test_scn_zero_flip_completion_is_never_silent():
     """Far-from-zero latents: the stage declares scale-only, or the gate fails."""
     block = _SevenLinearBlock(seed=31)
     sink: list = []
-    cfg = PTQConfig(solver_backend="numpy", rank=3, stage_latent=StageHyper(1e-8, 4, 8))
+    cfg = PTQConfig(
+        solver_backend="numpy", compute_dtype="float64", rank=3, stage_latent=StageHyper(1e-8, 4, 8)
+    )
     calib = _calib(8, seed=31)
     reconstruct_block(
         block, calib, cfg, cotangent=_fixed_cot(block, calib), recorder=_recorder(sink)
@@ -299,7 +305,9 @@ def test_aborted_step_contributes_no_flips(monkeypatch, capsys):
     x_b = torch.randn(8, 4, 16, generator=gen, dtype=torch.float64)
     y_b = torch.randn(8, 4, 12, generator=gen, dtype=torch.float64)
 
-    cfg = PTQConfig(solver_backend="numpy", rank=6, stage_latent=StageHyper(1e-3, 4, 4))
+    cfg = PTQConfig(
+        solver_backend="numpy", compute_dtype="float64", rank=6, stage_latent=StageHyper(1e-3, 4, 4)
+    )
     seen = _abort_on_the_second_step(monkeypatch, fac)
     entry_value = float(fac.u_latent.detach()[0, 0])
     stats = _tune_latent_ste(linear, {"": fac}, x_b, y_b, cfg, 4, steps=8, label="probe")
@@ -361,6 +369,7 @@ def test_aborted_step_does_not_skip_the_mechanism_ladder(monkeypatch):
     block = _SevenLinearBlock(seed=51)
     cfg = PTQConfig(
         solver_backend="numpy",
+        compute_dtype="float64",
         rank=3,
         stage_latent=StageHyper(1e-8, 4, 8),
         ste_flip_pass_budget=4,
@@ -401,7 +410,9 @@ def test_scn_refinement_covers_every_factorized_linear_with_full_budget():
     """
     block = _SevenLinearBlock(seed=41)
     sink: list = []
-    cfg = PTQConfig(solver_backend="numpy", rank=3, stage_latent=StageHyper(1e-3, 4, 8))
+    cfg = PTQConfig(
+        solver_backend="numpy", compute_dtype="float64", rank=3, stage_latent=StageHyper(1e-3, 4, 8)
+    )
     calib = _calib(8, seed=41)
     reconstruct_block(
         block, calib, cfg, cotangent=_fixed_cot(block, calib), recorder=_recorder(sink)
@@ -455,7 +466,9 @@ def test_full_budget_is_per_linear_not_a_pooled_split():
     """
     block = _SevenLinearBlock(seed=47)
     sink: list = []
-    cfg = PTQConfig(solver_backend="numpy", rank=3, stage_latent=StageHyper(1e-3, 4, 1))
+    cfg = PTQConfig(
+        solver_backend="numpy", compute_dtype="float64", rank=3, stage_latent=StageHyper(1e-3, 4, 1)
+    )
     calib = _calib(8, seed=47)
     reconstruct_block(
         block, calib, cfg, cotangent=_fixed_cot(block, calib), recorder=_recorder(sink)
@@ -480,6 +493,7 @@ def test_full_budget_is_per_linear_not_a_pooled_split():
 def _faithful_cfg(**kwargs) -> PTQConfig:
     return PTQConfig(
         solver_backend="numpy",
+        compute_dtype="float64",
         rank=3,
         stage_latent=StageHyper(1e-8, 4, 8),
         paper_faithful=True,
@@ -546,7 +560,12 @@ def test_scn_paper_faithful_disables_greedy_polish(monkeypatch):
     br.reconstruct_block(
         blk,
         calib,
-        PTQConfig(solver_backend="numpy", rank=3, stage_latent=StageHyper(1e-8, 4, 8)),
+        PTQConfig(
+            solver_backend="numpy",
+            compute_dtype="float64",
+            rank=3,
+            stage_latent=StageHyper(1e-8, 4, 8),
+        ),
         cotangent=_fixed_cot(blk, calib),
         recorder=_recorder(sink2),
     )
@@ -556,6 +575,7 @@ def test_scn_paper_faithful_disables_greedy_polish(monkeypatch):
         lb2["polish_rounds"]
         == PTQConfig(
             solver_backend="numpy",
+            compute_dtype="float64",
         ).polish_rounds
     )
 
@@ -597,6 +617,7 @@ def test_scn_flip_pass_accepts_only_on_the_block_objective():
     """Deterministic sweep, monotone objective, GQA k/v shape typechecks."""
     cfg = PTQConfig(
         solver_backend="numpy",
+        compute_dtype="float64",
         rank=3,
         stage_latent=StageHyper(1e-8, 4, 8),
         ste_flip_pass_budget=4,
@@ -631,6 +652,7 @@ def test_scn_flip_pass_is_reproducible():
     """Same seed, same sweep -> identical flip sequence and acceptance."""
     cfg = PTQConfig(
         solver_backend="numpy",
+        compute_dtype="float64",
         rank=3,
         stage_latent=StageHyper(1e-8, 4, 8),
         ste_flip_pass_budget=3,
@@ -740,6 +762,7 @@ def test_the_divergence_gate_fires_on_a_band_the_live_block_cannot_meet():
     # Silence side: a generous band must not fire on an honest reconstruction.
     generous = PTQConfig(
         solver_backend="numpy",
+        compute_dtype="float64",
         rank=3,
         stage_latent=StageHyper(1e-3, 4, 1),
         divergence_band_factor=1e6,
@@ -755,6 +778,7 @@ def test_the_divergence_gate_fires_on_a_band_the_live_block_cannot_meet():
     # ||Wq||_F/||W||_F within 1e-4 of 1.0, so a band that tight must fire.
     tight = PTQConfig(
         solver_backend="numpy",
+        compute_dtype="float64",
         rank=3,
         stage_latent=StageHyper(1e-3, 4, 1),
         divergence_band_factor=1.0001,

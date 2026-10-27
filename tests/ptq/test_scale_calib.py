@@ -47,7 +47,12 @@ def test_scn_kl_scale_calibration():
     # PTQConfig defaults.
     from quantibbler.ptq.config import StageHyper
 
-    cfg = PTQConfig(solver_backend="numpy", rank=4, stage_global=StageHyper(2e-2, 16, 10))
+    cfg = PTQConfig(
+        solver_backend="numpy",
+        compute_dtype="float64",
+        rank=4,
+        stage_global=StageHyper(2e-2, 16, 10),
+    )
 
     # Stand up a layer book by hand: factorize fc1/fc2 signs from their
     # weights with alpha-consistent scales (as reconstruct_block would).
@@ -146,7 +151,12 @@ def test_scn_kd_nonfinite_poison_restores_snapshot():
     model = _TinyKDModel(seed=1)
     gen = torch.Generator().manual_seed(2)
     batches = [torch.randn(2, 4, 8, generator=gen, dtype=torch.float64) for _ in range(2)]
-    cfg = PTQConfig(solver_backend="numpy", rank=4, stage_global=StageHyper(2e-2, 16, 10))
+    cfg = PTQConfig(
+        solver_backend="numpy",
+        compute_dtype="float64",
+        rank=4,
+        stage_global=StageHyper(2e-2, 16, 10),
+    )
     layers = _kd_layer_book(model)
     pre = {n: (st.s1.copy(), st.s2.copy()) for n, st in layers.items()}
 
@@ -188,7 +198,9 @@ def test_scn_kd_trust_region_bounds_movement():
     model = _TinyKDModel(seed=1)
     gen = torch.Generator().manual_seed(2)
     batches = [torch.randn(2, 4, 8, generator=gen, dtype=torch.float64) for _ in range(2)]
-    cfg = PTQConfig(solver_backend="numpy", rank=4, stage_global=StageHyper(1e3, 16, 2))
+    cfg = PTQConfig(
+        solver_backend="numpy", compute_dtype="float64", rank=4, stage_global=StageHyper(1e3, 16, 2)
+    )
     layers = _kd_layer_book(model)
     pre = {n: (st.s1.copy(), st.s2.copy()) for n, st in layers.items()}
 

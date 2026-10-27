@@ -63,7 +63,7 @@ def test_scn_block_loop_order():
     d = 8
     b0, b1 = _TinyBlock(d, seed=0), _TinyBlock(d, seed=1)
     events: list[str] = []
-    cfg = PTQConfig(solver_backend="numpy", rank=4)
+    cfg = PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=4)
     # Instrument stages via the recorder hook.
     captured: dict[str, object] = {}
 
@@ -121,7 +121,7 @@ def test_block_loop_consumes_the_phase1_book_entry_for_entry(monkeypatch):
     d = 8
     model = nn.Sequential(_TinyBlock(d, seed=0), _TinyBlock(d, seed=1))
     batches = _calib(d, seed=4)
-    cfg = PTQConfig(solver_backend="numpy", rank=4)
+    cfg = PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=4)
     # Bare Sequential: no trunk/head, so the book needs a caller-supplied
     # cotangent (spec: caller_supplied_head_for_bare_block).
     with torch.no_grad():
@@ -162,7 +162,10 @@ def test_block_stats_slice_fails_loudly_when_the_inventory_disagrees():
 
     with pytest.raises(ValueError, match="no entry for"):
         _block_stats_slice(
-            LayerStatsBook(), "0", _TinyBlock(8, seed=0), PTQConfig(solver_backend="numpy", rank=4)
+            LayerStatsBook(),
+            "0",
+            _TinyBlock(8, seed=0),
+            PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=4),
         )
 
 
@@ -173,7 +176,7 @@ def test_scn_ste_refinement():
     d = 8
     block = _TinyBlock(d, seed=2)
     batches = _calib(d, seed=3)
-    cfg = PTQConfig(solver_backend="numpy", rank=4)
+    cfg = PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=4)
 
     # Direct STE unit: build the quantized replacement for one linear layer
     # and confirm passthrough gradients + decreasing MSE.

@@ -117,7 +117,11 @@ def main() -> None:
     qhf.export_model_directory(
         FIXTURE_DIR,
         qm,
-        embedding_f64=causal.get_input_embeddings().weight.detach().to(torch.float64).cpu().numpy(),
+        embedding_host=causal.get_input_embeddings()
+        .weight.detach()
+        .to(torch.float64)
+        .cpu()
+        .numpy(),
         model_id="parity-tiny",
         eos_token_id=0,
         bos_token_id=1,
@@ -125,7 +129,7 @@ def main() -> None:
         geometry=qhf._export_geometry(causal),
         inventory=inventory,
         norm_weights=qhf._export_norm_weights(causal, inventory),
-        lm_head_f64=(
+        lm_head_host=(
             None if tied else causal.lm_head.weight.detach().to(torch.float64).cpu().numpy()
         ),
         tied=tied,

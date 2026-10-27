@@ -128,7 +128,7 @@ def test_tuned_bias_survives_factorization(monkeypatch):
     can carry is the one the stub wrote."""
     d = 8
     block = _BiasBlock(d, seed=0)
-    cfg = PTQConfig(solver_backend="numpy", rank=4)
+    cfg = PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=4)
 
     def _stub(
         block,
@@ -188,7 +188,7 @@ def test_tunefp_record_carries_bias_delta_rel():
     y_b = pristine * 1.2 + 0.1
 
     before = [m.bias.detach().clone() for m in (block.fc1, block.fc2)]
-    cfg = PTQConfig(solver_backend="numpy", rank=3, cosine_schedule=False)
+    cfg = PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=3, cosine_schedule=False)
     rec = _tune_fp(
         block,
         x_b,
@@ -235,7 +235,7 @@ def test_packed_artifact_bias_round_trips(monkeypatch):
     returns it, byte-for-byte reproducible."""
     d = 8
     block = _BiasBlock(d, seed=1)
-    cfg = PTQConfig(solver_backend="numpy", rank=4)
+    cfg = PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=4)
 
     def _stub(block, x_b, y_b, cfg, batch_size, *, label="", tune_names=None, **kwargs):
         for name, mod in block.named_modules():
@@ -276,7 +276,7 @@ def test_bias_delta_rel_none_is_disambiguated_by_bias_tunables():
     `bias_tunables` count makes it readable off the row itself.
     """
     d = 6
-    cfg = PTQConfig(solver_backend="numpy", rank=3, cosine_schedule=False)
+    cfg = PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=3, cosine_schedule=False)
     x_b = torch.cat(_calib(d), dim=0)
 
     # A bias-bearing tunable set: the stage ran AND measured a bias movement.
@@ -353,7 +353,7 @@ def test_biasless_block_packs_zero_bias_v2():
     """
     d = 8
     block = _BiasFreeBlock(d, seed=7)
-    cfg = PTQConfig(solver_backend="numpy", rank=4)
+    cfg = PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=4)
     result = reconstruct_block(block, _calib(d), cfg, cotangent=_fixed_cot(block, _calib(d)))
 
     layers = {st.name: st for st in result.layers}

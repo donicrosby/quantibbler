@@ -181,7 +181,7 @@ echo "run-ptq-container: model=$MODEL rank=$RANK solver=$SOLVER seq_len=$SEQ_LEN
   "tune_seq_len=${TUNE_SEQ_LEN:-unset} calibration_seqs=$CALIBRATION_SEQS" \
   "factor_mode=${FACTOR_MODE:-binary} ablation=${ABLATION:-none} layer_scope=${LAYER_SCOPE:-all}" \
   "paper_faithful=${PAPER_FAITHFUL:-0} ste_flip_pass_budget=${STE_FLIP_PASS_BUDGET:-0}" \
-  "compute_dtype=${COMPUTE_DTYPE:-float64} gpu=${GPU:-0} image=$IMAGE image_digest=$IMAGE_DIGEST" \
+  "compute_dtype=${COMPUTE_DTYPE:-bf16} gpu=${GPU:-0} image=$IMAGE image_digest=$IMAGE_DIGEST" \
   "eval_seqs=$EVAL_SEQS out=$OUT owner=$OWNER card=$CARD" >&2
 
 mkdir -p "$OUT" 2>/dev/null || true
@@ -197,13 +197,13 @@ mkdir -p "$OUT" 2>/dev/null || true
   printf 'calibration_seqs=%s\neval_seqs=%s\nfactor_mode=%s\nablation=%s\n' \
     "$CALIBRATION_SEQS" "$EVAL_SEQS" "${FACTOR_MODE:-}" "${ABLATION:-}"
   printf 'layer_scope=%s\npaper_faithful=%s\nste_flip_pass_budget=%s\ncompute_dtype=%s\n' \
-    "${LAYER_SCOPE:-}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "${COMPUTE_DTYPE:-float64}"
+    "${LAYER_SCOPE:-}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "${COMPUTE_DTYPE:-bf16}"
   # SOLVER_BACKEND is stamped beside the rho override for the same reason: the
   # solver arm is run identity, and "torch" alone does not say which device ran.
   # Unset resolves to the config default (numpy); the driver re-resolves and
   # reports the effective value in the run report and solver-probe rows.
   printf 'rho_end_override=%s\nsolver_backend=%s\nqk_admm_reg_override=%s\nsolver_probe=%s\nopenblas_num_threads=%s\nlaunched_at=%s\n' \
-    "${QK_RHO_END:-unset}" "${SOLVER_BACKEND:-unset}" "${QK_ADMM_REG:-unset}" "${QK_SOLVER_PROBE:-unset}" "${OPENBLAS_NUM_THREADS:-16}" "$(date -u +%FT%TZ)"
+    "${QK_RHO_END:-unset}" "${SOLVER_BACKEND:-unset}" "${QK_ADMM_REG:-unset}" "${QK_SOLVER_PROBE:-unset}" "${OPENBLAS_NUM_THREADS:-driver-sized}" "$(date -u +%FT%TZ)"
   # The commit and the tree state are part of the run's identity: a run
   # launched from a dirty tree cannot be reproduced from its SHA, which is the
   # whole reason commit-then-fire is a rule here. `grep -vc '^??'` counts
@@ -261,10 +261,13 @@ set -- docker run --rm \
   -e HF_HOME=/hf \
   -e HF_HUB_OFFLINE=1 \
   -e TRANSFORMERS_OFFLINE=1 \
-  -e QUANTIBBLER_BREADCRUMBS=/tmp/ptq/quantibbler-breadcrumbs.log \
-  -e OMP_NUM_THREADS=16 \
-  -e MKL_NUM_THREADS=16 \
-  -e OPENBLAS_NUM_THREADS=16
+  -e QUANTIBBLER_BREADCRUMBS=/tmp/ptq/quantibbler-breadcrumbs.log
+# No thread-count variables are passed: the driver sizes its pools at startup
+# from the container's visible cores and the host's 1-minute load average (its
+# good-guest block, which must run above the BLAS import). A hardcoded
+# OMP_NUM_THREADS=16 on a shared 48-core host is the recorded anti-pattern -- it
+# left 0 free cores and drove the host's load average to 47-70 during a
+# BLAS-heavy solve. `--max-threads` on the driver is the operator's explicit cap.
 # QK_RHO_END is a DIAGNOSTIC override (lb_admm._rho_end) and a DOCKER flag, so
 # it must precede the image name. Appended after the image it lands in the
 # container's command argv, where the driver rejects it as an unknown option --
@@ -423,7 +426,7 @@ mkdir -p /opt/data/tmp "$(dirname "$OUT")"
 # `=== run <ISO> rank=…` shape is unchanged -- the watchdog's line-silence scan
 # and the header greps read it.
 printf '=== run %s rank=%s solver=%s seq_len=%s tune_seq_len=%s paper_faithful=%s ste_flip_pass_budget=%s compute_dtype=%s image=%s out=%s owner=%s card=%s ===\n' \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-unset}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "${COMPUTE_DTYPE:-float64}" "$IMAGE" "$OUT" "$OWNER" "$CARD" \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-unset}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "${COMPUTE_DTYPE:-bf16}" "$IMAGE" "$OUT" "$OWNER" "$CARD" \
   >> /opt/data/tmp/quantibbler-breadcrumbs.log
 
 
