@@ -65,8 +65,13 @@ true.
 
 The stage record gains `bias_delta_rel` beside `weight_delta_rel`: the
 aggregate figure is computed over ALL tuned parameters, so it cannot on its
-own say whether the bias compensation is real. A stage with no bias-bearing
-tunables records `None`, never a confident `0.0`.
+own say whether the bias compensation is real. A `None` figure names WHICH of
+three causes left it unmeasured, and is never a confident `0.0`:
+`bias_tunables == 0` is a bias-free model, which has nothing to move;
+`bias_tunables > 0` with `steps == 0` is a stage that never ran (empty tunable
+set, or a vacuous-teacher early return); and `bias_tunables > 0` with `steps >
+0` is a stage that ran over an all-zero bias baseline, where the relative
+movement is undefined — never "the bias never moved".
 
 ## D13 — Which fixture carries the bias, and why the pipeline fixture does not
 
