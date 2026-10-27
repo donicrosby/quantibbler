@@ -175,8 +175,24 @@ def _tune_fp(
         # Bias is a first-class tuned quantity (the container carries it), so
         # its movement is recorded separately from the aggregate: the weight
         # figure alone cannot say whether the stage's bias compensation is
-        # real. `None` = the stage never ran far enough to have an answer.
+        # real.
+        #
+        # `bias_delta_rel = None` has TWO causes and the row names which one
+        # rather than overloading the bare `None`: `bias_tunables == 0` is the
+        # no-bias-compartment case -- a bias-free model has nothing to move, so
+        # `None` is the honest figure and never a confident 0.0 (design D12) --
+        # while `bias_delta_rel is None` beside a NON-ZERO `bias_tunables` is
+        # the stage that never ran far enough to have an answer (empty tunable
+        # set, or a vacuous-teacher early return). A reader can therefore tell
+        # "the model is bias-free" from "the bias was not computed" off the
+        # record alone, without consulting the design doc.
         "bias_delta_rel": None,
+        # The number of bias-bearing tunables the stage had: the discriminator
+        # beside `bias_delta_rel`, filled once the tunable set is resolved (so
+        # the empty-params early return carries it too). 0 means the model has
+        # no bias compartment; an early-returned stage over bias-bearing
+        # linears keeps its non-zero count.
+        "bias_tunables": 0,
         "vacuous": False,
         # Inertness is DECLARED, not implied (qk-tune-loss-scale, requirement 3):
         # `None` means the stage did not run far enough to have an answer, never
@@ -216,6 +232,11 @@ def _tune_fp(
         linears = [(n, m) for n, m in all_linears if n in wanted]
     params = [p for _, m in linears for p in m.parameters()]
     bias_params = [m.bias for _, m in linears if m.bias is not None]
+    # The count beside `bias_delta_rel`, recorded before any early return so an
+    # unrun row and a run row are distinguishable by the record alone: 0 = the
+    # model carries no bias to move; > 0 with a `None` movement figure = the
+    # stage stopped before it could measure (see the field comment above).
+    stats["bias_tunables"] = len(bias_params)
     if not params:
         stats["steps"] = 0
         _stamp()
