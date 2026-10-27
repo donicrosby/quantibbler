@@ -47,7 +47,9 @@ def test_scn_admm_spd_solves(solver_probe_on):  # noqa: ARG001 - fixture side ef
     triggers deterministically on a perturbed diagonal shift."""
     for r in (2, 4, 8):
         w = _ground_truth(16, 12, r, seed=40 + r)
-        cfg = PTQConfig(rank=r, rho_start=1e-2, rho_end=1e2, solver_backend="numpy")
+        cfg = PTQConfig(
+            rank=r, rho_start=1e-2, rho_end=1e2, solver_backend="numpy", compute_dtype="float64"
+        )
         res = lb_admm(w, cfg)
         assert res.trace.min_eigs, "trace recorded no solves"
         # Every solve was on an SPD system (min eigenvalue positive).
@@ -75,7 +77,7 @@ def test_scn_admm_consensus_convergence():
     preserves sign structure with norm-preserved columns (A-5, closed form)."""
     r = 4
     w = _ground_truth(20, 14, r, seed=99)
-    cfg = PTQConfig(rank=r, solver_backend="numpy")
+    cfg = PTQConfig(rank=r, solver_backend="numpy", compute_dtype="float64")
     res = lb_admm(w, cfg)
 
     residuals = np.asarray(res.trace.residuals)
@@ -212,7 +214,7 @@ def test_rho_end_override_is_explicit_and_fail_closed(monkeypatch):
     both directions need pinning: unset must leave cfg.rho_end untouched, and a
     malformed value must raise rather than silently reverting to the default.
     """
-    cfg = PTQConfig(rank=4, rho_end=1e-1, solver_backend="numpy")
+    cfg = PTQConfig(rank=4, rho_end=1e-1, solver_backend="numpy", compute_dtype="float64")
 
     monkeypatch.delenv("QK_RHO_END", raising=False)
     assert _rho_end(cfg) == 1e-1
@@ -251,7 +253,7 @@ def _lane3_cfg() -> PTQConfig:
     only arm runnable there, and this file's other solve tests already pin it by
     name; these call sites drifted.
     """
-    return PTQConfig(rank=_LANE3[2], solver_backend="numpy")
+    return PTQConfig(rank=_LANE3[2], solver_backend="numpy", compute_dtype="float64")
 
 
 def _rel_fit(res, w) -> float:
@@ -400,7 +402,7 @@ def test_scn_new_solver_state_joins_fingerprint(monkeypatch):
 
     monkeypatch.delenv("QK_ADMM_REG", raising=False)
     monkeypatch.delenv("QK_RHO_END", raising=False)
-    base = PTQConfig(rank=4, solver_backend="numpy")
+    base = PTQConfig(rank=4, solver_backend="numpy", compute_dtype="float64")
     base_fp = config_fingerprint(base)
 
     for kwargs in ({"admm_reg": 4e-2}, {"rho_start": 5e-3}, {"rho_end": 5e-1}):

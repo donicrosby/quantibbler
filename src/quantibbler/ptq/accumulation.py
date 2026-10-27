@@ -24,6 +24,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 __all__ = [
     "ACCUM_DTYPE_SPECS",
+    "TORCH_DTYPE_SPECS",
     "accumulation_np_dtype",
     "accumulation_spec",
     "accumulation_torch_dtype",
@@ -33,6 +34,14 @@ __all__ = [
 #: compute dtype -> accumulation dtype. Pure mapping, deliberately not a knob.
 ACCUM_DTYPE_SPECS: dict[str, str] = {
     "bf16": "float32",
+    "float32": "float32",
+    "float64": "float64",
+}
+
+#: pipeline dtype name -> torch attribute name. The two vocabularies differ
+#: exactly once (bf16 / bfloat16), which is enough for a ``getattr`` to fail.
+TORCH_DTYPE_SPECS: dict[str, str] = {
+    "bf16": "bfloat16",
     "float32": "float32",
     "float64": "float64",
 }
@@ -63,16 +72,16 @@ def accumulation_torch_dtype(compute_dtype: str) -> torch.dtype:
 def torch_dtype(spec: str) -> torch.dtype:
     """A declared compute dtype as a torch dtype (lazy torch import).
 
-    The torch backend is the only place a bf16 compute dtype can exist at all —
-    NumPy has no bf16 scalar type — so this is the mapping every torch-side
-    consumer of ``compute_dtype`` goes through, instead of each site writing its
-    own ``getattr`` and drifting.
+    An explicit mapping, never ``getattr(torch, spec)``: the pipeline's name for
+    the dtype is ``bf16`` and torch's is ``bfloat16``, so the naive lookup raises
+    ``AttributeError`` on the pipeline's OWN default — the failure mode that
+    would red every bf16 run at its first tensor creation.
     """
     import torch  # noqa: PLC0415
 
-    try:
-        return getattr(torch, spec)
-    except AttributeError:
+    name = TORCH_DTYPE_SPECS.get(spec)
+    if name is None:
         raise ValueError(
-            f"unknown compute dtype {spec!r}: expected one of {tuple(ACCUM_DTYPE_SPECS)}"
-        ) from None
+            f"unknown compute dtype {spec!r}: expected one of {tuple(TORCH_DTYPE_SPECS)}"
+        )
+    return getattr(torch, name)

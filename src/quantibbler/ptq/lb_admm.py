@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .accumulation import accumulation_spec
 from .config import PTQConfig
 from .progress import ProgressReporter
 from .solver_backend import get_backend, solver_backend_provenance
@@ -435,6 +436,12 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
     backend_name, _backend_source = solver_backend_provenance(cfg.solver_backend)
     xp = get_backend(backend_name, device=os.environ.get("QUANTIBBLER_DEVICE"))
     dt = xp.dtype(cfg.compute_dtype)
+    # The accumulation dtype follows from the declared compute dtype (float32
+    # under bf16). Sites that SUM over the design widen to it explicitly; the
+    # latents stay at ``dt``. torch has no bf16 CPU SVD kernel at all
+    # ("linalg_svd_cpu not implemented for 'BFloat16'"), so the warm start is one
+    # of those sites rather than an exception.
+    adt = xp.dtype(accumulation_spec(cfg.compute_dtype))
     w = xp.asarray(w_tilde, dtype=dt)
     if w.ndim != 2:
         raise ValueError(f"preconditioned target must be 2-D, got shape {w.shape}")
@@ -462,14 +469,22 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
         w = w / target_scale
 
     trace = ADMMTrace()
-    u = xp.zeros((dout, r), dtype=dt)
-    v = xp.zeros((din, r), dtype=dt)
-    u, v = _warm_start(xp, w, r, dt)
-    zu = xp.astype(svid_proxy(xp, u), dt)
-    zv = xp.astype(svid_proxy(xp, v), dt)
-    lu = xp.zeros((dout, r), dtype=dt)
-    lv = xp.zeros((din, r), dtype=dt)
-    eye_r = xp.eye(r, dtype=dt)
+    # The ITERATE lives at the accumulation dtype and is cast to the compute
+    # dtype at the return boundary — that is the storage contract ("latents
+    # stored at compute_dtype") applied where storage actually happens. Rounding
+    # the iterate to bf16 on every one of up to 400 iterations would discard the
+    # accumulator's guard bits at each step, which is the failure the widening
+    # exists to prevent. At float32/float64 compute adt == dt, so those arms are
+    # bit-unchanged.
+    w_a = xp.astype(w, adt)
+    # SVD warm start at the ACCUMULATION dtype: a bf16 SVD is both
+    # platform-dependent and, on torch CPU, unimplemented.
+    u, v = _warm_start(xp, w_a, r, adt)
+    zu = xp.astype(svid_proxy(xp, u), adt)
+    zv = xp.astype(svid_proxy(xp, v), adt)
+    lu = xp.zeros((dout, r), dtype=adt)
+    lv = xp.zeros((din, r), dtype=adt)
+    eye_r = xp.eye(r, dtype=adt)
 
     def residual(u_cur, v_cur, zu_cur, zv_cur) -> float:
         du = float(xp.linalg.norm(u_cur - zu_cur, "fro"))
@@ -511,12 +526,15 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
         # gives X^T X a unit diagonal, so the scale-relative stabilizer
         # rho*mean(diag(X^T X)) + reg is O(1) for every layer. Y D^-1 maps the
         # iterate back, keeping U V^T a valid factorization of the target.
+        # Accumulation sites: the column norms and the normal equation below sum
+        # over din/dout terms, so they execute at ``adt``; ``vn`` is the widened
+        # design (the iterate stays at adt, so this is a no-op above bf16).
         sv = _col_scales(xp, v)
         vn = v / sv
         shift_u, scale_u = _ridge_shift(xp, vn, rho, reg)
         trace.ridge_scale.append(scale_u)
         hu = vn.T @ vn + shift_u * eye_r
-        rhs_u = vn.T @ w.T + rho * ((zu * sv) - (lu * sv)).T
+        rhs_u = vn.T @ w_a.T + rho * ((zu * sv) - (lu * sv)).T
         # min-eig check: the documented SPD probe, gated on the solver probe
         # (`probe` above) -- NOT on being cheap, which it is not at production
         # thread counts. The Cholesky solve on the next line is the SPD proof
@@ -532,7 +550,7 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
         shift_v, scale_v = _ridge_shift(xp, un, rho, reg)
         trace.ridge_scale.append(scale_v)
         hv = un.T @ un + shift_v * eye_r
-        rhs_v = un.T @ w + rho * ((zv * su) - (lv * su)).T
+        rhs_v = un.T @ w_a + rho * ((zv * su) - (lv * su)).T
         if probe:
             trace.min_eigs.append(float(xp.linalg.eigvalsh(hv).min()))
         v = _cholesky_solve(xp, hv, rhs_v, trace)[0].T / su
@@ -571,11 +589,13 @@ def lb_admm(w_tilde: np.ndarray, cfg: PTQConfig) -> ADMMResult:
     # overshoots by a full factor of ||W~||_F. Split it across the pair so the
     # product carries it once -- the equivariance the entry comment claims.
     factor_scale = float(xp.sqrt(target_scale))
+    # Storage boundary: the iterate is returned at the DECLARED compute dtype
+    # (see the loop-head note). No-op when adt == dt.
     return ADMMResult(
-        U=u * factor_scale,
-        V=v * factor_scale,
-        P_u=(u + lu) * factor_scale,
-        P_v=(v + lv) * factor_scale,
+        U=xp.astype(u * factor_scale, dt),
+        V=xp.astype(v * factor_scale, dt),
+        P_u=xp.astype((u + lu) * factor_scale, dt),
+        P_v=xp.astype((v + lv) * factor_scale, dt),
         n_iter=len(trace.residuals),
         converged=converged,
         trace=trace,

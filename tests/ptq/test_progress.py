@@ -277,7 +277,7 @@ def test_lb_admm_emits_progress_lines(capsys) -> None:
     from quantibbler.ptq.config import PTQConfig
     from quantibbler.ptq.lb_admm import lb_admm
 
-    cfg = PTQConfig(rank=4, admm_max_iter=25, solver_backend="numpy")
+    cfg = PTQConfig(rank=4, admm_max_iter=25, solver_backend="numpy", compute_dtype="float64")
     w = np.random.default_rng(0).standard_normal((16, 12))
     lb_admm(w, cfg)
 

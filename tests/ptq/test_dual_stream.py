@@ -85,7 +85,13 @@ def _cfg() -> PTQConfig:
     # IMPLICIT device on a box with no accelerator (CI's ubuntu-latest), so a
     # bare default config cannot solve there. Sibling call sites in the tier
     # pin the same arm for the same reason; the refusal itself is untouched.
-    return PTQConfig(rank=2, admm_max_iter=20, paper_faithful=False, solver_backend="numpy")
+    return PTQConfig(
+        rank=2,
+        admm_max_iter=20,
+        paper_faithful=False,
+        solver_backend="numpy",
+        compute_dtype="float64",
+    )
 
 
 def _wide_block(dim: int, seed: int) -> nn.Sequential:

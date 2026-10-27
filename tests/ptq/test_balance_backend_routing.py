@@ -92,7 +92,7 @@ def test_scn_admm_algorithm_unchanged_balance_follows_the_config(monkeypatch):  
     _no_knobs(monkeypatch)
     block = _TinyBlock(seed=2)
     batches = _batches(seed=3)
-    cfg = PTQConfig(solver_backend="numpy", rank=4)
+    cfg = PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=4)
     seen = _watch_get_backend(monkeypatch)
 
     result = block_recon.reconstruct_block(
@@ -117,7 +117,7 @@ def test_scn_admm_algorithm_unchanged_balance_honors_the_env_knob(monkeypatch): 
     monkeypatch.delenv("QUANTIBBLER_DEVICE", raising=False)
     block = _TinyBlock(seed=4)
     batches = _batches(seed=5)
-    cfg = PTQConfig(solver_backend="torch", rank=4)
+    cfg = PTQConfig(solver_backend="torch", compute_dtype="float64", rank=4)
     seen = _watch_get_backend(monkeypatch)
 
     result = block_recon.reconstruct_block(
@@ -142,7 +142,7 @@ def test_scn_admm_algorithm_unchanged_probe_row_names_the_balance_arm(tmp_path, 
     monkeypatch.delenv("QUANTIBBLER_DEVICE", raising=False)
     block = _TinyBlock(seed=6)
     batches = _batches(seed=7)
-    cfg = PTQConfig(solver_backend="torch", rank=4)
+    cfg = PTQConfig(solver_backend="torch", compute_dtype="float64", rank=4)
     seen = _watch_get_backend(monkeypatch)
 
     block_recon.reconstruct_block(block, batches, cfg, cotangent=_fixed_cot(block, batches))
@@ -164,7 +164,7 @@ def test_scn_admm_algorithm_unchanged_balance_refuses_like_the_solve(monkeypatch
     CPU, and the production path dies on the refusal rather than on a balance
     that would have executed somewhere other than its solve."""
     _no_knobs(monkeypatch)
-    cfg = PTQConfig(solver_backend="torch", rank=4)
+    cfg = PTQConfig(solver_backend="torch", compute_dtype="float64", rank=4)
 
     with pytest.raises(RuntimeError, match="requires an accelerator") as solve_exc:
         lb_admm.lb_admm(np.eye(6, 4), cfg)

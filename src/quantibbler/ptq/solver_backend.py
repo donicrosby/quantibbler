@@ -321,6 +321,20 @@ class NumpyBackend(_BaseBackend):
         return self._m.ascontiguousarray(x, dtype=dtype)
 
     def dtype(self, spec: str) -> Any:
+        """NumPy carries no bf16 scalar type, so bf16 is refused BY NAME.
+
+        The alternative — letting numpy raise ``data type 'bf16' not
+        understood`` — names neither the backend nor the fix, and a caller
+        reading it cannot tell a typo from a request this backend cannot serve.
+        """
+        if spec == "bf16":
+            from .config import NumPyBackendUnsupportedDtypeError  # noqa: PLC0415
+
+            raise NumPyBackendUnsupportedDtypeError(
+                "the NumPy backend is the float64 parity oracle and has no bf16 "
+                "scalar type; bf16 and float32 compute require the torch backend "
+                "(solver_backend='torch')"
+            )
         return self._m.dtype(spec)
 
     def scalar(self, value: Any, dtype: Any = None) -> Any:
@@ -419,7 +433,22 @@ class TorchBackend(_BaseBackend):
         return tensor.contiguous()
 
     def dtype(self, spec: str) -> Any:
-        return getattr(self.torch, spec)
+        """The declared dtype as a torch dtype.
+
+        Routed through the shared name map (:mod:`accumulation`), because the
+        pipeline spells bf16 ``bf16`` and torch spells it ``bfloat16``: a
+        ``getattr`` here would fail on the pipeline's own default.
+        """
+        from .accumulation import TORCH_DTYPE_SPECS  # noqa: PLC0415
+
+        # The float vocabulary goes through the name map; non-float specs
+        # (int8, the pack path's dtype) resolve directly, which is what they
+        # always did.
+        name = TORCH_DTYPE_SPECS.get(spec, spec)
+        try:
+            return getattr(self.torch, name)
+        except AttributeError:
+            raise ValueError(f"unknown dtype {spec!r}") from None
 
     def scalar(self, value: Any, dtype: Any = None) -> Any:
         return self.torch.tensor(value, dtype=dtype, device=self.device)

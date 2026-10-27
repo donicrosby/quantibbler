@@ -54,7 +54,9 @@ def test_scn_ste_relative_lr_preserves_scale_classes():
     x_b = torch.randn(8, 4, 16, generator=gen, dtype=torch.float64)
     y_b = torch.randn(8, 4, 12, generator=gen, dtype=torch.float64)
 
-    cfg = PTQConfig(solver_backend="numpy", rank=6, stage_latent=StageHyper(1e0, 4, 1))  # brutal lr
+    cfg = PTQConfig(
+        solver_backend="numpy", compute_dtype="float64", rank=6, stage_latent=StageHyper(1e0, 4, 1)
+    )  # brutal lr
     _tune_latent_ste(linear, {"": fac}, x_b, y_b, cfg, 4)
 
     post_s1_med = float(fac.s1.detach().abs().median())
@@ -80,8 +82,12 @@ def test_scn_e2e_gate_svd_solver_path():
     # ``solver_backend="numpy"`` by name, for the same reason the sibling pins
     # in this file do: the production default is torch, and on a box with no
     # accelerator ``resolve_device`` refuses an IMPLICIT device by design. The
-    # arm under test is the SVD ablation, not the backend.
-    cfg = dataclasses.replace(gate_config(), solver="svd", solver_backend="numpy")
+    # arm under test is the SVD ablation, not the backend. Float64 is declared
+    # with it because the NumPy backend IS the float64 parity oracle: it has no
+    # bf16 scalar type, so a numpy arm must name the dtype it runs in.
+    cfg = dataclasses.replace(
+        gate_config(), solver="svd", solver_backend="numpy", compute_dtype="float64"
+    )
     result = run_e2e_gate(cfg=cfg)
     assert result["bits_identical"], result
     assert float(result["logit_delta"]) < 1.0, result

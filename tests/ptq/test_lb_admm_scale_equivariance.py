@@ -39,7 +39,9 @@ def test_returned_product_is_scale_equivariant(factor):
     """
     r = 4
     w = _ground_truth(20, 14, r, seed=7).astype(np.float64)
-    cfg = PTQConfig(solver_backend="numpy", rank=r, rho_start=1e-2, rho_end=1e2)
+    cfg = PTQConfig(
+        solver_backend="numpy", compute_dtype="float64", rank=r, rho_start=1e-2, rho_end=1e2
+    )
 
     base = _product_norm(lb_admm(w, cfg))
     scaled = _product_norm(lb_admm(w * factor, cfg))

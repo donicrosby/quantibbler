@@ -456,7 +456,7 @@ def reconstruct_block(
             if linear.bias is not None
             else torch.zeros(
                 linear.weight.shape[0], device=linear.weight.device, dtype=_compute_dtype_torch
-            )
+            )  # noqa: E501
         )
         fac = FactorizedLinear(
             u0, v0, bias0, factor_mode=cfg.factor_mode, compute_dtype=_compute_dtype_torch
@@ -637,12 +637,16 @@ def reconstruct_block(
         # refuses outright (D-5), so the run produces no fabricated layer
         # states at all — the measurement carries a report, never an artifact.
         if cfg.factor_mode != "fp":
-            u_np = fac.u_latent.detach().cpu().numpy()
-            v_np = fac.v_latent.detach().cpu().numpy()
+            # Host hop through to_host_np: the latents carry the declared compute
+            # dtype, and bf16 tensors have no NumPy scalar type, so a bare
+            # ``.cpu().numpy()`` raises on exactly the dtype this pipeline
+            # defaults to. Each array lands at its own declared host grade.
+            u_np = to_host_np(fac.u_latent)
+            v_np = to_host_np(fac.v_latent)
             st = extract_and_pack(u_np, v_np, name=_pname(name))
-            st.s1 = fac.s1.detach().cpu().numpy().astype(np.float64).copy()
-            st.s2 = fac.s2.detach().cpu().numpy().astype(np.float64).copy()
-            st.bias = fac.bias.detach().cpu().numpy().astype(np.float64).copy()
+            st.s1 = to_host_np(fac.s1).copy()
+            st.s2 = to_host_np(fac.s2).copy()
+            st.bias = to_host_np(fac.bias).copy()
             layers.append(st)
         # Freeze the effective weight into the module for subsequent prefix
         # capture (the module graph keeps working for later blocks) — the

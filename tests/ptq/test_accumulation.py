@@ -17,6 +17,7 @@ from quantibbler.ptq.accumulation import (
     accumulation_np_dtype,
     accumulation_spec,
     accumulation_torch_dtype,
+    torch_dtype,
 )
 
 
@@ -39,6 +40,20 @@ def test_accumulation_is_not_a_config_knob():
     assert set(ACCUM_DTYPE_SPECS) == {"bf16", "float32", "float64"}
     with pytest.raises(ValueError):
         accumulation_spec("float16")
+
+
+def test_torch_dtype_maps_the_pipeline_spelling_to_torch():
+    """The pipeline spells the default `bf16`; torch spells it `bfloat16`.
+
+    A `getattr(torch, spec)` lookup fails on exactly that name — the one that is
+    now the default — so the mapping is explicit and asserted here.
+    """
+    torch = pytest.importorskip("torch")
+    assert torch_dtype("bf16") is torch.bfloat16
+    assert torch_dtype("float32") is torch.float32
+    assert torch_dtype("float64") is torch.float64
+    with pytest.raises(ValueError):
+        torch_dtype("float16")
 
 
 def test_accumulation_torch_dtype_tracks_the_spec():

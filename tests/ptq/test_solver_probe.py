@@ -38,7 +38,7 @@ def test_probe_is_inert_when_unset(tmp_path, monkeypatch):
     path = tmp_path / "probe.jsonl"
     monkeypatch.delenv("QK_SOLVER_PROBE", raising=False)
     block_recon._record_solver_probe(
-        "planted", w, bal, res, PTQConfig(solver_backend="numpy", rank=4)
+        "planted", w, bal, res, PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=4)
     )
     assert not path.exists()
 
@@ -52,7 +52,7 @@ def test_probe_records_both_cosines_and_the_arm(tmp_path, monkeypatch):
     monkeypatch.delenv("_fp_w", raising=False)
 
     block_recon._record_solver_probe(
-        "planted", w, bal, res, PTQConfig(solver_backend="numpy", rank=4)
+        "planted", w, bal, res, PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=4)
     )
     row = json.loads(path.read_text().strip())
 
@@ -63,15 +63,19 @@ def test_probe_records_both_cosines_and_the_arm(tmp_path, monkeypatch):
     assert row["wq_raw_fro"] == pytest.approx(row["w_fro"], rel=1e-12)
     assert row["n_iter"] == 7
     assert row["converged"] is False
-    assert row["solver"] == PTQConfig(solver_backend="numpy", rank=4).solver
+    assert (
+        row["solver"] == PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=4).solver
+    )
     # the arm must be self-describing: value AND source, so a probe row cannot
     # be mislabelled about which pass produced it
-    assert row["rho_end"] == PTQConfig(solver_backend="numpy", rank=4).rho_end
+    assert (
+        row["rho_end"] == PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=4).rho_end
+    )
     assert row["rho_end_source"] == "config"
 
     monkeypatch.setenv("QK_RHO_END", "1e2")
     block_recon._record_solver_probe(
-        "planted", w, bal, res, PTQConfig(solver_backend="numpy", rank=4)
+        "planted", w, bal, res, PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=4)
     )
     rows = [json.loads(x) for x in path.read_text().strip().splitlines()]
     assert len(rows) == 2, "one JSONL row per solve, appended"
@@ -125,7 +129,7 @@ def test_scn_producers_emit_through_their_model_probe_row(tmp_path, monkeypatch)
     monkeypatch.delenv("_fp_w", raising=False)
 
     block_recon._record_solver_probe(
-        "planted", w, bal, res, PTQConfig(solver_backend="numpy", rank=4)
+        "planted", w, bal, res, PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=4)
     )
     row = json.loads(path.read_text().strip())
 
@@ -155,7 +159,7 @@ def test_scn_every_probe_row_carries_the_min_eigs_floor_nan_never_zero(tmp_path,
     monkeypatch.delenv("_fp_w", raising=False)
 
     block_recon._record_solver_probe(
-        "planted", w, bal, res, PTQConfig(solver_backend="numpy", rank=4)
+        "planted", w, bal, res, PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=4)
     )
     row = json.loads(path.read_text().strip())
     assert math.isnan(row["min_eigs"])
@@ -168,5 +172,9 @@ def test_probe_raises_rather_than_measuring_nothing(tmp_path, monkeypatch):
     monkeypatch.setenv("QK_SOLVER_PROBE_PATH", str(tmp_path / "nope" / "probe.jsonl"))
     with pytest.raises(RuntimeError, match="cannot write"):
         block_recon._record_solver_probe(
-            "planted", w, bal, res, PTQConfig(solver_backend="numpy", rank=4)
+            "planted",
+            w,
+            bal,
+            res,
+            PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=4),
         )

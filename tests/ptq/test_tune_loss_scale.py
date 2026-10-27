@@ -57,7 +57,9 @@ def _fixture(dtype: torch.dtype, d: int = 8):
     test here. ``factorized_in_block=1`` keeps the call on the post-factorization
     side of the placement rule.
     """
-    cfg = PTQConfig(solver_backend="numpy", rank=4, stage_pre=StageHyper(1e-4, 4, 2))
+    cfg = PTQConfig(
+        solver_backend="numpy", compute_dtype="float64", rank=4, stage_pre=StageHyper(1e-4, 4, 2)
+    )
     block = _TwoLinearBlock(d, seed=0, dtype=dtype)
     gen = torch.Generator().manual_seed(11)
     x_b = torch.randn(4, d, generator=gen).to(dtype)
@@ -181,6 +183,7 @@ def test_scn_weight_is_normalized_before_the_loss_pipeline():
         batches,
         PTQConfig(
             solver_backend="numpy",
+            compute_dtype="float64",
             rank=4,
             stage_pre=StageHyper(1e-4, 4, 2),
             stage_latent=StageHyper(1e-3, 4, 4),
@@ -325,7 +328,12 @@ def _ste_fixture(d_in: int = 16, d_out: int = 12, rank: int = 6):
         linear.bias.zero_()
     fac = FactorizedLinear.from_weight(linear.weight.detach(), rank)
     _set_linear(linear, fac)
-    cfg = PTQConfig(solver_backend="numpy", rank=rank, stage_latent=StageHyper(1e-3, 1, 4))
+    cfg = PTQConfig(
+        solver_backend="numpy",
+        compute_dtype="float64",
+        rank=rank,
+        stage_latent=StageHyper(1e-3, 1, 4),
+    )
     x_b = torch.randn(8, 4, d_in, generator=gen, dtype=torch.float64)
     with torch.no_grad():
         y_b = linear(x_b).detach() + (

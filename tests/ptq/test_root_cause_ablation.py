@@ -133,9 +133,14 @@ def _events(cfg: PTQConfig, block: nn.Module, d: int = 6) -> list[tuple[str, dic
 def test_config_validates_knob_choices(field, good, bad):  # noqa: ANN001
     """Unknown value = parse/validation error, never a silent default (D-6)."""
     for value in good:
-        assert getattr(PTQConfig(solver_backend="numpy", **{field: value}), field) == value
+        assert (
+            getattr(
+                PTQConfig(solver_backend="numpy", compute_dtype="float64", **{field: value}), field
+            )
+            == value
+        )
     with pytest.raises(ValueError):
-        PTQConfig(solver_backend="numpy", **{field: bad})
+        PTQConfig(solver_backend="numpy", compute_dtype="float64", **{field: bad})
 
 
 @pytest.mark.parametrize(
@@ -145,10 +150,11 @@ def test_config_validates_knob_choices(field, good, bad):  # noqa: ANN001
 def test_knobs_are_solver_state_in_the_fingerprint(field, value):  # noqa: ANN001
     """A resumed fp run must never resume as a binary run (D-6)."""
     assert config_fingerprint(
-        PTQConfig(solver_backend="numpy", **{field: value})
+        PTQConfig(solver_backend="numpy", compute_dtype="float64", **{field: value})
     ) != config_fingerprint(
         PTQConfig(
             solver_backend="numpy",
+            compute_dtype="float64",
         )
     )
 
@@ -157,6 +163,7 @@ def test_default_knobs_are_the_pre_knob_pipeline():
     """The three defaults ARE today's behavior (regression contract)."""
     cfg = PTQConfig(
         solver_backend="numpy",
+        compute_dtype="float64",
     )
     assert (cfg.factor_mode, cfg.ablation, cfg.layer_scope) == ("binary", "none", "all")
 
@@ -322,7 +329,7 @@ def test_live_ste_path_consults_the_helper(monkeypatch):
 
     monkeypatch.setattr(_factorized, _HELPER, spy, raising=False)
     block = _ScopedBlock(6, seed=7)
-    _events(PTQConfig(solver_backend="numpy", rank=3), block)
+    _events(PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=3), block)
     assert calls, "the live STE path never consulted the helper"
 
 
@@ -392,7 +399,12 @@ def test_detached_alias_is_invisible_to_the_shape_pin_by_design():
 
 def test_untuned_signs_runs_zero_polish_and_zero_ste():
     block = _ScopedBlock(6, seed=8)
-    seen = _events(PTQConfig(solver_backend="numpy", rank=3, ablation="untuned-signs"), block)
+    seen = _events(
+        PTQConfig(
+            solver_backend="numpy", compute_dtype="float64", rank=3, ablation="untuned-signs"
+        ),
+        block,
+    )
     names = [event for event, _ in seen]
     assert "ste" not in names, "untuned-signs must run zero TuneLatentSTE steps"
     lb = [info for event, info in seen if event == "lb_admm"]
@@ -403,12 +415,13 @@ def test_untuned_signs_runs_zero_polish_and_zero_ste():
 
 def test_default_run_records_the_polish_rounds():
     block = _ScopedBlock(6, seed=9)
-    seen = _events(PTQConfig(solver_backend="numpy", rank=3), block)
+    seen = _events(PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=3), block)
     lb = [info for event, info in seen if event == "lb_admm"]
     assert lb and all(
         info.get("polish_rounds")
         == PTQConfig(
             solver_backend="numpy",
+            compute_dtype="float64",
         ).polish_rounds
         for info in lb
     )
@@ -420,7 +433,9 @@ def test_scope_leaves_unscoped_weights_bit_identical(scope):  # noqa: ANN001
     untouched = "mlp.gate_proj" if scope == "self_attn" else "self_attn.q_proj"
     linears = {name: m for name, m in block.named_modules() if isinstance(m, nn.Linear)}
     before = {name: m.weight.detach().clone() for name, m in linears.items()}
-    _events(PTQConfig(solver_backend="numpy", rank=3, layer_scope=scope), block)
+    _events(
+        PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=3, layer_scope=scope), block
+    )
     after = {name: m for name, m in block.named_modules() if isinstance(m, nn.Linear)}
     assert torch.equal(after[untouched].weight, before[untouched])
     in_scope = "self_attn.q_proj" if scope == "self_attn" else "mlp.gate_proj"
@@ -458,14 +473,14 @@ def test_fp_run_makes_no_layers_and_writes_a_different_weight():
     result = reconstruct_block(
         fp,
         calib,
-        PTQConfig(solver_backend="numpy", rank=3, factor_mode="fp"),
+        PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=3, factor_mode="fp"),
         cotangent=_fixed_cot(fp, calib),
     )
     assert result.layers == [], "an fp measurement must fabricate no binary layer states"
     reconstruct_block(
         binary,
         calib,
-        PTQConfig(solver_backend="numpy", rank=3),
+        PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=3),
         cotangent=_fixed_cot(binary, calib),
     )
     w_fp = fp.self_attn["q_proj"].weight

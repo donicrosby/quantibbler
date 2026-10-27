@@ -93,7 +93,7 @@ def solved(preconditioned_target):
     its own to stop the gate suite fitting in one foreground window.
     """
     rank, w_tilde, gamma = preconditioned_target
-    cfg = PTQConfig(solver_backend="numpy", rank=rank, gamma=gamma)
+    cfg = PTQConfig(solver_backend="numpy", compute_dtype="float64", rank=rank, gamma=gamma)
     return w_tilde, cfg, lb_admm(w_tilde, cfg)
 
 

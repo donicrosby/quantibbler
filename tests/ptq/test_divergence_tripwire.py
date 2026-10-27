@@ -37,7 +37,7 @@ def test_scn_e2e_gate_detects_divergence_before_export(monkeypatch):
     monkeypatch.setattr(stage_mod, "magnitude_balance", inflated_balance)
 
     model = TinyGateModel(seed=0)
-    cfg = PTQConfig(solver_backend="numpy", seed=0, rank=4)
+    cfg = PTQConfig(solver_backend="numpy", compute_dtype="float64", seed=0, rank=4)
     with pytest.raises(QuantizationDivergenceError) as ei:
         quantize_model(model, build_gate_batches(seed=0), cfg)
     msg = str(ei.value)
@@ -65,7 +65,7 @@ def test_scn_e2e_gate_detects_divergence_artifact_bytes_absent(monkeypatch):
     monkeypatch.setattr(stage_mod, "magnitude_balance", inflated_balance)
 
     model = TinyGateModel(seed=0)
-    cfg = PTQConfig(solver_backend="numpy", seed=0, rank=4)
+    cfg = PTQConfig(solver_backend="numpy", compute_dtype="float64", seed=0, rank=4)
     with pytest.raises(QuantizationDivergenceError):
         quantize_model(model, build_gate_batches(seed=0), cfg)
     # Reaching this point means the abort happened inside quantize_model,

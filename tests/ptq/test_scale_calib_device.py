@@ -48,7 +48,12 @@ accelerator_leg = pytest.mark.integration
 
 def _kd_cfg() -> PTQConfig:
     """Stage config, identical for both legs (A-10 test-speed overrides)."""
-    return PTQConfig(solver_backend="numpy", rank=4, stage_global=StageHyper(2e-2, 16, 10))
+    return PTQConfig(
+        solver_backend="numpy",
+        compute_dtype="float64",
+        rank=4,
+        stage_global=StageHyper(2e-2, 16, 10),
+    )
 
 
 def _kd_fixture(device: str, batches_on: str):

@@ -102,7 +102,7 @@ def test_probe_line_is_not_an_override_parameter():
 
 def test_probe_must_be_callable():
     with pytest.raises(TypeError, match="progress_probe must be callable"):
-        PTQConfig(solver_backend="numpy", progress_probe=17)
+        PTQConfig(solver_backend="numpy", compute_dtype="float64", progress_probe=17)
 
 
 def test_probe_field_stays_out_of_config_equality():
