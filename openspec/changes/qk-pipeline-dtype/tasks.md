@@ -70,19 +70,31 @@
   API change that belongs with the device-placement measurement, and it cannot be
   verified on an accelerator-less host.
 
-- [ ] 3.4 **Parity suite: dtype×device matrix.**
+- [x] 3.4 **Parity suite: dtype×device matrix.**
   Extend parity tests across `{bf16, float32, float64} × {CPU, GPU}`.
   Per-dtype tolerances: bf16 1e-2, float32 1e-4, float64 1e-12.
-  CPU path runs always. GPU path runs only on the designated GPU hardware
-  lane (`quantibbler-ptq:rocm-official` container, digest-pinned, on Strix
-  Halo/gfx1151), with exact skip-count discipline — every skipped GPU cell
-  MUST produce a documented skip event. Run `uv run pytest tests/ptq/ -k parity -v`.
+  CPU path runs always. GPU path runs on the designated GPU hardware lane
+  (`quantibbler-ptq:rocm-official-v6` container, digest-pinned
+  `sha256:7e397b0d…`, on Strix Halo/gfx1151 — the `-v6` variant because
+  `rocm-official`'s own interpreter has neither `pytest` nor `pydantic` and dies
+  at collection), with exact skip-count discipline: the accelerator cells carry
+  `@pytest.mark.integration` so the default tier DESELECTS them rather than
+  counting them as skips (CI's `full-python` job refuses any skip —
+  `tools/ci/pytest_summary.py --expect-skipped 0`), and the leg's `skipif` still
+  reports the named reason wherever the lane runs without an accelerator.
+  Run `uv run pytest tests/ptq/ -k parity -v`.
   **CPU cells: SHIPPED** (`tests/ptq/test_pipeline_dtype_generic.py`, three
-  parametrized cells + the float64 NumPy reference). **GPU cells: DEFERRED to the
-  GPU lane card `t_f8e3b1d8`** (host-side container discipline), not dropped —
-  the test emits a documented skip event naming that card. See design.md
-  "Implementation crystallization" C1 for the measured delta on the tolerance
-  metric itself.
+  parametrized cells + the float64 NumPy reference). **GPU cells: SHIPPED**
+  (`tests/ptq/test_pipeline_dtype_gpu.py::test_scn_admm_parity_gpu_cell[bf16|float32|float64]`,
+  same fixture, same reachable metric, same classes) — measured on the GPU lane
+  card `t_f8e3b1d8` 2026-10-27: all six cells inside their declared class
+  (bf16 CPU 1.017e-3 / GPU 1.022e-3 vs the 1e-2 class; float32 3.132e-7 / 3.264e-6
+  vs 1e-4; float64 7.578e-16 / 5.873e-15 vs 1e-12), every arm converged and
+  returned its latents on the declared device. Evidence:
+  `openspec/changes/qk-pipeline-dtype/gpu-lane-evidence.md` §2. The converged
+  output cosine is recorded there and does NOT separate dtypes on either device
+  (0.73–0.86 for the float64 torch-vs-NumPy control), corroborating design.md C1
+  on the accelerator; the ruling on that metric is `t_5a964ad9`.
 
 ## Phase 4: Pipeline stages dtype generic
 
@@ -137,6 +149,10 @@
    TuneScalesKD, eval. Host-side stages: sign/extract/pack (latent-to-bit
    conversion boundary — `x >= 0` convention, not `torch.sign`), qpk1 export
    (disk write). Run `uv run pytest tests/ptq/ -k device -v`.
+   **Accelerator confirmation (t_f8e3b1d8, 2026-10-27):** on the GPU lane the
+   accelerator stages report `cuda:0` (`ste`, `ste.per_linear[].device`,
+   `tune_scales_kd`) and the torch solver returns its latents on `cuda:0` for all
+   three dtypes — see `gpu-lane-evidence.md` §2, §4.
 
 - [x] 5.2 **Device-mismatch auditor.**
    Opt-in `nn.Module.__call__` wrapper that raises on tensor args whose
@@ -154,17 +170,23 @@
    override. `--no-good-guest` disables. Run
    `uv run pytest tests/ptq/test_good_guest.py -v`.
 
-- [ ] 5.4 **GPU memory fraction cap.**
+- [x] 5.4 **GPU memory fraction cap.**
    `torch.cuda.set_per_process_memory_fraction(0.85)` at startup when discrete
    GPU present. On APU/iGPU devices (Strix Halo/gfx1151), additionally enforce
    absolute-GB cap (`--gpu-memory-gb G`) to prevent host-RAM drain. Record
    `max_memory_reserved()` in report. `--gpu-memory-fraction F` and
    `--gpu-memory-gb G` overrides. Run
    `uv run pytest -k gpu_memory` (GPU-present gate).
-   **DEFERRED to the GPU lane card `t_f8e3b1d8`** (the row's own acceptance is a
-   GPU-present gate, unconstructable on a CPU-only host): the cap, the overrides
-   and the recorded decision ship, but `max_memory_reserved()` is only meaningful
-   with an accelerator and no CPU-side test can assert it.
+   **Run on the GPU lane card `t_f8e3b1d8` 2026-10-27** (the row's own acceptance
+   is a GPU-present gate, unconstructable on a CPU-only host):
+   `tests/ptq/test_pipeline_dtype_gpu.py::test_scn_gpu_memory_cap_recorded` PASSED
+   on `quantibbler-ptq:rocm-official-v6` / gfx1151 — `apply_gpu_memory_cap` →
+   0.85 on device 0; `is_unified_memory_device()` → True (this box IS the APU
+   case, so the absolute-GB bound is the operative one);
+   `resolve_memory_fraction(0.85, gb=8, total=133 143 986 176)` → 0.0645
+   (the `--gpu-memory-gb` narrowing, ~13x below the bare fraction); and
+   `max_memory_reserved()` recorded at 16 777 216 B under a live allocation,
+   inside the cap. Evidence: `gpu-lane-evidence.md` §5.1.
 
 - [x] 5.5 **Per-stage timing rows.**
    Every pipeline stage (capture, TuneFP, solver, STE, sign/extract/pack,
@@ -172,6 +194,12 @@
    appended as each stage produces its timing. The per-layer aggregate enables
    comparison against the ~8h v6-class baseline. Run
    `uv run pytest tests/ptq/ -k timing`.
+   **GPU rows measured (t_f8e3b1d8, 2026-10-27):** every stage of the map emits a
+   row on the accelerator (capture 0.0005 s, TuneFP 0.139 s, solver 1.355 s,
+   STE 0.147 s, sign/extract/pack 0.030 s, TuneScalesKD 0.063 s, export 0.0001 s,
+   eval 0.0003 s; pipeline wall 1.85 s at load1 ≈ 7–15, 3.39 s at load1 ≈ 41.5 —
+   the box was shared). The CPU column's solver share is 93 % of the tiny-path
+   wall. Evidence: `gpu-lane-evidence.md` §4.
 
 ## Phase6: Hardcoded-dtype elimination
 

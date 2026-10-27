@@ -14,8 +14,11 @@ Covers the scenarios that are measurable on a CPU-only host:
   crystallization"): the CONVERGED-output cosine cells do not reproduce (the
   sign-quantized iteration selects among near-equal discrete optima), so the
   reachable metric asserted here is the early-trajectory agreement plus
-  convergence-within-budget. The GPU cells are deferred to the GPU lane card and
-  SKIP with a named reason.
+  convergence-within-budget. The three GPU cells of the same matrix run on the
+  GPU hardware lane in ``tests/ptq/test_pipeline_dtype_gpu.py`` (same fixture,
+  same metric, same classes); they are held out of this CPU tier because a
+  GPU-only leg can only SKIP on a GPU-less runner, and CI's full-python job
+  asserts zero skips on the default tier.
 * ``per_stage_timing_recorded`` / ``per_stage_device_from_module`` — the stage
   records carry their own wall seconds and the device they ran on.
 """
@@ -127,26 +130,16 @@ def test_scn_admm_parity_cpu_cell(compute_dtype, class_bound):
     )
 
 
-def test_scn_admm_parity_gpu_cells_skip_with_reason():
-    """The GPU cells of the matrix, deferred with a documented skip event.
-
-    DocID: qk-pipeline-dtype task 3.4. A worker sandbox has no accelerator, so
-    the three accelerator cells (bf16/float32/float64 x GPU) run on the GPU lane
-    card (t_f8e3b1d8, host-side container lane) against the digest-pinned
-    ``quantibbler-ptq:rocm-official`` image. The skip names that reason; a silent
-    skip would read as a green cell.
-    """
-    if not torch.cuda.is_available():
-        pytest.skip(
-            f"gpu cell: no accelerator on this host (torch {torch.__version__}); the three "
-            "GPU cells of admm_parity_per_dtype are deferred to the GPU lane card t_f8e3b1d8"
-        )
-    rng = np.random.default_rng(11)
-    w = rng.standard_normal((32, 24)).astype(np.float32)
-    dev = "cuda"
-    cfg = PTQConfig(rank=4, solver_backend="torch", compute_dtype="bf16", admm_max_iter=200)
-    res = lb_admm(torch.as_tensor(w, device=dev), cfg)
-    assert res.U.device.type == "cuda"
+#: The accelerator cells live in ``tests/ptq/test_pipeline_dtype_gpu.py``
+#: (kanban card t_f8e3b1d8, host-side container discipline, digest-pinned
+#: ``quantibbler-ptq:rocm-official-v6`` on the Strix Halo/gfx1151 box). They are
+#: ``@pytest.mark.integration`` legs: a GPU-only leg can only SKIP on a GPU-less
+#: runner, and CI's full-python job refuses ANY skip on the default tier
+#: (``tools/ci/pytest_summary.py --expect-skipped 0``). Carrying the marker
+#: DESELECTS them from this tier on every host — GPU or not — instead of turning
+#: the referee red or, worse, reading a skip as a green accelerator cell. The
+#: per-dtype classes they assert are the SAME ones the CPU cells below use; a GPU
+#: cell that needed a looser bound would be a finding, never a widened constant.
 
 
 def test_scn_per_stage_timing_recorded():
