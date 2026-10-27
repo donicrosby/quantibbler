@@ -44,9 +44,13 @@ def _gate_cfg(*, seed: int = 0) -> PTQConfig:
     solve on CI's GPU-less runner (fail-closed by design). The gate's subject is
     the artifact round trip, and NumPy is the only arm runnable there and the
     tier's unit-test reference -- pinned explicitly rather than weakening the
-    refusal.
+    refusal. ``compute_dtype`` is pinned with it: the NumPy backend IS the
+    float64 parity oracle and refuses bf16 by name (``np_compute_dtype``), so
+    naming one backend without its dtype would be a config this tier cannot run.
     """
-    return dataclasses.replace(gate_config(seed=seed), solver_backend="numpy")
+    return dataclasses.replace(
+        gate_config(seed=seed), solver_backend="numpy", compute_dtype="float64"
+    )
 
 
 def _quantize_gate_fixture():

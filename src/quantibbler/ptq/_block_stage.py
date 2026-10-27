@@ -38,7 +38,7 @@ from ._stats import (
 )
 from ._ste import _discrete_flip_pass, _tune_latent_ste
 from ._tuning import STE_JOINT_SCOPE, STE_RESCOPE_MARKER, TUNE_FP_LOSS_MARKER, _tune_fp
-from .accumulation import accumulation_np_dtype, torch_dtype
+from .accumulation import accumulation_np_dtype, accumulation_spec, torch_dtype
 from .bit_polish import greedy_polish
 from .calibration import LayerStatsBook, collect_stats, robust_diag
 from .config import PTQConfig
@@ -394,7 +394,15 @@ def reconstruct_block(
         else:
             res = lb_admm(w_tilde, cfg)
             p_u, p_v = res.P_u, res.P_v
-        bal = magnitude_balance(p_u, p_v, d_out_t, d_in_t, target=w, backend=balance_backend)
+        bal = magnitude_balance(
+            p_u,
+            p_v,
+            d_out_t,
+            d_in_t,
+            target=w,
+            backend=balance_backend,
+            dtype=accumulation_spec(cfg.compute_dtype),
+        )
         # Post-balance divergence gate: a diverged
         # layer must abort here, before it poisons this block's refinement
         # and every later block's calibration inputs.
@@ -451,13 +459,15 @@ def reconstruct_block(
         # The layer stores at the DECLARED compute dtype, named here rather than
         # inferred from the latents: the polish path hands over exact +-1 BITS
         # (int8), which are storage values, not a precision.
-        bias0 = (
-            linear.bias.detach().to(_compute_dtype_torch).clone()
-            if linear.bias is not None
-            else torch.zeros(
-                linear.weight.shape[0], device=linear.weight.device, dtype=_compute_dtype_torch
-            )  # noqa: E501
-        )
+        if linear.bias is not None:
+            bias0 = linear.bias.detach().to(_compute_dtype_torch).clone()
+        else:
+            # Named device from the owning weight (test_device_constructors is
+            # the grep that keeps this class unrepresentable).
+            _bias_dev = linear.weight.device
+            bias0 = torch.zeros(
+                linear.weight.shape[0], device=_bias_dev, dtype=_compute_dtype_torch
+            )
         fac = FactorizedLinear(
             u0, v0, bias0, factor_mode=cfg.factor_mode, compute_dtype=_compute_dtype_torch
         )
