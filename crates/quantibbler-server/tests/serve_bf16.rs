@@ -345,12 +345,15 @@ fn read_fallback_matches_mmap_and_is_logged_bs_1_3() {
     );
 
     // The two loaded models are identical: same completion JSON modulo the
-    // per-request `created`/`id` fields.
+    // per-request `created`/`id` fields and the timing block. `timings` is
+    // excluded by contract (BS-8.2) — its values jitter with scheduling, so
+    // comparing them makes this leg fail whenever the suite runs under load.
     let strip = |body: &str| -> serde_json::Value {
         let mut v: serde_json::Value = serde_json::from_str(body).expect("JSON body");
         if let Some(o) = v.as_object_mut() {
             o.remove("created");
             o.remove("id");
+            o.remove("timings");
         }
         v
     };

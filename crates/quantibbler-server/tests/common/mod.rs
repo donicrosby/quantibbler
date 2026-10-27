@@ -59,6 +59,22 @@ pub fn serving_sources() -> [PathBuf; 2] {
     [fixture_dir(), blob_fixture()]
 }
 
+/// Recursively copy a fixture directory into `dst`, so a single file can be
+/// doctored (or stripped) without touching the committed fixture the sibling
+/// suites read. `dst` is created if absent.
+pub fn copy_tree(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).expect("create destination dir");
+    for entry in std::fs::read_dir(src).expect("read source dir") {
+        let entry = entry.expect("dir entry");
+        let target = dst.join(entry.file_name());
+        if entry.file_type().expect("file type").is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).expect("copy fixture file");
+        }
+    }
+}
+
 /// Run `body` once per committed serving source (BS-8.1 harness-wide
 /// parametrization): the directory fixture, then the fp32 blob. A serving test
 /// writes its assertions once and takes the artifact path as its only input,
