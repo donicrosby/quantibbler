@@ -342,10 +342,16 @@ def _tune_latent_ste(
             )
             # A row that moved less than the dtype resolution (including a row a
             # vacuous stage restored to its entry value) is inert; a row that
-            # cleared it is not.
-            rec["inert"] = bool(max(moves) < floor_rel)
+            # cleared it is not. A row whose entry baseline is exactly zero has
+            # no denominator to form a relative movement against, so there is no
+            # movement figure to compare -- the verdict is unwitnessed and stays
+            # `None` rather than claiming an inertness nobody measured.
+            rec["inert"] = None if any(m is None for m in moves) else bool(max(moves) < floor_rel)
     if stats["per_linear"]:
-        stats["inert"] = bool(all(rec["inert"] for rec in stats["per_linear"].values()))
+        rows = [rec["inert"] for rec in stats["per_linear"].values()]
+        # The stage verdict inherits a row's no-answer: `None` when any row could
+        # not be measured, never an aggregate over a figure that does not exist.
+        stats["inert"] = None if any(r is None for r in rows) else bool(all(rows))
     stats["skipped_steps"] = skipped
     if skipped:
         print(
@@ -380,11 +386,18 @@ def _dead_columns(fac: FactorizedLinear) -> int:
         return int((dead_u | dead_v).sum())
 
 
-def _rel_move(current: torch.Tensor, start: torch.Tensor) -> float:
-    """Relative L2 movement of a parameter tensor versus its entry value."""
+def _rel_move(current: torch.Tensor, start: torch.Tensor) -> float | None:
+    """Relative L2 movement of a parameter tensor versus its entry value.
+
+    An entry baseline of exactly zero has no denominator: the relative movement
+    is UNDEFINED, not zero, so this returns ``None`` rather than a confident
+    ``0.0`` that reads as "the parameter never moved" about a latent the pass
+    may have moved off zero. The rule is the one TuneFP's aggregate weight and
+    bias figures already carry -- no value, never a confident zero.
+    """
     den = float(start.pow(2).sum())
     if den <= 0.0:
-        return 0.0
+        return None
     return float((current.detach() - start).pow(2).sum().sqrt()) / float(np.sqrt(den))
 
 
