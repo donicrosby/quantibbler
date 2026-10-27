@@ -118,19 +118,15 @@
    computation at `compute_dtype`. Teacher logit cache at `compute_dtype`.
    Run `uv run pytest tests/ptq/test_tune_scales_kd.py -v`.
 
-- [ ] 4.6 **`ste_dtype_generic`: bf16 STE gradient recorded relative to the f64 reference + deviation event.**
-   At bf16 compute, run each layer's STE against a float64 reference, record the
-   per-linear gradient norm RELATIVE to that reference, and emit a
-   `ste_bf16_gradient_deviation` event when the relative deviation exceeds 1e-3.
-   Run `uv run pytest tests/ptq/ -k ste_dtype`.
-   **DEFERRED (declared, 2026-10-27):** the float64-reference run does not exist,
-   so `ste_bf16_gradient_deviation` has no producer and no reader; both STE test
-   files added only `compute_dtype` pins. This is a SECOND production STE pass
-   (an instrumentation change on the numerics path) and it intersects design.md
-   OQ-3, whose outcome — whether bf16 STE gradients need a float32 intermediate —
-   changes what the event should assert, so it is routed to the planner rather
-   than improvised here. The shipped record is `gradient_norm` at the declared
-   compute dtype. See design.md "Implementation crystallization" C4.
+- 4.6 **`ste_dtype_generic` — FOLDED into OQ-3 (planner ruling, 2026-10-27), not a task of this change.**
+   The bf16-relative-to-f64 STE gradient record and the 1e-3 deviation bound are
+   a first-production-run diagnostic owned by design.md OQ-3 (which states the
+   same measurement verbatim); the `ste_bf16_gradient_deviation` event is retired
+   from this change's delta (zero producers/readers; its correct shape depends on
+   OQ-3's outcome). The `ste_dtype_generic` scenario now asserts only the shipped
+   behavior — non-zero bf16 latent gradients + `gradient_norm` at the declared
+   compute dtype. A follow-up spec change defines the then-appropriate
+   instrumentation/event once OQ-3's verdict is measured. See design.md C4 + OQ-3.
 
 ## Phase5: Device placement
 

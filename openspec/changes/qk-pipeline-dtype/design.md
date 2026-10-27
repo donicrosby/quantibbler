@@ -368,6 +368,15 @@ at least one layer and record the relative difference. A difference exceeding
 1e-3 relative would indicate bf16 STE gradients need a float32 intermediate
 (the accumulation dtype can widen the STE path without widening the latents).
 
+**Ownership note (planner ruling, 2026-10-27):** this OQ is now the sole owner
+of the bf16-relative-to-f64 STE gradient record and the 1e-3 bound. The
+`ste_dtype_generic` scenario's standing-event assertion
+(`ste_bf16_gradient_deviation`) was folded here and retired from the change's
+spec delta (see C4). If this OQ's verdict is "float32 intermediate needed",
+the remedy — a float32 STE intermediate and whatever deviation/instrumentation
+then applies — is specified in a FOLLOW-UP change, not asserted by
+qk-pipeline-dtype.
+
 ## Discarded alternatives
 
 ### D1: float32 default instead of bf16
@@ -516,7 +525,7 @@ The accelerator cells of the dtype×device matrix (`{bf16, float32, float64} ×
 emits a documented skip event naming the reason and the deferral target; the
 cells run on the GPU lane card `t_f8e3b1d8` (host-side container discipline).
 
-### C4: `ste_dtype_generic` deferred — the bf16-relative-to-f64 STE gradient record is not implemented
+### C4: `ste_dtype_generic` folded into OQ-3 — the bf16-relative-to-f64 STE gradient record is a first-production-run diagnostic, not standing instrumentation
 
 **Superseded claim (authored):** `ste_dtype_generic` (`specs/qk-ptq/spec.md`,
 STE-refinement requirement) asserts that at bf16 compute the per-linear STE
@@ -543,6 +552,24 @@ to the planner rather than improvised under this card. The shipped record —
 the relative-to-f64 record and the `ste_bf16_gradient_deviation` event are
 named debt, tracked by the open task row and by OQ-3, and routed to the planner
 card `t_76cceaa5`.
+
+**Planner ruling (2026-10-27) — FOLD INTO OQ-3.** The relative-to-f64 gradient
+record and the 1e-3 deviation bound are a first-production-run diagnostic, not
+standing production instrumentation. They are owned by **OQ-3**, whose text
+already states the same measurement verbatim ("the first production run MUST
+compare the per-linear STE gradient norm against the float64 reference path on
+at least one layer and record the relative difference. A difference exceeding
+1e-3 relative would indicate bf16 STE gradients need a float32 intermediate").
+The `ste_bf16_gradient_deviation` event is therefore RETIRED from this change's
+delta — it has zero producers and zero readers, and its correct shape is
+unknowable until OQ-3's verdict is in (a "float32 intermediate needed" verdict
+would make a standing bf16-deviation event the wrong permanent artifact). The
+`ste_dtype_generic` scenario is reworded to assert only what this change
+actually ships: non-zero latent gradients at bf16 and `gradient_norm` recorded
+at the declared compute dtype. tasks.md row 4.6 is re-scoped out of this change
+to a plain deferred note; the measurement obligation lives in OQ-3, and a
+follow-up spec change will define the then-appropriate instrumentation/event
+once OQ-3's outcome is measured.
 
 ### C5: `bias_zero_assertion_gate`'s zero-bias-fails arm re-ruled — the gate fires on dropped bias, never on bias-free architecture
 

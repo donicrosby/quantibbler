@@ -77,7 +77,7 @@ After initialization, each block's continuous latents and scales SHALL be jointl
 #### Scenario: ste_dtype_generic
 
 - **WHEN** STE refinement runs at bf16 compute on a production layer
-- **THEN** the STE passthrough produces non-zero latent gradients at bf16, the per-linear gradient norm is recorded relative to the float64 reference, and a deviation exceeding 1e-3 relative triggers a `ste_bf16_gradient_deviation` event
+- **THEN** the STE passthrough produces non-zero latent gradients at bf16, and the per-linear gradient norm is recorded at the declared compute dtype
 
 ## ADDED Requirements
 
