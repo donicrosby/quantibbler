@@ -25,18 +25,21 @@ use common::*;
 /// directory loads, and the served id matches the loaded directory.
 #[test]
 fn load_ready_only_after_success() {
-    let server = spawn_server(&[]);
-    let ready = wait_ready(server.port, Duration::from_secs(30));
-    assert!(
-        ready,
-        "server never became ready; stderr: {}",
-        server.diagnostic()
-    );
-    let health = get(server.port, "/health").expect("health request");
-    assert_eq!(health.status, 200);
-    let body: serde_json::Value = serde_json::from_str(&health.body).expect("health JSON");
-    assert_eq!(body["ready"], serde_json::json!(true));
-    assert_eq!(body["model"], serde_json::json!(FIXTURE_MODEL_ID));
+    for_each_serving_source(|artifact| {
+        let server = spawn_server_artifact(artifact, &[], &[]);
+        let ready = wait_ready(server.port, Duration::from_secs(30));
+        assert!(
+            ready,
+            "{}: server never became ready; stderr: {}",
+            artifact.display(),
+            server.diagnostic()
+        );
+        let health = get(server.port, "/health").expect("health request");
+        assert_eq!(health.status, 200);
+        let body: serde_json::Value = serde_json::from_str(&health.body).expect("health JSON");
+        assert_eq!(body["ready"], serde_json::json!(true));
+        assert_eq!(body["model"], serde_json::json!(FIXTURE_MODEL_ID));
+    });
 }
 
 /// SR-1.2 (parameterized over every corrupted variant): a failed load never
@@ -88,34 +91,36 @@ fn health_readiness_gate() {
         .enable_all()
         .build()
         .expect("test runtime");
-    rt.block_on(async {
-        let (_state, router) = not_ready_router();
-        let port = serve_on_port(router);
-        // 503 while not ready (poll a few times; the router serves already).
-        let mut saw_503 = false;
-        for _ in 0..50 {
-            if let Ok(resp) = get(port, "/health") {
-                if resp.status == 503 {
-                    saw_503 = true;
-                    let body: serde_json::Value =
-                        serde_json::from_str(&resp.body).expect("health JSON");
-                    assert_eq!(body["ready"], serde_json::json!(false));
-                    break;
+    for_each_serving_source(|artifact| {
+        rt.block_on(async {
+            let (_state, router) = not_ready_router_for(artifact);
+            let port = serve_on_port(router);
+            // 503 while not ready (poll a few times; the router serves already).
+            let mut saw_503 = false;
+            for _ in 0..50 {
+                if let Ok(resp) = get(port, "/health") {
+                    if resp.status == 503 {
+                        saw_503 = true;
+                        let body: serde_json::Value =
+                            serde_json::from_str(&resp.body).expect("health JSON");
+                        assert_eq!(body["ready"], serde_json::json!(false));
+                        break;
+                    }
                 }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert!(saw_503, "not-ready server never answered 503 on /health");
-        // Inference before readiness -> 503 envelope with model_not_ready.
-        let resp = post_json(
-            port,
-            "/v1/chat/completions",
-            &chat_body(FIXTURE_MODEL_ID, false),
-        )
-        .expect("chat request");
-        assert_eq!(resp.status, 503);
-        let body: serde_json::Value = serde_json::from_str(&resp.body).expect("envelope JSON");
-        assert_eq!(body["error"]["code"], serde_json::json!("model_not_ready"));
-        assert_eq!(body["error"]["type"], serde_json::json!("server_error"));
+            assert!(saw_503, "not-ready server never answered 503 on /health");
+            // Inference before readiness -> 503 envelope with model_not_ready.
+            let resp = post_json(
+                port,
+                "/v1/chat/completions",
+                &chat_body(FIXTURE_MODEL_ID, false),
+            )
+            .expect("chat request");
+            assert_eq!(resp.status, 503);
+            let body: serde_json::Value = serde_json::from_str(&resp.body).expect("envelope JSON");
+            assert_eq!(body["error"]["code"], serde_json::json!("model_not_ready"));
+            assert_eq!(body["error"]["type"], serde_json::json!("server_error"));
+        });
     });
 }

@@ -383,3 +383,50 @@ equivalence (BS-9.1) plus the must-differ guard (BS-9.3).
     were restored to their committed bytes; the fixture diff for this change is
     the tokenizer documents and the two blobs. Reported so whoever next needs a
     full regeneration starts from a known state.
+
+### 2026-10-26 — review residuals (coder, t_d7ecf8c7)
+
+12. **BS-8.1's "every existing server test" is carried by parametrizing the
+    SERVING tests over both committed sources.** `tests/common/mod.rs` gains
+    `serving_sources()` — the directory fixture and its fp32 blob twin
+    (`fixture_dir()`, `blob_fixture()`) — and `for_each_serving_source(body)`,
+    which runs ONE assertion body once per source. The single-source helpers
+    keep working: `not_ready_router_for` / `failing_router_for` join
+    `ready_router_for`, and the older names delegate to them with the directory
+    fixture. Every test that obtains its model from the serving harness (a
+    router or a spawned server) is wrapped, so the same assertions run against
+    the blob in the SAME `cargo test` invocation: `api_streaming` (4),
+    `api_concurrency` (3), `api_models` (5), `api_errors` (2), `api_timings`
+    (2), `chat_template` (its 2 served legs), `binary_purity` (the CPU-serves
+    leg), `e2e_fixture` (the end-to-end serve leg), and `load` (the ready leg
+    plus the readiness gate) — 22 tests, 12 of them live in the default run
+    (the rest carry the unrelated `#[ignore]` on the generation rewire).
+
+    The pre-existing tests that stay on one source are not stale; the SOURCE is
+    not their subject. A rejected-directory variant
+    (`load_failure_never_ready` + `corrupted_variants`) has no single-file form;
+    `e2e_reader_matches_representation_known_layer`,
+    `e2e_reader_recovers_the_v2_bias_vector` and
+    `e2e_bias_carrying_fixture_forward_includes_the_bias` read `layers/*.qpk1`
+    and the size formula, which are directory-LAYOUT properties; `sage_dispatch`
+    loads the gate record that lives BESIDE the directory (a blob's artifact dir
+    is the fixtures root, which carries no record), so its arms assert the gate,
+    not the source; `parity_tiny` reads a DIFFERENT fixture
+    (`tests/fixtures/parity-tiny`); `remainder_dtype` and `parity_bf16` compare
+    two different ARTIFACTS rather than two sources of one; and
+    `attention_dispatch` / `gpu_dispatch` / `cross_face_*` assert env-driven face
+    selection, where the source is incidental and the arms are feature-gated.
+    The requirement's testable core — the fp32 blob serves every assertion the
+    directory does, with no tolerance relaxed and no test skipped — is what the
+    22 wrapped tests now execute under the crate's ordinary test command.
+
+13. **`blob_bytes`'s read is a loud refusal, not an `expect`.**
+    `load_blob` opens the artifact and `blob_bytes` reads it, and between the two
+    the path can be swapped for a directory, made unreadable, or removed; the
+    read therefore goes through `read_whole`, returning
+    `Result<Vec<u8>, String>` that names the artifact and the OS reason — the
+    same fail-closed diagnostic shape `load_blob` already uses for its own
+    failures (SR-1.2). The branch is TOCTOU-only and no deterministic fixture
+    constructs it (an unreadable or non-regular path is refused by `File::open`
+    or the `is_file()` dispatch before `blob_bytes` runs), so it is left unpinned
+    exactly as BS-1.2's mmap-failure branch is (entry 5).

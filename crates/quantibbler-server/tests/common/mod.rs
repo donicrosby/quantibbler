@@ -51,6 +51,24 @@ pub fn bf16_blob_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/server-model-bf16.qpk")
 }
 
+/// The two committed SERVING fixture sources the harness parametrizes over
+/// (BS-8.1): the directory fixture and its fp32 blob twin. BS-8.2 pins that
+/// both answer a request with identical content, so an assertion that holds
+/// for one must hold for the other.
+pub fn serving_sources() -> [PathBuf; 2] {
+    [fixture_dir(), blob_fixture()]
+}
+
+/// Run `body` once per committed serving source (BS-8.1 harness-wide
+/// parametrization): the directory fixture, then the fp32 blob. A serving test
+/// writes its assertions once and takes the artifact path as its only input,
+/// so the source is the sole thing that varies between the two runs.
+pub fn for_each_serving_source(body: impl Fn(&Path)) {
+    for artifact in serving_sources() {
+        body(artifact.as_path());
+    }
+}
+
 /// The BS-1.3 test-only hatch: forces the loader's `std::fs::read` fallback.
 /// Re-exported from the loader so the two cannot drift (most test crates do not
 /// reach for it, hence the allowance).
@@ -192,7 +210,9 @@ pub fn spawn_server_artifact(
     }
 }
 
-/// Spawn the built server binary on the valid fixture model.
+/// Spawn the built server binary on the valid DIRECTORY fixture. A new serving
+/// test belongs on [`for_each_serving_source`] (BS-8.1): this single-source
+/// entry point would silently re-introduce a directory-only serving test.
 pub fn spawn_server(extra_args: &[&str]) -> ServerProcess {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind :0 for free port");
     let port = listener.local_addr().expect("addr").port();
@@ -343,21 +363,34 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// An in-process serving router over the fixture model (ready).
+/// An in-process serving router over the DIRECTORY fixture (ready). A new
+/// serving test belongs on [`for_each_serving_source`] (BS-8.1) instead.
 pub fn serving_router() -> (Arc<AppState>, axum::Router) {
     ready_router()
 }
 
-/// A router whose engine fails every generation (SR-7.3 injection).
+/// A router whose engine fails every generation, over the DIRECTORY fixture
+/// (SR-7.3 injection). The any-source form below is what BS-8.1 drives.
 pub fn failing_router() -> (Arc<AppState>, axum::Router) {
-    let (state, router) = ready_router();
+    failing_router_for(&fixture_dir())
+}
+
+/// The SR-7.3 injection over ANY artifact path (BS-8.1).
+pub fn failing_router_for(artifact: &Path) -> (Arc<AppState>, axum::Router) {
+    let (state, router) = ready_router_for(artifact);
     state.engine.fail_generate.store(true, Ordering::SeqCst);
     (state, router)
 }
 
-/// A router that is loaded but NOT ready (SR-6.2 / SR-7.2).
+/// A router that is loaded but NOT ready over the DIRECTORY fixture
+/// (SR-6.2 / SR-7.2).
 pub fn not_ready_router() -> (Arc<AppState>, axum::Router) {
-    let loaded = model::load(&fixture_dir()).expect("fixture model loads");
+    not_ready_router_for(&fixture_dir())
+}
+
+/// The loaded-but-not-ready router over ANY artifact path (BS-8.1).
+pub fn not_ready_router_for(artifact: &Path) -> (Arc<AppState>, axum::Router) {
+    let loaded = model::load(artifact).unwrap_or_else(|e| panic!("{}: {e}", artifact.display()));
     let state = Arc::new(AppState::new(loaded, 4, None));
     let router = build_router(Arc::clone(&state));
     (state, router)

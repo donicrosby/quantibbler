@@ -26,26 +26,28 @@ fn errors_notready_503_envelope() {
         .enable_all()
         .build()
         .expect("test runtime");
-    rt.block_on(async {
-        let (_state, router) = not_ready_router();
-        let port = serve_on_port(router);
-        for path in ["/v1/chat/completions", "/v1/completions"] {
-            let body = if path.ends_with("completions") && !path.ends_with("chat/completions") {
-                completion_body(FIXTURE_MODEL_ID, false)
-            } else {
-                chat_body(FIXTURE_MODEL_ID, false)
-            };
-            let resp = post_json(port, path, &body).expect("request");
-            assert_eq!(resp.status, 503, "path {path}");
-            let parsed: serde_json::Value = serde_json::from_str(&resp.body).expect("envelope");
-            assert_eq!(parsed["error"]["type"], serde_json::json!("server_error"));
-            assert_eq!(
-                parsed["error"]["code"],
-                serde_json::json!("model_not_ready")
-            );
-            assert!(parsed["error"]["message"].is_string());
-            assert!(parsed["error"]["param"].is_null());
-        }
+    for_each_serving_source(|artifact| {
+        rt.block_on(async {
+            let (_state, router) = not_ready_router_for(artifact);
+            let port = serve_on_port(router);
+            for path in ["/v1/chat/completions", "/v1/completions"] {
+                let body = if path.ends_with("completions") && !path.ends_with("chat/completions") {
+                    completion_body(FIXTURE_MODEL_ID, false)
+                } else {
+                    chat_body(FIXTURE_MODEL_ID, false)
+                };
+                let resp = post_json(port, path, &body).expect("request");
+                assert_eq!(resp.status, 503, "path {path}");
+                let parsed: serde_json::Value = serde_json::from_str(&resp.body).expect("envelope");
+                assert_eq!(parsed["error"]["type"], serde_json::json!("server_error"));
+                assert_eq!(
+                    parsed["error"]["code"],
+                    serde_json::json!("model_not_ready")
+                );
+                assert!(parsed["error"]["message"].is_string());
+                assert!(parsed["error"]["param"].is_null());
+            }
+        });
     });
 }
 
@@ -57,26 +59,28 @@ fn errors_internal_500_envelope() {
         .enable_all()
         .build()
         .expect("test runtime");
-    rt.block_on(async {
-        let (_state, router) = failing_router();
-        let port = serve_on_port(router);
-        let resp = post_json(
-            port,
-            "/v1/chat/completions",
-            &chat_body(FIXTURE_MODEL_ID, false),
-        )
-        .expect("request");
-        assert_eq!(resp.status, 500);
-        let parsed: serde_json::Value = serde_json::from_str(&resp.body).expect("envelope");
-        assert_eq!(parsed["error"]["type"], serde_json::json!("server_error"));
-        assert!(parsed["error"]["code"].is_null());
-        // And a body-parse rejection never leaks a non-envelope either.
-        let resp = post_json(port, "/v1/completions", "not-json-at-all").expect("request");
-        assert_eq!(resp.status, 400);
-        let parsed: serde_json::Value = serde_json::from_str(&resp.body).expect("envelope");
-        assert_eq!(
-            parsed["error"]["type"],
-            serde_json::json!("invalid_request_error")
-        );
+    for_each_serving_source(|artifact| {
+        rt.block_on(async {
+            let (_state, router) = failing_router_for(artifact);
+            let port = serve_on_port(router);
+            let resp = post_json(
+                port,
+                "/v1/chat/completions",
+                &chat_body(FIXTURE_MODEL_ID, false),
+            )
+            .expect("request");
+            assert_eq!(resp.status, 500);
+            let parsed: serde_json::Value = serde_json::from_str(&resp.body).expect("envelope");
+            assert_eq!(parsed["error"]["type"], serde_json::json!("server_error"));
+            assert!(parsed["error"]["code"].is_null());
+            // And a body-parse rejection never leaks a non-envelope either.
+            let resp = post_json(port, "/v1/completions", "not-json-at-all").expect("request");
+            assert_eq!(resp.status, 400);
+            let parsed: serde_json::Value = serde_json::from_str(&resp.body).expect("envelope");
+            assert_eq!(
+                parsed["error"]["type"],
+                serde_json::json!("invalid_request_error")
+            );
+        });
     });
 }

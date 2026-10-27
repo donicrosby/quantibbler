@@ -28,16 +28,18 @@ fn inference_runs_cpu_via_kernels_rlib() {
         .enable_all()
         .build()
         .expect("test runtime");
-    rt.block_on(async {
-        let (_state, router) = serving_router();
-        let port = serve_on_port(router);
-        let resp = post_json(
-            port,
-            "/v1/completions",
-            &completion_body(FIXTURE_MODEL_ID, false),
-        )
-        .expect("completion request");
-        assert_eq!(resp.status, 200, "body: {}", resp.body);
+    for_each_serving_source(|artifact| {
+        rt.block_on(async {
+            let (_state, router) = ready_router_for(artifact);
+            let port = serve_on_port(router);
+            let resp = post_json(
+                port,
+                "/v1/completions",
+                &completion_body(FIXTURE_MODEL_ID, false),
+            )
+            .expect("completion request");
+            assert_eq!(resp.status, 200, "{}: {}", artifact.display(), resp.body);
+        });
     });
     // The kernels rlib is a direct dependency of this test binary; calling
     // a kernel here proves the CPU face executes without any interpreter.

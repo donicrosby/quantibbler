@@ -566,7 +566,7 @@ pub fn load_blob(artifact: &Path) -> Result<(loader::ModelDirectory, BlobLoadMet
         let mut reader = std::io::BufReader::new(&file);
         Blob::parse(&mut reader).map_err(|e| format!("{}: {e}", artifact.display()))?
     };
-    let (bytes, method, fallback_reason) = blob_bytes(artifact, &file);
+    let (bytes, method, fallback_reason) = blob_bytes(artifact, &file)?;
     blob.validate_payload(&bytes)
         .map_err(|e| format!("{}: {e}", artifact.display()))?;
     let dir = loader::build_from_blob(artifact, &blob, &bytes)?;
@@ -589,28 +589,37 @@ pub fn load_blob(artifact: &Path) -> Result<(loader::ModelDirectory, BlobLoadMet
 /// Choose the blob's byte source, returning the fallback reason when the read
 /// path was taken (the WARN the spec requires). mmap failure is not fatal: the
 /// loaded model is identical either way.
+///
+/// The read itself is NOT an `expect`: the artifact was opened above, but the
+/// path can be swapped for a directory, made unreadable, or removed between
+/// that open and this read, so a failure refuses loudly naming the artifact
+/// (SR-1.2's diagnostic contract) instead of panicking without it.
 fn blob_bytes(
     artifact: &Path,
     file: &std::fs::File,
-) -> (BlobBytes, BlobLoadMethod, Option<String>) {
+) -> Result<(BlobBytes, BlobLoadMethod, Option<String>), String> {
     if std::env::var_os(FORCE_READ_FALLBACK_ENV).is_some() {
         let reason = format!("forced by {FORCE_READ_FALLBACK_ENV} (test hatch)");
-        let read = std::fs::read(artifact)
-            .expect("the artifact was just opened; a read of it cannot fail");
-        return (BlobBytes::Owned(read), BlobLoadMethod::Read, Some(reason));
+        let read = read_whole(artifact)?;
+        return Ok((BlobBytes::Owned(read), BlobLoadMethod::Read, Some(reason)));
     }
     // SAFETY: a read-only map of a file opened read-only; the map lives no
     // longer than `file`, and `validate_payload` bounds-checks every section
     // range against the map's own length before any slice is taken from it.
     match unsafe { memmap2::Mmap::map(file) } {
-        Ok(map) => (BlobBytes::Mapped(map), BlobLoadMethod::Mmap, None),
+        Ok(map) => Ok((BlobBytes::Mapped(map), BlobLoadMethod::Mmap, None)),
         Err(e) => {
             let reason = format!("mmap failed: {e}");
-            let read = std::fs::read(artifact)
-                .expect("the artifact was just opened; a read of it cannot fail");
-            (BlobBytes::Owned(read), BlobLoadMethod::Read, Some(reason))
+            let read = read_whole(artifact)?;
+            Ok((BlobBytes::Owned(read), BlobLoadMethod::Read, Some(reason)))
         }
     }
+}
+
+/// The fallback byte source's own fail-closed refusal: read the whole artifact,
+/// naming it and the OS reason on failure.
+fn read_whole(artifact: &Path) -> Result<Vec<u8>, String> {
+    std::fs::read(artifact).map_err(|e| format!("{}: {e}", artifact.display()))
 }
 
 /// The serving-side composition shared by both sources: tokenizer, the

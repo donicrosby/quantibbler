@@ -92,31 +92,33 @@ fn blob_artifact_carries_the_same_chat_template_bs_5_1() {
 /// envelope, and no generation is attempted.
 #[test]
 fn chat_template_failure_returns_400_bs_5_2() {
-    let (_state, router) = ready_router_for(&fixture_dir());
-    let port = serve_on_port(router);
-    for (label, body) in [
-        (
-            "empty messages",
-            r#"{"model": "server-model-fixture", "messages": []}"#,
-        ),
-        (
-            "unknown role",
-            r#"{"model": "server-model-fixture", "messages": [{"role": "wizzard", "content": "hi"}]}"#,
-        ),
-    ] {
-        let resp = post_json(port, "/v1/chat/completions", body).expect("request");
-        assert_eq!(resp.status, 400, "{label}: {}", resp.body);
-        let value: serde_json::Value = serde_json::from_str(&resp.body).expect("envelope JSON");
-        assert_eq!(
-            value["error"]["type"],
-            serde_json::json!("invalid_request_error"),
-            "{label}: the failure must ride the OpenAI envelope"
-        );
-        assert!(
-            value["error"]["message"].is_string(),
-            "{label}: the failure must name a reason"
-        );
-    }
+    for_each_serving_source(|artifact| {
+        let (_state, router) = ready_router_for(artifact);
+        let port = serve_on_port(router);
+        for (label, body) in [
+            (
+                "empty messages",
+                r#"{"model": "server-model-fixture", "messages": []}"#,
+            ),
+            (
+                "unknown role",
+                r#"{"model": "server-model-fixture", "messages": [{"role": "wizzard", "content": "hi"}]}"#,
+            ),
+        ] {
+            let resp = post_json(port, "/v1/chat/completions", body).expect("request");
+            assert_eq!(resp.status, 400, "{label}: {}", resp.body);
+            let value: serde_json::Value = serde_json::from_str(&resp.body).expect("envelope JSON");
+            assert_eq!(
+                value["error"]["type"],
+                serde_json::json!("invalid_request_error"),
+                "{label}: the failure must ride the OpenAI envelope"
+            );
+            assert!(
+                value["error"]["message"].is_string(),
+                "{label}: the failure must name a reason"
+            );
+        }
+    });
 }
 
 /// BS-5.1 (served leg) — the SERVED response's prompt-token count is the
@@ -125,33 +127,35 @@ fn chat_template_failure_returns_400_bs_5_2() {
 /// the API surface, not just through the module.
 #[test]
 fn served_chat_completion_tokenizes_the_templated_prompt_bs_5_1() {
-    let (state, router) = ready_router_for(&fixture_dir());
-    let port = serve_on_port(router);
-    let resp = post_json(
-        port,
-        "/v1/chat/completions",
-        &chat_body(FIXTURE_MODEL_ID, false),
-    )
-    .expect("chat request");
-    assert_eq!(resp.status, 200, "body: {}", resp.body);
+    for_each_serving_source(|artifact| {
+        let (state, router) = ready_router_for(artifact);
+        let port = serve_on_port(router);
+        let resp = post_json(
+            port,
+            "/v1/chat/completions",
+            &chat_body(FIXTURE_MODEL_ID, false),
+        )
+        .expect("chat request");
+        assert_eq!(resp.status, 200, "{}: {}", artifact.display(), resp.body);
 
-    let template = state.engine.chat_template.clone().expect("template");
-    let messages = vec![api::types::ChatMessage {
-        role: "user".into(),
-        content: "ab".into(), // what `chat_body` sends
-    }];
-    let templated = api::chat_template::render(&template, &messages).expect("render");
-    let templated_tokens = state.engine.encode(&templated).expect("tokenize").len() as u64;
-    let joined_tokens = state.engine.encode("ab").expect("tokenize").len() as u64;
-    assert_ne!(
-        templated_tokens, joined_tokens,
-        "the fixture must distinguish the templated prompt from the bare join"
-    );
+        let template = state.engine.chat_template.clone().expect("template");
+        let messages = vec![api::types::ChatMessage {
+            role: "user".into(),
+            content: "ab".into(), // what `chat_body` sends
+        }];
+        let templated = api::chat_template::render(&template, &messages).expect("render");
+        let templated_tokens = state.engine.encode(&templated).expect("tokenize").len() as u64;
+        let joined_tokens = state.engine.encode("ab").expect("tokenize").len() as u64;
+        assert_ne!(
+            templated_tokens, joined_tokens,
+            "the fixture must distinguish the templated prompt from the bare join"
+        );
 
-    let body: serde_json::Value = serde_json::from_str(&resp.body).expect("chat JSON");
-    assert_eq!(
-        body["usage"]["prompt_tokens"],
-        serde_json::json!(templated_tokens),
-        "the served prompt_tokens must be the TEMPLATE-rendered prompt's count"
-    );
+        let body: serde_json::Value = serde_json::from_str(&resp.body).expect("chat JSON");
+        assert_eq!(
+            body["usage"]["prompt_tokens"],
+            serde_json::json!(templated_tokens),
+            "the served prompt_tokens must be the TEMPLATE-rendered prompt's count"
+        );
+    });
 }

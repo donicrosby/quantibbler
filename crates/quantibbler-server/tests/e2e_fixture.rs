@@ -195,17 +195,20 @@ fn e2e_fixture_model_serves_end_to_end() {
         "fixture stream must match the size formula"
     );
 
-    // Serve the fixture model end to end through the REAL binary.
-    let server = spawn_server(&[]);
-    assert!(wait_ready(server.port, std::time::Duration::from_secs(30)));
-    let resp = post_json(
-        server.port,
-        "/v1/completions",
-        &completion_body(FIXTURE_MODEL_ID, false),
-    )
-    .expect("completion request");
-    assert_eq!(resp.status, 200, "body: {}", resp.body);
-    let body: serde_json::Value = serde_json::from_str(&resp.body).expect("completion JSON");
-    assert_eq!(body["object"], serde_json::json!("text_completion"));
-    assert!(body["choices"][0]["text"].is_string());
+    // Serve the fixture model end to end through the REAL binary, over both
+    // committed serving sources (BS-8.1).
+    for_each_serving_source(|artifact| {
+        let server = spawn_server_artifact(artifact, &[], &[]);
+        assert!(wait_ready(server.port, std::time::Duration::from_secs(30)));
+        let resp = post_json(
+            server.port,
+            "/v1/completions",
+            &completion_body(FIXTURE_MODEL_ID, false),
+        )
+        .expect("completion request");
+        assert_eq!(resp.status, 200, "{}: {}", artifact.display(), resp.body);
+        let body: serde_json::Value = serde_json::from_str(&resp.body).expect("completion JSON");
+        assert_eq!(body["object"], serde_json::json!("text_completion"));
+        assert!(body["choices"][0]["text"].is_string());
+    });
 }
