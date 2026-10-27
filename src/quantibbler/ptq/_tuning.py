@@ -171,6 +171,15 @@ def _tune_fp(
         "gradient_norm": None,
         "initial_residual_norm": None,
         "residual_after": None,
+        # The aggregate relative movement of the stage's tuned parameters.
+        # `weight_delta_rel = None` has TWO causes and the row names which one
+        # rather than overloading the bare `None`: the stage that never ran far
+        # enough to have an answer (an empty tunable set, or a vacuous-teacher
+        # early return), or a stage whose every tuned parameter was exactly 0.0
+        # at entry -- a zero-init output projection, a LoRA B matrix, a gated
+        # unit -- where the relative movement has no denominator at all. The
+        # division is then undefined, not zero, so the field keeps this `None`
+        # and never a confident 0.0 (design D12); `steps` separates the two.
         "weight_delta_rel": None,
         # Bias is a first-class tuned quantity (the container carries it), so
         # its movement is recorded separately from the aggregate: the weight
@@ -200,8 +209,9 @@ def _tune_fp(
         "bias_tunables": 0,
         "vacuous": False,
         # Inertness is DECLARED, not implied (qk-tune-loss-scale, requirement 3):
-        # `None` means the stage did not run far enough to have an answer, never
-        # "it was fine".
+        # `None` means the stage did not run far enough to have an answer -- or
+        # ran over a baseline with no denominator to compare a movement
+        # against -- never "it was fine".
         "inert": None,
         # Weighting actually used, on the record from construction so the
         # vacuous-teacher early return carries it too.
@@ -380,8 +390,14 @@ def _tune_fp(
             den += float(p0.pow(2).sum())
     stats["residual_after"] = after_residual
     stats["residual_before"] = before_residual
-    delta_rel = float(np.sqrt(num) / np.sqrt(den)) if den > 0.0 else 0.0
-    stats["weight_delta_rel"] = delta_rel
+    # An all-zero weight baseline (a zero-init output projection, a LoRA B
+    # matrix, a gated unit) leaves the relative movement UNDEFINED -- 0.0 would
+    # read as "the weights never moved" about weights the stage may have tuned
+    # off zero. Record the `None` initial value instead (design D12: no value,
+    # never a confident 0.0); `steps` says whether the stage ran. The bias arm
+    # below is the same rule for the bias compartment.
+    if den > 0.0:
+        stats["weight_delta_rel"] = float(np.sqrt(num) / np.sqrt(den))
     if bias_params:
         bnum = bden = 0.0
         with torch.no_grad():
@@ -400,8 +416,13 @@ def _tune_fp(
     # stage that ran steps and moved its parameters by less than the parameter
     # dtype's relative resolution did nothing measurable, and the record says so
     # instead of leaving a reader to reconcile `steps: 256` with
-    # `weight_delta_rel: 0.0`.
-    stats["inert"] = bool(stats["steps"] > 0 and delta_rel < floor_rel)
+    # `weight_delta_rel: 0.0`. An all-zero baseline has no relative movement to
+    # compare, so the verdict is unwitnessed rather than False and the field
+    # stays `None` -- the same no-answer a stage that never ran carries.
+    delta_rel = stats["weight_delta_rel"]
+    stats["inert"] = (
+        None if delta_rel is None else bool(stats["steps"] > 0 and delta_rel < floor_rel)
+    )
     stats["skipped_steps"] = skipped
     if skipped:
         print(f"[tune_fp:{label}] skipped {skipped}/{total} non-finite-loss steps", flush=True)
