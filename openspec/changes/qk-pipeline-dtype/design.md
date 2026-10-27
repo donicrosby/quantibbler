@@ -172,6 +172,8 @@ compute_dtype (see "Tolerances" below) relative to the NumPy float64 reference.
 
 ### Per-dtype tolerances
 
+**Superseded by C1 below.** The table's tolerances were declared on the converged-output cosine metric; measurement proved that metric measures basin selection, not dtype fidelity (C1). The correct metric is the first-update residual relative difference, and the tolerance values (1e-2 / 1e-4 / 1e-12) transfer unchanged — the bounds were correctly derived from format ULP analysis; the defect was the metric, not the values.
+
 | Compute dtype | ADMM recon cos tolerance vs float64 | Parity gate class |
 |---------------|-------------------------------------|-------------------|
 | float64 | 1e-12 (existing) | float64-parity |
@@ -460,6 +462,43 @@ scenario's metric in `specs/qk-ptq/spec.md` (a converged-output cosine bound)
 needs a ruling — either the scenario moves to the early-trajectory metric, or it
 declares the basin-selection caveat explicitly. The same applies to
 `accumulation_identity_at_higher_dtypes`' float64-torch clause.
+
+**Orchestrator ruling (2026-10-27):** The scenario moves to the early-trajectory
+metric. The first-update residual relative difference is the correct parity
+definition for all three compute dtypes, and the tolerance values (bf16 ≤1e-2,
+float32 ≤1e-4, float64 ≤1e-12) are confirmed.
+
+*Justification.* The first ADMM update computes the continuous latent update
+from identical initial conditions, target, and regularization — only the
+arithmetic precision varies. It is measured BEFORE the first sign projection,
+so no discrete basin selection has occurred. The float64-torch vs float64-NumPy
+control arm proves the metric's validity: the two backends agree to 2.5e-15 on
+the first update (matching the format ULP bound) while diverging to 0.25–0.68
+cosine distance at convergence. The converged-iterate cosine is explicitly
+NOT a parity metric — it measures which discrete basin the iterate selected,
+not the fidelity of the floating-point arithmetic. Two dtype runs that land
+in different basins are both "correct" by their own arithmetic; no per-dtype
+bound on converged cosine is satisfiable by construction.
+
+*Tolerance derivation from first principles (not vibes).* bf16 has 7 mantissa
+bits + implicit 1 ≈ 8 bits ≈ 2.4 decimal digits. The normal equations form at
+float32 accumulation, but the input terms carry bf16's ~2e-3 relative error
+per element; for din ≈ 4096, the accumulated error ≈ 2e-3/√4096 ≈ 3e-5 per
+entry, with Cholesky amplifying by the condition number. Conservative bound:
+**≤1e-2** (matches measured 1.0e-3 with ~10× headroom). float32 has 23
+mantissa bits ≈ 7.2 decimal digits; accumulated error ≈ 6e-8/√din ≈ 9e-10
+per entry. Conservative bound: **≤1e-4** (matches measured 3.8e-7 with
+~260× headroom). float64 has 53 mantissa bits; both backends use IEEE 754
+double precision. Expected agreement ~1e-15, conservative bound: **≤1e-12**
+(matches measured 2.5e-15). All three bounds derive from the format's
+mantissa width and the operation's term-count, not from calibration — the
+calibration confirms they are reachable.
+
+*Spec amendment (this commit).* `admm_parity_per_dtype` scenario and
+`accumulation_identity_at_higher_dtypes`' float64-torch clause both amended
+to the first-update residual metric. Design.md tolerance table annotated as
+superseded, pointing to this ruling. No tolerance value changed — the bounds
+were correctly derived; the defect was the metric.
 
 ### C2: the polish entry was an int8 Gram (fixed here)
 

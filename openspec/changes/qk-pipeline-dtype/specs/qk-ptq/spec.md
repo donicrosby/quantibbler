@@ -51,7 +51,8 @@ For each linear layer, the pipeline SHALL form the preconditioned target at `com
 #### Scenario: admm_parity_per_dtype
 
 - **WHEN** LB-ADMM factorizes a fixed target at each compute_dtype against the float64 NumPy reference
-- **THEN** the reconstruction cosine similarity `cos(recon, target)` computed over the block-output dimensions satisfies: ≥0.99 for bf16 (cos ≤ 1e-2 drop), ≥0.9999 for float32 (cos ≤ 1e-4 drop), and ≥1−1e-12 for float64 — measured on the torch backend's output before packing (unpacked reconstruction vs float64-NumPy reference output)
+- **THEN** the relative difference of the FIRST ADMM update residual `‖U₁ − U₁_ref‖ / ‖U₁_ref‖` against the float64 NumPy reference satisfies: ≤1e-2 for bf16, ≤1e-4 for float32, and ≤1e-12 for float64 — measured on the continuous-update iterate before the first sign projection
+- **AND** the converged-output cosine similarity is explicitly NOT a parity metric: ADMM with a sign-quantized SVID proxy is a discrete optimization where back-end round-off differences select among near-equal discrete optima, and the converged cosine measures basin selection rather than dtype fidelity (measured: float64-torch vs float64-NumPy control diverges to 0.25–0.68 cosine distance at convergence while agreeing to 2.5e-15 on the first update)
 
 ### Requirement: Factorized components SHALL be refined per block with the Straight-Through Estimator
 
@@ -110,7 +111,7 @@ Every operation summing more values than bf16's 7-bit mantissa can accommodate S
 - **WHEN** compute_dtype is float64 with `--solver-backend numpy`
 - **THEN** the accumulation dtype equals compute_dtype, and the pipeline is bit-identical to the pre-change float64 path on the same inputs
 - **WHEN** compute_dtype is float64 with the torch backend
-- **THEN** the accumulation dtype equals compute_dtype, and the reconstruction cosine vs the float64 NumPy reference satisfies ≥1−1e-12 (cosine drop 1−cos ≤1e-12)
+- **THEN** the accumulation dtype equals compute_dtype, and the first-update residual relative difference vs the float64 NumPy reference satisfies ≤1e-12 (per `admm_parity_per_dtype`)
 
 ### Requirement: The LB-ADMM and SVD solvers SHALL execute on the accelerator device when present
 
