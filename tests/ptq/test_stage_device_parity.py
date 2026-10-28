@@ -343,13 +343,7 @@ def test_fp32_gpu_within_tolerance_class_tolerance_is_the_specs_class() -> None:
     """The class is the campaign's ±0.002, cited — not fitted to this fixture."""
     assert TOLERANCE == 2e-3
     spec = (
-        pathlib.Path(__file__).resolve().parents[2]
-        / "openspec"
-        / "changes"
-        / "qk-ptq-speedups"
-        / "specs"
-        / "qk-ptq"
-        / "spec.md"
+        pathlib.Path(__file__).resolve().parents[2] / "openspec" / "specs" / "qk-ptq" / "spec.md"
     ).read_text()
     assert "±0.002 tolerance class" in spec
 
