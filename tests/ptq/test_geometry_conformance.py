@@ -20,14 +20,16 @@ re-expression in sequences. The wiring test runs the real driver as the user
 invokes it — its ``calib N batches`` line is where the knob's unit becomes
 observable, and pre-fix it read ``calib 128 batches`` for a 128-sequence knob.
 
-Geometry note: the wiring run passes ``--paper-faithful`` with a deliberately
-non-maximal ``--eval-seqs`` so the driver's own preflight gate exits it right
-after the line under test, before any quantization work.
+Geometry note: the wiring run uses the smallest legal geometry so the unit
+becomes observable in the driver's own ``calib N batches`` line, and it runs
+that geometry to completion — there is no longer a preflight to stop it early,
+because the eval-window guard died with the self-asserted fidelity flag.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import pathlib
 import subprocess
@@ -157,12 +159,13 @@ def test_calibration_knob_fails_closed_on_odd_count(driver):
 
 
 def test_help_text_names_the_knobs_unit():
-    """Both knobs document sequences, carrying the protocol's own numbers.
+    """Both knobs document SEQUENCES, with the protocol's own numbers.
 
     Pre-fix the help read "16 batches of 8 sequences = 128 calibration rows"
-    and "5 batches of 8 = 40 eval rows": the paper's numbers were expressed in
-    a unit the CLI never named. The default is the protocol value in the knob's
-    own unit (128 calibration / 40 eval sequences).
+    and "5 batches of 8 = 40 eval rows": the paper's numbers were expressed in a
+    unit the CLI never named. The knob's unit is sequences, the packed batch size
+    is an implementation fact the help states, and the default is the protocol
+    value in the knob's own unit.
     """
     proc = subprocess.run(
         [sys.executable, str(DRIVER), "--help"],
@@ -172,10 +175,11 @@ def test_help_text_names_the_knobs_unit():
         check=False,
     )
     help_text = proc.stdout
-    assert "128 calibration SEQUENCES" in help_text
-    assert "16 batches" in help_text
-    assert "40 held-out evaluation SEQUENCES" in help_text
-    assert "5 batches" in help_text
+    assert "calibration sequences" in help_text
+    assert "evaluation sequences" in help_text
+    assert "rows per batch" in help_text
+    assert "(default: 128)" in help_text
+    assert "(default: 40)" in help_text
 
 
 # --- the eval axis -----------------------------------------------------------
@@ -184,22 +188,12 @@ def test_help_text_names_the_knobs_unit():
 def test_eval_knob_counts_sequences(driver):
     """Spec scenario ``eval_knob_counts_sequences``: 18 batches -> 144 sequences.
 
-    The derivation is the driver's own, fed the run record it is actually fed:
-    ``evaluation_record`` at the paper geometry (wikitext-2 test, seq 2048)
-    gives 145 blocks and keeps ``full_local_window_batches == 18`` — a harness
-    fact in BATCHES, pinned as such by the report's own tests — while
-    ``--eval-seqs`` counts SEQUENCES, so the paper-faithful gate's demanded
-    value is ``eval_window_sequences(record) == 18 * BATCH == 144``. A gate
-    comparing the knob against the raw batch count would call an 18-sequence
-    window (2 batches) maximal.
-
-    RED-FIRST RECORD (pre-fix driver, ``84b4615^``): this test fails with
-    ``AttributeError: module 'qhfm_geometry' has no attribute
-    'eval_window_sequences'`` — the sequence-unit derivation does not exist
-    there. The unit defect it replaces was observable at the CLI: the pre-fix
-    ``--help`` read ``--eval-seqs 5 batches of 8 = 40 eval rows`` and the gate
-    demanded ``--eval-seqs {batches}``, so ``18`` named 18 packed batches (144
-    sequences) and 144 was not a legal value of the knob at all.
+    The record keeps the window in BATCHES (a harness fact of the sizer, pinned
+    as such by the report's own tests) while ``--eval-seqs`` counts SEQUENCES,
+    so the two units meet at exactly one conversion — the knob's own. At the
+    paper geometry (wikitext-2 test, seq 2048) the record carries 145 blocks and
+    18 batches, i.e. 144 sequences. Comparing the knob against the raw batch
+    count would call an 18-sequence window (2 batches) maximal.
     """
     evaluation = driver.evaluation_record(
         evaluator=driver.EVAL_EVALUATOR,
@@ -212,8 +206,8 @@ def test_eval_knob_counts_sequences(driver):
     )
     assert evaluation["full_blocks"] == PAPER_BLOCKS == 145
     assert evaluation["full_local_window_batches"] == 18
-    window = driver.eval_window_sequences(evaluation)
-    assert window == 144 == 18 * driver.BATCH
+    window = evaluation["full_local_window_batches"] * driver.BATCH
+    assert window == 144
     # The unit is not cosmetic: the raw batch count is a different number, and
     # the knob's own conversion is the exact inverse of the derivation.
     assert window != evaluation["full_local_window_batches"]
@@ -228,10 +222,9 @@ def test_driver_reports_sequences_for_the_calibration_knob(offline_corpus, tiny_
 
     ``calib {len(calib)} batches`` is where the knob's unit becomes observable.
     Pre-fix, ``--calibration-seqs 128`` printed ``calib 128 batches`` (1024
-    sequences); post-fix it must print ``calib 16 batches`` (128 sequences).
-
-    The run is bounded by the driver's own preflight: ``--paper-faithful`` with
-    a non-maximal ``--eval-seqs`` raises right after the line under test.
+    sequences); post-fix the same knob prints ``calib 16 batches`` (128
+    sequences), and this leg runs the smallest legal geometry end to end: 16
+    sequences = 2 packed batches.
     """
     out_dir = tmp_path / "out"
     out_dir.mkdir()
@@ -262,15 +255,13 @@ def test_driver_reports_sequences_for_the_calibration_knob(offline_corpus, tiny_
         "2",
         "--seq-len",
         str(SEQ_LEN),
+        # The smallest legal geometry: the knob's unit is what is under test,
+        # not the run's cost. Both knobs must be whole packed batches (8 rows),
+        # or the divisibility rule refuses before the line under test prints.
         "--calibration-seqs",
-        str(CALIBRATION_SEQS),
-        # Deliberately non-maximal but batch-aligned (8 sequences = 1 packed
-        # batch): trips the paper-faithful preflight gate immediately after the
-        # calib line, so no quantization work runs. A non-multiple would be
-        # refused by the divisibility rule before the gate is reached.
+        "16",
         "--eval-seqs",
         "8",
-        "--paper-faithful",
         "--out",
         str(out_dir / "artifact"),
     ]
@@ -278,11 +269,16 @@ def test_driver_reports_sequences_for_the_calibration_knob(offline_corpus, tiny_
         cmd, capture_output=True, text=True, env=env, timeout=DRIVER_TIMEOUT, check=False
     )
     combined = proc.stdout + proc.stderr
-    expected = f"calib {CALIBRATION_SEQS // 8} batches"
+    expected = "calib 2 batches"
     assert expected in combined, (
-        f"driver did not report the knob in sequences; expected {expected!r}.\n"
-        f"stdout+stderr tail:\n{combined[-2000:]}"
+        f"driver did not report the knob in sequences; expected {expected!r} "
+        f"(16 sequences = 2 packed batches).\nstdout+stderr tail:\n{combined[-2000:]}"
     )
-    assert "maximal local evaluation window" in combined, (
-        "the wiring run was meant to stop at the paper-faithful preflight gate"
+    assert proc.returncode == 0, (
+        f"the wiring run must complete: no preflight stands between the knob and "
+        f"the run any more.\n{combined[-3000:]}"
     )
+    # The report carries the same number in the same unit, so the line under
+    # test is not the only place the conversion is observable.
+    report = json.loads((out_dir / "artifact" / "quantize_report.json").read_text())
+    assert report["calibration_rows"] == 16

@@ -85,6 +85,11 @@ def _offline_env(corpus_root: Path, workdir: Path) -> dict:
             "OPENBLAS_NUM_THREADS": "4",
             "QUANTIBBLER_KD_TMPDIR": str(kd_tmp),
             "QUANTIBBLER_BREADCRUMBS": str(workdir / "breadcrumbs.log"),
+            # The probe's batch count is lane instrumentation, not a compression
+            # knob, so it is set as a QK_* env var rather than passed as a flag:
+            # this smoke leg wants the probe cheap (one batch), which is exactly
+            # the kind of choice the driver no longer exposes on its parser.
+            "QK_PROBE_BATCHES": "1",
         }
     )
     return env
@@ -203,8 +208,6 @@ def invocation(fixture: Path, out_dir: Path) -> list[str]:
         "8",
         "--eval-seqs",
         "16",
-        "--probe-batches",
-        "1",
         "--out",
         str(out_dir),
         "--checkpoint-dir",

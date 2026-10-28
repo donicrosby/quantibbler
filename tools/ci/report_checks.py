@@ -26,6 +26,7 @@ from quantibbler.qk_report import (
     FAILED,
     OK,
     STEPS_EFFECT_EPS,
+    config_matches_paper_regime,
     exit_code,
 )
 
@@ -117,11 +118,11 @@ def stage_evidence_findings(payload_text: str) -> list[str]:
          prefix acquires quantization damage (measured 0.259 -> 1.515 on the unit
          fixture), so comparing residual *levels* across fires measures
          accumulated damage, not this stage's effect.
-       - A run that is not claiming fidelity runs deliberately short budgets
-         (the driver's non-faithful stage_pre is ``epochs=0``, one step of the
-         paper's 256). Those records are honest and are not findings; the effect
-         floor is a fidelity requirement, and on a non-faithful run asserting it
-         would red-light correct behavior.
+       - A run outside the paper regime runs deliberately short budgets (the
+         gate-shaped stage_pre is ``epochs=0``, one step of the paper's 256).
+         Those records are honest and are not findings; the effect floor is a
+         paper-regime requirement, and asserting it on a run that never claimed
+         the regime would red-light correct behavior.
 
        This is a **no-op detector, not a counterfactual**: it cannot see a
        tuning that helps one fire exactly as much as it hurts another. It answers
@@ -137,13 +138,13 @@ def stage_evidence_findings(payload_text: str) -> list[str]:
         return [f"the report carries no stage list: {stages!r}"]
 
     problems: list[str] = []
-    # Keyed on the CLAIM (``--paper-faithful`` was on the argv), NOT the rolled-up
-    # verdict ``paper_faithful``: the verdict is False on ANY failed run (an
-    # unrelated probe abort flips it), which would silently disable this detector
-    # on exactly the full-budget runs it exists to audit. Measured: one run
-    # claimed fidelity, ran 12 TuneFP cycles + 14 STE rows that netted 0.0, and
-    # the verdict-keyed gate returned 0 findings.
-    faithful = report.get("fidelity_conditions", {}).get("paper_faithful_flag") is True
+    # Keyed on the DECLARED CONFIG's match against the paper regime, not on the
+    # rolled-up verdict `paper_faithful`: the verdict is False on ANY failed run
+    # (an unrelated probe abort flips it), which would silently disable this
+    # detector on exactly the full-budget runs it exists to audit. Measured: one
+    # run matched the regime, ran 12 TuneFP cycles + 14 STE rows that netted 0.0,
+    # and the verdict-keyed gate returned 0 findings.
+    faithful = config_matches_paper_regime(report.get("fidelity_config"))
     cycles: dict[tuple[str, Any], list[tuple[float, float]]] = {}
 
     def _check(kind: str, label: Any, rec: Any) -> None:

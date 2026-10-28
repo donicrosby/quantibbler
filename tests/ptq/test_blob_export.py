@@ -48,7 +48,7 @@ def test_blob_export_loads_in_rust_bw1_1_bw1_3(
 ):
     """BW-1.1/BW-1.3: a real run emits a loadable blob + records its sha256."""
     out_dir = tmp_path / "blob-export"
-    proc = _run_driver(offline_corpus, tiny_model, out_dir, extra=["--factor-mode", "binary"])
+    proc = _run_driver(offline_corpus, tiny_model, out_dir, extra=[])
     assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
     blob_path = out_dir.with_suffix(".qpk")
     assert blob_path.is_file(), "the default container is a single-file blob"
@@ -90,7 +90,7 @@ def test_directory_export_still_accepted_bw1_2(
         offline_corpus,
         tiny_model,
         out_dir,
-        extra=["--factor-mode", "binary", "--container-format", "dir"],
+        extra=["--container-format", "dir"],
     )
     assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
     assert (out_dir / "manifest.toml").is_file()

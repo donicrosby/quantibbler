@@ -202,7 +202,7 @@ def test_workflow_product_floor_pins_the_dependency_split():
 SMOKE_EXPECT = {
     "model": "/tmp/tiny-qwen3",
     "rank": 4,
-    "solver": "svd",
+    "solver": "admm",
     "scale_dtype": "float32",
     "seq_len": 32,
 }
@@ -213,7 +213,7 @@ def _healthy_report(**overrides) -> str:  # noqa: ANN003
     report = {
         "model": "/tmp/tiny-qwen3",
         "rank": 4,
-        "solver": "svd",
+        "solver": "admm",
         "scale_dtype": "float32",
         "seq_len": 32,
         "ppl_baseline_bf16": 151949.86,
@@ -239,12 +239,31 @@ def _healthy_report(**overrides) -> str:  # noqa: ANN003
         "artifact_exported": True,
         "status": "ok",
         "wall_seconds": 48.2,
-        # A faithful claim, so the EFFECT half of the stage gate applies to this
-        # report and not just the presence half. The gate keys on the CLAIM
-        # (`fidelity_conditions.paper_faithful_flag`), not the rolled-up verdict
-        # (`paper_faithful`), which is False on any failed run.
+        # A regime-matching declaration, so the EFFECT half of the stage gate
+        # applies to this report and not just the presence half. The gate keys on
+        # the DECLARED CONFIG's match against the paper regime, not on the
+        # rolled-up verdict (`paper_faithful`), which is False on any failed run.
         "paper_faithful": True,
-        "fidelity_conditions": {"paper_faithful_flag": True},
+        "fidelity_config": {
+            "solver": "admm",
+            "compute_dtype": "bf16",
+            "factor_mode": "binary",
+            "ablation": "none",
+            "layer_scope": "all",
+            "admm_iter": 400,
+            "rho_end": 1.0,
+            "device": "cuda",
+        },
+        "fidelity_conditions": {
+            "config_solver_is_admm": True,
+            "config_compute_dtype_is_bf16": True,
+            "config_factor_mode_is_binary": True,
+            "config_ablation_is_none": True,
+            "config_layer_scope_is_all": True,
+            "config_admm_iter_matches_regime": True,
+            "config_admm_rho_end_matches_regime": True,
+            "config_device_is_accelerator": True,
+        },
         # Stage evidence (real-shaped): both long stages carry the trio, so a
         # healthy report is one that can show its stages did work.
         "stages": [
@@ -337,7 +356,7 @@ def test_smoke_contract_holds_on_a_healthy_run():
         ({"probe_abort": {"depth": 2}}, 0, "reported a probe abort"),
         ({"artifact_exported": False}, 0, "artifact_exported: true"),
         ({"ppl_quant_native": None}, 0, "end-of-run quantized perplexity"),
-        ({"solver": "admm"}, 0, "provenance solver"),
+        ({"solver": "svd"}, 0, "provenance solver"),
     ],
 )
 def test_smoke_contract_flags_every_broken_shape(payload, rc, expected):  # noqa: ANN001
@@ -385,8 +404,8 @@ def test_stage_evidence_gate_audits_ste_rows_not_only_tunefp():
 def test_stage_evidence_effect_floor_is_a_fidelity_requirement():
     """Shape is checked everywhere; the effect floor only where fidelity is claimed.
 
-    A non-faithful run executes deliberately short budgets (the driver's
-    non-faithful ``stage_pre`` is ``epochs=0`` — one step of the paper's 256), so
+    A run outside the paper regime executes deliberately short budgets (the
+    gate-shaped ``stage_pre`` is ``epochs=0`` — one step of the paper's 256), so
     its stages genuinely cannot demonstrate effect and are not findings. Asserting
     the floor there would red-light correct behavior and make the gate a
     false-alarm machine, which is the failure mode a gate cannot have.
@@ -398,9 +417,11 @@ def test_stage_evidence_effect_floor_is_a_fidelity_requirement():
         for rec in (entry.get("per_linear") or {}).values():
             rec["residual_after"] = rec["residual_before"]
     text = json.dumps(report, allow_nan=False)
-    assert report_checks.stage_evidence_findings(text), "a faithful claim must be caught"
+    assert report_checks.stage_evidence_findings(text), "a regime run must be caught"
 
-    report["fidelity_conditions"]["paper_faithful_flag"] = False
+    # One declared field off the regime and the floor no longer applies: the
+    # gate reads the DECLARED CONFIG, exactly like the verdict it audits.
+    report["fidelity_config"] = {**report["fidelity_config"], "solver": "svd"}
     assert report_checks.stage_evidence_findings(json.dumps(report, allow_nan=False)) == []
 
 
@@ -417,22 +438,21 @@ def test_stage_evidence_gate_ignores_a_recorded_skip():
     assert report_checks.stage_evidence_findings(json.dumps(report, allow_nan=False)) == []
 
 
-def test_stage_evidence_gate_keys_on_the_faithful_claim_not_the_verdict():
+def test_stage_evidence_gate_keys_on_the_declared_config_not_the_verdict():
     """The v5 re-fire's measured shape, reproduced inline.
 
-    ``--paper-faithful`` was on the argv, so the run CLAIMS fidelity
-    (``fidelity_conditions.paper_faithful_flag`` is True) and ran full budgets —
-    but the rolled-up VERDICT ``paper_faithful`` is False because an unrelated
-    probe aborted. The effect floor is keyed to the CLAIM, so it still applies:
-    12 TuneFP cycles + 14 STE rows netted exactly 0.0 against ``STEPS_EFFECT_EPS``
-    (measured on ``artifacts/…v5-pertarget/quantize_report.json``), so at least one
-    no-op finding is owed. Keying on the verdict returned 0 findings — the
-    detector disabled in exactly the shape its own scenario names.
+    The run DECLARED the paper regime, so its config-match conjunction is true
+    and it ran full budgets — but the rolled-up VERDICT ``paper_faithful`` is
+    False because an unrelated probe aborted. The effect floor is keyed to the
+    DECLARATION, so it still applies: 12 TuneFP cycles + 14 STE rows netted
+    exactly 0.0 against ``STEPS_EFFECT_EPS`` (measured on
+    ``artifacts/…v5-pertarget/quantize_report.json``), so at least one no-op
+    finding is owed. Keying on the verdict returned 0 findings — the detector
+    disabled in exactly the shape its own scenario names.
     """
     report = json.loads(_healthy_report())
-    # The verdict is False (a failed run) while the claim stands True.
+    # The verdict is False (a failed run) while the declaration stands.
     report["paper_faithful"] = False
-    report["fidelity_conditions"]["paper_faithful_flag"] = True
     for entry in report["stages"]:
         if entry.get("event") == "tune_fp":
             entry["residual_after"] = entry["residual_before"]

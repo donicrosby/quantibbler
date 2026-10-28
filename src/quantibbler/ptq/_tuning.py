@@ -19,7 +19,7 @@ from torch import nn
 
 from ._factorized import _linear_children
 from ._stats import LOSS_WEIGHT_MEAN_NORMALIZATION, _forward_chunked, _optimizer_gradient_floor
-from .config import PTQConfig
+from .config import PTQConfig, config_matches_paper_regime
 from .progress import ProgressReporter
 
 # Artifact markers (greppable in code, spec, and the run record).
@@ -49,15 +49,17 @@ STE_JOINT_SCOPE = "block_joint"
 
 
 class VacuousTeacherError(RuntimeError):
-    """A TuneFP pass saw a zero first-step gradient in a fidelity-claiming run.
+    """A TuneFP pass saw a zero first-step gradient on a paper-regime run.
 
-    Raised by :func:`_tune_fp` when ``cfg.paper_faithful`` is set and the
-    pre-tune objective gradient norm is exactly zero: under the Figure 3
-    placement the operative call always has factorized in-block layers, so a
-    zero gradient is a construction defect (broken teacher or detached
-    student), never legitimate "nothing to compensate". A run that claims
-    paper fidelity must fail rather than print "paper-faithful" on a stage
-    that silently did not execute (qk-fix-tunefp-teacher A3).
+    Raised by :func:`_tune_fp` when the run's declared config matches the paper
+    regime and the pre-tune objective gradient norm is below the
+    resolution-derived floor: under the Figure 3 placement the operative call
+    always has factorized in-block layers, so a dead gradient is a construction
+    defect (broken teacher or detached student), never legitimate "nothing to
+    compensate". A paper-regime run must fail rather than carry a label over a
+    stage that silently did not execute (qk-fix-tunefp-teacher A3). The regime
+    is derived from the declared config, so the gate does not depend on the
+    launcher remembering to assert it.
 
     Carries the two norms and the reason so the caller can write a
     forensically complete failure report (see
@@ -130,9 +132,9 @@ def _tune_fp(
     this guard: under dual streams it is justified as "nothing to compensate
     yet" (the block is still entirely FP and the teacher is its deepcopy),
     not as inherent vacuity. Only a call that actually runs and returns a
-    zero first-step gradient reaches the fail-closed path below. In a diagnostic
-    run the stage continues with pristine weights and the event stays on
-    record; in a run claiming paper fidelity it raises
+    gradient below the floor reaches the fail-closed path below. On a
+    non-paper-regime run the stage continues with pristine weights and the event
+    stays on record; on a paper-regime run it raises
     :class:`VacuousTeacherError` — there is no trivial-zero carve-out under
     the figure placement.
 
@@ -361,7 +363,7 @@ def _tune_fp(
                 with torch.no_grad():
                     for p, p0 in zip(params, snapshot, strict=True):
                         p.copy_(p0)
-                if cfg.paper_faithful:
+                if config_matches_paper_regime(cfg):
                     raise VacuousTeacherError(
                         block=label,
                         reason=reason,

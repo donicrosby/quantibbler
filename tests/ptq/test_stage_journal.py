@@ -74,6 +74,20 @@ def driver_module():
     return module
 
 
+#: A declared config that IS the paper regime: the verdict is computed from the
+#: declaration, so a green-label test has to declare one.
+_PAPER_REGIME_CONFIG = {
+    "solver": "admm",
+    "compute_dtype": "bf16",
+    "factor_mode": "binary",
+    "ablation": "none",
+    "layer_scope": "all",
+    "admm_iter": 400,
+    "rho_end": 1.0,
+    "device": "cuda",
+}
+
+
 def _identity_model() -> _TinyApiModel:
     """The model whose identity the fingerprint binds (qk-fp-model-identity).
 
@@ -168,8 +182,8 @@ def test_a_tail_resumed_record_matches_the_uninterrupted_record(
         "Phase-1 statistics appears more than once: the seed read the resumed launch's own prefix"
     )
 
-    clean = fidelity_conditions("admm", [], uninterrupted, requested=True)
-    after_resume = fidelity_conditions("admm", [], resumed, requested=True)
+    clean = fidelity_conditions("admm", [], uninterrupted, config=_PAPER_REGIME_CONFIG)
+    after_resume = fidelity_conditions("admm", [], resumed, config=_PAPER_REGIME_CONFIG)
     assert after_resume == clean, (
         "a tail-resumed run's condition record differs from the uninterrupted run's: the journal "
         "did not restore the evidence of the stages it skipped"
@@ -211,7 +225,7 @@ def test_a_missing_journal_denies_exactly_as_before_the_journal_existed(
     monkeypatch.undo()
 
     assert _names(resumed) == ["phase1_statistics", "tune_scales_kd"]
-    conditions = fidelity_conditions("admm", [], resumed, requested=True)
+    conditions = fidelity_conditions("admm", [], resumed, config=_PAPER_REGIME_CONFIG)
     for key in _SOLVE_STAGES:
         assert conditions[f"required_{key}_executed"] is False, (
             f"required_{key}_executed is True with no journal: nothing was synthesized, so a "

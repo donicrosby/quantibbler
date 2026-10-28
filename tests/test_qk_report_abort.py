@@ -133,10 +133,21 @@ _ABORT_IDENTITY_VALUES: dict[str, object] = {
     "factor_mode": "binary",
     "ablation": "none",
     "layer_scope": "all",
-    # Paper-faithful claim + the bounded discrete flip pass.
-    # Both are solver state and both must travel on every report path.
-    "paper_faithful": False,
-    "ste_flip_pass_budget": 0,
+    # The declared config the fidelity verdict is computed from. It travels on
+    # every report path, and it is the recorded abort run's own declaration
+    # (`--solver svd --max-admm-iter 1 --device cpu`): svd and cpu are exactly
+    # the fields that deny the regime there, which is why this run's label is
+    # false for reasons a reader can name.
+    "fidelity_config": {
+        "solver": "svd",
+        "compute_dtype": "bf16",
+        "factor_mode": "binary",
+        "ablation": "none",
+        "layer_scope": "all",
+        "admm_iter": 1,
+        "rho_end": 1.0,
+        "device": "cpu",
+    },
     "ppl_baseline_bf16": 75.90947478697456,
     "regime": {"artifact": "qpk1: +-1 bitplanes + float32 scales"},
     "probe": {"interval": 1, "batches": 1, "fp_prefix_ppl": 83.08454639156159},

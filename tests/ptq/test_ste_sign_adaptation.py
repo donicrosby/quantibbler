@@ -2,7 +2,6 @@
 
 Scenarios under test: ``flip_counts_are_recorded``,
 ``sign_adaptation_is_effective_or_declared``,
-``flip_acceptance_uses_block_reconstruction_objective``,
 ``refinement_covers_every_factorized_linear_with_paper_parameter_set``.
 
 The measured defect this file pins shut: 4,096 STE steps flipped ZERO sign
@@ -22,7 +21,6 @@ from quantibbler.ptq.block_recon import (
     STE_RESCOPE_MARKER,
     FactorizedLinear,
     QuantizationDivergenceError,
-    _discrete_flip_pass,
     _set_linear,
     _tune_latent_ste,
     reconstruct_block,
@@ -270,11 +268,9 @@ def test_scn_zero_flip_completion_is_never_silent():
     assert zero_flip, "fixture did not reproduce the measured zero-flip geometry"
     for name in zero_flip:
         rec = per[name]
-        assert rec["declared"] in {"discrete_flip_pass", "scale_only"}, (
-            f"{name}: zero-flip completion with no declaration"
-        )
-        if rec["declared"] == "scale_only":
-            assert rec["rescope_marker"] == STE_RESCOPE_MARKER
+        assert rec["declared"] == "scale_only", f"{name}: zero-flip completion with no declaration"
+        assert rec["rescope_marker"] == STE_RESCOPE_MARKER
+        assert "flip_pass" not in rec, f"{name}: the deleted mechanism left a record"
     for rec in per.values():
         if rec["zero_crossings"] is False:
             assert rec["declared"] == "paper_ste"
@@ -372,7 +368,6 @@ def test_aborted_step_does_not_skip_the_mechanism_ladder(monkeypatch):
         compute_dtype="float64",
         rank=3,
         stage_latent=StageHyper(1e-8, 4, 8),
-        ste_flip_pass_budget=4,
     )
     calib = _calib(8, seed=51)
     br.reconstruct_block(
@@ -385,8 +380,8 @@ def test_aborted_step_does_not_skip_the_mechanism_ladder(monkeypatch):
         f"{poisoned['name']}: the rolled-back step's phantom flips reached the "
         f"ladder input (flips_u={rec['flips_u']}, flips_v={rec['flips_v']})"
     )
-    assert rec["declared"] in {"discrete_flip_pass", "scale_only"}, (
-        f"{poisoned['name']}: the mechanism ladder was skipped on rolled-back "
+    assert rec["declared"] == "scale_only", (
+        f"{poisoned['name']}: the ladder was skipped on rolled-back "
         f"flips — declared {rec['declared']!r}"
     )
 
@@ -482,26 +477,43 @@ def test_full_budget_is_per_linear_not_a_pooled_split():
         assert rec["scheduled_steps"] == total
         assert rec["steps"] == total
         # The zero-budget "not_scheduled" residual is gone: every linear runs.
-        assert rec["declared"] in {"paper_ste", "discrete_flip_pass", "scale_only"}, name
+        # The post-cut vocabulary is two-valued: `discrete_flip_pass` left it
+        # with the mechanism, and this line is the canary if it re-enters.
+        assert rec["declared"] in {"paper_ste", "scale_only"}, name
 
 
 # --------------------------------------------------------------------------
-# The paper-faithful path: polish off, no extra discrete stages, paper_ste
+# The paper regime: polish off, no extra discrete stages, paper_ste
 # --------------------------------------------------------------------------
 
 
-def _faithful_cfg(**kwargs) -> PTQConfig:
+@pytest.fixture
+def paper_regime(monkeypatch):
+    """Make the block stage read this run as the paper regime.
+
+    The regime conjunction requires bf16 compute on an accelerator, and these
+    are the NumPy/float64 parity fixtures — so the VERDICT is stubbed and what
+    these legs pin is the ladder's behavior UNDER it. The verdict itself is
+    covered where it is computed (the report conditions, the driver's declared
+    config). Patched on the module that HOLDS the call site: patching the
+    re-export in ``block_recon`` would leave the stage reading the real one.
+    """
+    from quantibbler.ptq import _block_stage as stage
+
+    monkeypatch.setattr(stage, "config_matches_paper_regime", lambda cfg: True)
+
+
+def _paper_regime_cfg(**kwargs) -> PTQConfig:
     return PTQConfig(
         solver_backend="numpy",
         compute_dtype="float64",
         rank=3,
         stage_latent=StageHyper(1e-8, 4, 8),
-        paper_faithful=True,
         **kwargs,
     )
 
 
-def test_scn_paper_faithful_hands_ste_continuous_latents(monkeypatch):
+def test_scn_paper_faithful_hands_ste_continuous_latents(monkeypatch, paper_regime):
     """The faithful path must hand STE the Eq. 9 latents, not +-1 polish bits."""
     from quantibbler.ptq import _block_stage as stage
     from quantibbler.ptq import block_recon as br
@@ -521,7 +533,7 @@ def test_scn_paper_faithful_hands_ste_continuous_latents(monkeypatch):
     monkeypatch.setattr(stage, "_tune_latent_ste", spy)
     blk = _SevenLinearBlock(seed=91)
     calib = _calib(8, seed=91)
-    br.reconstruct_block(blk, calib, _faithful_cfg(), cotangent=_fixed_cot(blk, calib))
+    br.reconstruct_block(blk, calib, _paper_regime_cfg(), cotangent=_fixed_cot(blk, calib))
     assert seen, "the faithful run never reached the STE stage"
     for name, u in seen.items():
         assert not torch.all(u.abs() == 1.0), (
@@ -529,8 +541,8 @@ def test_scn_paper_faithful_hands_ste_continuous_latents(monkeypatch):
         )
 
 
-def test_scn_paper_faithful_disables_greedy_polish(monkeypatch):
-    """`paper_faithful_disables_greedy_polish`: the production path is untouched."""
+def test_scn_paper_faithful_disables_greedy_polish(monkeypatch, paper_regime):
+    """The regime path carries no polish; the production path is untouched."""
     from quantibbler.ptq import _block_stage as stage
     from quantibbler.ptq import block_recon as br
 
@@ -546,14 +558,36 @@ def test_scn_paper_faithful_disables_greedy_polish(monkeypatch):
     blk = _SevenLinearBlock(seed=91)
     calib = _calib(8, seed=91)
     br.reconstruct_block(
-        blk, calib, _faithful_cfg(), cotangent=_fixed_cot(blk, calib), recorder=_recorder(sink)
+        blk,
+        calib,
+        _paper_regime_cfg(),
+        cotangent=_fixed_cot(blk, calib),
+        recorder=_recorder(sink),
     )
-    assert calls == [], "the faithful path ran the extra-paper greedy polish"
+    assert calls == [], "the regime path ran the extra-paper greedy polish"
     lb = [info for event, info in sink if event == "lb_admm"][0]
     assert lb["polish_rounds"] == 0, "the artifact must PROVE zero polish rounds"
 
-    # The production (non-faithful) binary path keeps the polish unchanged.
-    calls.clear()
+
+def test_greedy_polish_runs_on_the_production_binary_path(monkeypatch):
+    """The non-regime binary path keeps the polish: the gate is the regime, not a flag.
+
+    Separate from the regime leg on purpose: that one stubs the regime verdict
+    for the whole test, so the production half has to run where the real verdict
+    is in force — otherwise the "production path still polishes" claim would be
+    asserted against a stubbed gate.
+    """
+    from quantibbler.ptq import _block_stage as stage
+    from quantibbler.ptq import block_recon as br
+
+    calls: list[int] = []
+    real = stage.greedy_polish
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(stage, "greedy_polish", spy)
     sink2: list = []
     blk = _SevenLinearBlock(seed=91)
     calib = _calib(8, seed=91)
@@ -571,27 +605,20 @@ def test_scn_paper_faithful_disables_greedy_polish(monkeypatch):
     )
     assert calls == [1] * len(SEVEN), "the production path must polish every scoped linear"
     lb2 = [info for event, info in sink2 if event == "lb_admm"][0]
-    assert (
-        lb2["polish_rounds"]
-        == PTQConfig(
-            solver_backend="numpy",
-            compute_dtype="float64",
-        ).polish_rounds
-    )
+    assert lb2["polish_rounds"] == PTQConfig(solver_backend="numpy").polish_rounds
 
 
-def test_scn_paper_faithful_records_measured_crossings_with_no_rescope():
-    """`sign_adaptation_is_effective_or_declared`: the paper path is exempt.
+def test_scn_paper_faithful_records_measured_crossings_with_no_rescope(paper_regime):
+    """`sign_adaptation_is_effective_or_declared`: the regime path is exempt.
 
     [NQ] prescribes sign+pack on whatever signs STE produced (Algorithm 1
-    lines 20-23), so a zero-crossing outcome on the faithful path is a
-    MEASUREMENT, not a re-scope: no discrete flip pass fires, no scale-only
-    marker appears, and `declared` is `paper_ste` on every linear — even when
-    a nonzero flip-pass budget is configured.
+    lines 20-23), so a zero-crossing outcome on the regime path is a
+    MEASUREMENT, not a re-scope: no scale-only marker appears and `declared` is
+    `paper_ste` on every linear.
     """
     sink: list = []
     block = _SevenLinearBlock(seed=71)
-    cfg = _faithful_cfg(ste_flip_pass_budget=3)
+    cfg = _paper_regime_cfg()
     calib = _calib(8, seed=71)
     reconstruct_block(
         block, calib, cfg, cotangent=_fixed_cot(block, calib), recorder=_recorder(sink)
@@ -608,129 +635,14 @@ def test_scn_paper_faithful_records_measured_crossings_with_no_rescope():
         assert isinstance(rec["zero_crossings"], bool)
 
 
-# --------------------------------------------------------------------------
-# flip_acceptance_uses_block_reconstruction_objective
-# --------------------------------------------------------------------------
+def test_no_layer_local_forward_form_in_the_block_stage_modules():
+    """Source pin: every objective scores the BLOCK forward, not a layer residual.
 
-
-def test_scn_flip_pass_accepts_only_on_the_block_objective():
-    """Deterministic sweep, monotone objective, GQA k/v shape typechecks."""
-    cfg = PTQConfig(
-        solver_backend="numpy",
-        compute_dtype="float64",
-        rank=3,
-        stage_latent=StageHyper(1e-8, 4, 8),
-        ste_flip_pass_budget=4,
-    )
-    block = _SevenLinearBlock(seed=51)
-    sink: list = []
-    calib = _calib(8, seed=51)
-    reconstruct_block(
-        block, calib, cfg, cotangent=_fixed_cot(block, calib), recorder=_recorder(sink)
-    )
-    ste = [info for event, info in sink if event == "ste"][0]
-    ran = {n: r["flip_pass"] for n, r in ste["per_linear"].items() if "flip_pass" in r}
-    assert ran, "the discrete flip pass never ran on a zero-crossing block"
-    for name, rec in ran.items():
-        assert rec["proposals"] == 8, "one proposal per factor entry at budget 4"
-        assert rec["objective_after"] <= rec["objective_before"]
-        assert rec["accepted_u"] + rec["accepted_v"] <= rec["proposals"]
-        assert "discrete sign-flip pass" in rec["deviation"]
-        # GQA shapes: k/v are (dkv, d) with dkv != d and still score the
-        # block-level objective (the discarded layer-local form would not
-        # even typecheck here).
-        assert rec["linear"] == name
-
-    # Non-square projections really are in the swept set.
-    dkv = block.dkv
-    assert block.self_attn["k_proj"].weight.shape == (dkv, 8)
-    assert block.self_attn["o_proj"].weight.shape == (8, dkv)
-    assert "self_attn.k_proj" in ran and "self_attn.o_proj" in ran
-
-
-def test_scn_flip_pass_is_reproducible():
-    """Same seed, same sweep -> identical flip sequence and acceptance."""
-    cfg = PTQConfig(
-        solver_backend="numpy",
-        compute_dtype="float64",
-        rank=3,
-        stage_latent=StageHyper(1e-8, 4, 8),
-        ste_flip_pass_budget=3,
-    )
-    records = []
-    for _ in range(2):
-        sink: list = []
-        blk = _SevenLinearBlock(seed=61)
-        calib = _calib(8, seed=61)
-        reconstruct_block(
-            blk, calib, cfg, cotangent=_fixed_cot(blk, calib), recorder=_recorder(sink)
-        )
-        ste = [info for event, info in sink if event == "ste"][0]
-        records.append(
-            {
-                n: {
-                    k: r["flip_pass"][k]
-                    for k in (
-                        "accepted_u",
-                        "accepted_v",
-                        "proposals",
-                        "objective_before",
-                        "objective_after",
-                    )
-                }
-                for n, r in ste["per_linear"].items()
-                if "flip_pass" in r
-            }
-        )
-    assert records[0] == records[1], "the flip sweep is not reproducible"
-    assert any(rec["accepted_u"] + rec["accepted_v"] > 0 for rec in records[0].values()), (
-        "the sweep accepted nothing anywhere — the fixture proves nothing"
-    )
-
-
-def test_disabled_flip_pass_makes_no_proposals():
-    """budget = 0 disables the pass; the record still names the deviation."""
-    linear = _explicit_linear(7)
-    fac = _fac_from_weight(linear.weight.detach(), rank=6)
-    _set_linear(linear, fac)
-    gen = torch.Generator().manual_seed(8)
-    x_b = torch.randn(4, 4, 16, generator=gen, dtype=torch.float64)
-    y_b = torch.randn(4, 4, 12, generator=gen, dtype=torch.float64)
-    rec = _discrete_flip_pass(
-        block=linear,
-        linear=linear,
-        name="",
-        fac=fac,
-        x_b=x_b,
-        y_b=y_b,
-        budget=0,
-        factor_mode="binary",
-    )
-    assert rec["proposals"] == 0
-    assert rec["accepted_u"] == 0 and rec["accepted_v"] == 0
-    assert "discrete sign-flip pass" in rec["deviation"]
-
-
-def test_flip_acceptance_objective_is_the_block_forward():
-    """Source pin: acceptance scores the BLOCK forward, not a layer residual."""
-    import inspect
-
-    from quantibbler.ptq import block_recon as br
-
-    src = inspect.getsource(br._discrete_flip_pass)
-    # This pin fixes the SHAPE of the acceptance objective -- a whole-block
-    # forward, never a layer-local residual -- so it moves when the call shape
-    # moves, as the provenance anchors do. The capture is now forwarded in
-    # chunks (CAPTURE_CHUNK_ROWS) because the unchunked form OOM-killed the
-    # container at paper geometry; chunking a row-wise block is the same
-    # objective up to floating-point rounding, which is why the pin tracks the
-    # call and not a literal spelling of it.
-    assert "(_forward_chunked(block, x_b) - y_b).pow(2).mean()" in src
-    assert "block_tuned" in inspect.getsource(br.reconstruct_block) or True
-    # The dimensionally-incoherent layer-local form must not appear anywhere in
-    # the block-reconstruction stage modules: the forwards live in
-    # ``_factorized``/``_block_stage``, so the scan follows the
-    # code across the whole ptq package instead of one module's source.
+    The dimensionally-incoherent layer-local form must not appear anywhere in
+    the block-reconstruction stage modules: the forwards live in
+    ``_factorized``/``_block_stage``, so the scan follows the code across the
+    whole ptq package instead of one module's source.
+    """
     import pathlib
 
     ptq_dir = pathlib.Path(__file__).resolve().parents[2] / "src" / "quantibbler" / "ptq"

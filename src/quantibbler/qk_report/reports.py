@@ -58,13 +58,13 @@ def abort_report(exc: Any, identity_fields: dict, history: list) -> dict:
     # The fidelity claim is a computed verdict on this path too, and a run
     # that did not reach the end of the protocol cannot carry it: the
     # stage-failure flag is set, so the label falls however clean the rest of
-    # the record looks. `paper_faithful` in the identity fields is the
-    # REQUESTED flag; it is replaced here by the verdict.
+    # the record looks. The verdict is derived from the declared config the
+    # caller carries (`fidelity_config`), never from a self-asserted flag.
     label, conditions = fidelity_verdict(
         report.get("solver"),
         report.get("runtime_deviations"),
         report.get("stages"),
-        requested=report.get("paper_faithful"),
+        config=report.get("fidelity_config"),
         stage_failure=True,
     )
     report["paper_faithful"] = label
@@ -94,15 +94,15 @@ def stage_failure_report(exc: Any, identity_fields: dict, stages: list) -> dict:
         "gradient_norm": exc.gradient_norm,
         "initial_residual_norm": exc.initial_residual_norm,
     }
-    # The fidelity claim is recorded FALSE, never left standing: the run
-    # reached a stage whose execution the paper's method requires and it did
-    # not happen. `paper_faithful` in the identity fields is the REQUESTED
-    # flag; the verdict below replaces it, with the condition record beside it.
+    # The fidelity claim is computed from the declared config and recorded,
+    # never left standing: the run reached a stage whose execution the paper's
+    # method requires and it did not happen. The condition record sits beside
+    # the label so this run's denial is auditable field by field.
     label, conditions = fidelity_verdict(
         report.get("solver"),
         report.get("runtime_deviations"),
         stages,
-        requested=report.get("paper_faithful"),
+        config=report.get("fidelity_config"),
         stage_failure=True,
     )
     report["paper_faithful"] = label
@@ -165,8 +165,8 @@ def geometry_deviations(seq_len: Any, tune_seq_len: Any, calibration_rows: Any =
     """Named runtime deviations from [NQ]'s calibration geometry.
 
     The stage map covers STAGES; this covers the geometry those stages ran at,
-    because a "paper-faithful" claim over a sliced tune window would otherwise
-    be the same class of defect as every other green label over a deviant
+    because a label over a sliced tune window would otherwise be the same class
+    of defect as every other green label over a deviant
     artifact: the paper's protocol is a sequence length of 2048
     (``docs/papers/nanoquant-2602.06694v3.md``, "Calibration used 128 samples
     from the WikiText-2 dataset ... with a sequence length of 2048"), so a run
@@ -294,7 +294,7 @@ def evaluation_record(
     """The EVALUATION verdict, recorded beside the method-fidelity verdict.
 
     [NQ] names WikiText-2 PPL and ``lm_eval=0.4.9`` but the pinned corpus does
-    not define coverage or windowing, so "paper-faithful" cannot mean "the
+    not define coverage or windowing, so the fidelity label cannot mean "the
     paper's table" — that is a claim about the harness, not about the method.
     Two consequences, both structural here:
 

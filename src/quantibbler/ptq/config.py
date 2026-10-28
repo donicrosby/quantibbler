@@ -20,17 +20,21 @@ from typing import Any, Literal
 import numpy as np
 
 from ..qk_report import COLLAPSE_LINE
+from ..qk_report import config_matches_paper_regime as _matches_regime
 
 __all__ = [
     "NumPyBackendUnsupportedDtypeError",
     "PTQConfig",
     "StageHyper",
     "PrefixProbeAbort",
+    "config_matches_paper_regime",
+    "declared_regime_config",
 ]
 
 _COMPUTE_DTYPES = ("bf16", "float32", "float64")
 _SOLVER_BACKENDS = ("torch", "numpy")
 _SCALE_DTYPES = ("float16", "float32")
+_DEVICES = ("auto", "cpu", "cuda")
 # Root-cause ablation knobs: each isolates ONE
 # constraint so a failing run says which stage lies. Unknown values are
 # validation errors, never silent defaults (D-6).
@@ -232,28 +236,15 @@ class PTQConfig:
     factor_mode: Literal["binary", "fp"] = "binary"
     ablation: Literal["none", "untuned-signs"] = "none"
     layer_scope: Literal["all", "self_attn", "mlp"] = "all"
-    # --- paper-faithful run flag ------------------------------------------
-    # A run that CLAIMS paper fidelity fails closed on any
-    # ``tune_fp_vacuous_teacher`` event instead of continuing with pristine
-    # weights: under the [NQ] Figure 3 placement the operative TuneFP call
-    # always has factorized in-block layers, so a zero first-step gradient is
-    # a construction defect, never legitimate nothing-to-compensate. The
-    # per-target loop's first-target skip is distinct and remains correct:
-    # under the dual streams its justification is "nothing to compensate
-    # yet" -- the block is still entirely FP and the teacher is its deepcopy,
-    # so no factorization has degraded anything for TuneFP to repair. Default
-    # False keeps the diagnostic semantics (event recorded, stage skipped).
+    # Where the torch stages were DECLARED to run. A declaration, not a
+    # placement: the pipeline reads the device off the tensors it is handed and
+    # the driver resolves ``auto`` against the host before anything is loaded,
+    # so this field records what the run asked for. It exists because the
+    # regime verdict is about the DECLARED config: whether a run is a
+    # paper-regime run is a question about what it declared, and "cpu" is the
+    # one declaration that is a deviation from the paper's GPU-first regime.
     # Solver state: it joins the checkpoint fingerprint.
-    paper_faithful: bool = False
-    # --- bounded discrete flip pass ----------------------------------------
-    # Fallback 3 of the mechanism ladder: proposals per factor per linear,
-    # accepted only on a decrease of the block-reconstruction objective. The
-    # paper has no discrete flip pass, so any nonzero value is an EXPLICIT
-    # DEVIATION and is recorded as such in the run record. 0 disables the
-    # pass, in which case a linear whose continuous refinement produced no
-    # sign crossing is declared scale-only under the greppable re-scope
-    # marker — never a silent zero-flip completion.
-    ste_flip_pass_budget: int = 0
+    device: Literal["auto", "cpu", "cuda"] = "cpu"
     # Observer hook: called by the sequential
     # block reconstruction after each block is written back into the host
     # model, as ``probe(model, depth, name)`` with the live host, the 1-based
@@ -370,15 +361,50 @@ class PTQConfig:
             raise ValueError(
                 f"layer_scope must be one of {_LAYER_SCOPES}, got {self.layer_scope!r}"
             )
+        if self.device not in _DEVICES:
+            raise ValueError(f"device must be one of {_DEVICES}, got {self.device!r}")
         if self.factor_mode == "fp" and self.ablation != "none":
             raise ValueError(
                 "ablation='untuned-signs' is a BINARY ablation (it exports signs of the "
                 f"balance latents); it cannot combine with factor_mode={self.factor_mode!r}"
             )
-        if not isinstance(self.paper_faithful, bool):
-            raise ValueError(f"paper_faithful must be a bool, got {self.paper_faithful!r}")
-        if self.ste_flip_pass_budget < 0:
-            raise ValueError(
-                "ste_flip_pass_budget must be >= 0 (0 disables the discrete flip "
-                f"pass), got {self.ste_flip_pass_budget}"
-            )
+
+
+def declared_regime_config(cfg: PTQConfig) -> dict[str, Any]:
+    """The declared-config mapping the paper-regime conjunction reads.
+
+    ONE builder: the driver records this mapping in the report as
+    ``fidelity_config``, and the runtime gates ask
+    :func:`config_matches_paper_regime` about the same mapping — so the stage
+    that runs and the artifact that reports it cannot disagree about which
+    regime the run declared. Every value is the declaration itself, never an
+    inferred one: the device is what the launch asked for (the driver resolves
+    ``auto`` against the host before it builds this config), and ``rho_end`` is
+    the endpoint this config carries.
+
+    The vocabulary of the mapping — the eight fields and the paper values they
+    are compared against — belongs to ``qk_report`` and is read from there; that
+    module owns the verdict, this one owns the declaration.
+    """
+    return {
+        "solver": cfg.solver,
+        "compute_dtype": cfg.compute_dtype,
+        "factor_mode": cfg.factor_mode,
+        "ablation": cfg.ablation,
+        "layer_scope": cfg.layer_scope,
+        "admm_iter": cfg.admm_max_iter,
+        "rho_end": cfg.rho_end,
+        "device": cfg.device,
+    }
+
+
+def config_matches_paper_regime(cfg: PTQConfig) -> bool:
+    """Whether this config IS the paper regime, field by field.
+
+    The four runtime gates that used to read a self-asserted
+    ``PTQConfig.paper_faithful`` ask this instead: a run whose declared config
+    matches the regime gets the paper's path (no greedy polish, the
+    ``paper_ste`` declaration, fail-closed on a vacuous teacher, the App. C
+    stage budgets), and every other run keeps the gate-shaped one.
+    """
+    return _matches_regime(declared_regime_config(cfg))

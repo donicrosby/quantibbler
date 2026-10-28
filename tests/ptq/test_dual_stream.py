@@ -88,7 +88,6 @@ def _cfg() -> PTQConfig:
     return PTQConfig(
         rank=2,
         admm_max_iter=20,
-        paper_faithful=False,
         solver_backend="numpy",
         compute_dtype="float64",
     )

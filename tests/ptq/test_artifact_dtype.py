@@ -26,6 +26,7 @@ sys.path.insert(0, str(REPO_ROOT / "tools"))
 import quantize_hf_model as qhf  # noqa: E402
 import repack_remainder  # noqa: E402
 
+from quantibbler.ptq.config import PTQConfig, declared_regime_config  # noqa: E402
 from quantibbler.qk_report import provenance, resume_record  # noqa: E402
 from quantibbler.qpk1 import serialize  # noqa: E402
 from quantibbler.remainder_dtype import (  # noqa: E402
@@ -252,8 +253,7 @@ def _identity_args(remainder_dtype: str) -> types.SimpleNamespace:
         seq_len=2048,
         max_admm_iter=1,
         seed=0,
-        paper_faithful=False,
-        ste_flip_pass_budget=0,
+        device="cpu",
         # The emitted container (qk-artifact-blob BW-1): the identity record
         # carries the requested format on every exit path.
         container_format="blob",
@@ -270,6 +270,18 @@ def _identity(remainder_dtype: str) -> dict:
         eval_rows=1,
         ppl_baseline_bf16=1.0,
         evaluation={},
+        # The declared config the fidelity verdict is computed from, built by
+        # the production builder so this fixture cannot drift from the mapping
+        # the driver records.
+        fidelity_config=declared_regime_config(
+            PTQConfig(
+                rank=1,
+                solver="svd",
+                compute_dtype=("bf16" if remainder_dtype == "bf16" else "float64"),
+                admm_max_iter=1,
+                device="cpu",
+            )
+        ),
         # The restart declaration rides the shared identity payload on every
         # path, so a caller that builds the identity states the launch's
         # restart state.

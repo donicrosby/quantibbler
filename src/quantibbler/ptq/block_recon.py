@@ -41,8 +41,8 @@ Stage changes folded here:
   deepcopy, so there is genuinely nothing to tune until something is
   factorized.
 * ``qk-fix-ste-sign-adaptation`` — per-linear, per-factor flip
-  instrumentation and flip acceptance judged against the
-  block-reconstruction objective.
+  instrumentation; the caller reads it to declare a linear ``paper_ste`` (its
+  signs crossed) or ``scale_only`` (the greppable re-scope marker).
 * ``qk-ste-joint`` — ONE joint TuneLatentSTE pass per block over the block's
   whole factorized set (one optimizer, one block-output loss), declared under
   the ``block_joint`` scope marker. A DECLARED deviation from Algorithm 1
@@ -174,9 +174,6 @@ from ._stats import (
 )
 from ._ste import (
     _dead_columns as _dead_columns,
-)
-from ._ste import (
-    _discrete_flip_pass as _discrete_flip_pass,
 )
 from ._ste import (
     _fac_params as _fac_params,

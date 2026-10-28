@@ -1,7 +1,7 @@
-"""TuneLatentSTE ([NQ] Step 3) and the bounded discrete sign-flip pass: joint
-refinement of (U, V, s1, s2) through the straight-through estimator, with the
-per-factor flip instrumentation the caller turns into an accepted flip or the
-scale-only declaration.
+"""TuneLatentSTE ([NQ] Step 3): joint refinement of (U, V, s1, s2) through the
+straight-through estimator, with the per-factor flip instrumentation the caller
+reads to declare the linear ``paper_ste`` (a sign crossing) or ``scale_only``
+(the re-scope marker).
 
 Split out of ``block_recon``; same code, same call graph.
 """
@@ -14,7 +14,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from ._factorized import FactorizedLinear, _quantized_forward_block, _set_linear
+from ._factorized import FactorizedLinear, _quantized_forward_block
 from ._stats import LOSS_WEIGHT_MEAN_NORMALIZATION, _forward_chunked, _optimizer_gradient_floor
 from .config import PTQConfig
 from .progress import ProgressReporter
@@ -56,14 +56,12 @@ def _tune_latent_ste(
     forward is the module as it stands, so every block parameter outside
     ``facs`` is held at its current value.
 
-    Instrumentation (same change, scenarios ``flip_counts_are_recorded`` /
-    ``sign_adaptation_is_effective_or_declared``): per-step, per-factor sign
-    crossings of the latents, the relative latent movement, and the scale
-    (s1, s2) movement are recorded for EVERY factorized linear. A linear
-    that finishes with zero crossings on both factors is what the caller
-    turns into either an accepted discrete flip or the scale-only
-    declaration — a silent zero-flip completion cannot be produced here,
-    because the counts leave the stage in the returned record.
+    Instrumentation (scenario ``flip_counts_are_recorded``): per-step,
+    per-factor sign crossings of the latents, the relative latent movement, and
+    the scale (s1, s2) movement are recorded for EVERY factorized linear. A
+    linear that finishes with zero crossings on both factors is what the caller
+    turns into the scale-only declaration — a silent zero-flip completion cannot
+    be produced here, because the counts leave the stage in the returned record.
 
     The bias is deliberately NOT a refinement parameter: the container's bias
     field is the TuneFP stage's product, so a bias moved here would be a
@@ -399,83 +397,3 @@ def _rel_move(current: torch.Tensor, start: torch.Tensor) -> float | None:
     if den <= 0.0:
         return None
     return float((current.detach() - start).pow(2).sum().sqrt()) / float(np.sqrt(den))
-
-
-def _discrete_flip_pass(
-    block: nn.Module,
-    linear: nn.Linear,
-    name: str,
-    fac: FactorizedLinear,
-    x_b: torch.Tensor,
-    y_b: torch.Tensor,
-    *,
-    budget: int,
-    factor_mode: str,
-) -> dict:
-    """Bounded discrete sign-flip pass (qk-fix-ste-sign-adaptation alt. 3).
-
-    The paper has no discrete flip pass, so this is an EXPLICIT DEVIATION:
-    it exists only to serve a linear whose continuous refinement produced no
-    sign crossing (the measured geometry: warm-start latents sit far from
-    the decision boundary, so 4,096 STE steps move them 5-33% without
-    crossing zero). Each proposal flips ONE factor entry of the linear under
-    refinement and is accepted only when the block-reconstruction objective
-    ``||block_tuned(x_b) - y_fp||**2`` DECREASES with every other block
-    parameter held at its current value (scenario
-    ``flip_acceptance_uses_block_reconstruction_objective``).
-
-    The sweep order is deterministic — candidate entries sorted by ascending
-    ``|latent|`` (smallest margin first), ties broken by (factor, row, col)
-    — so the same seed and sweep produce the identical flip sequence.
-    ``budget`` bounds the proposals PER FACTOR; 0 disables the pass.
-
-    Returns a record naming the deviation and the per-factor acceptance
-    counts.
-    """
-    record = {
-        "linear": name,
-        "mechanism": "discrete_flip_pass",
-        "deviation": "paper has no discrete sign-flip pass (design alt. 3)",
-        "budget_per_factor": int(budget),
-        "accepted_u": 0,
-        "accepted_v": 0,
-        "proposals": 0,
-        "objective_before": None,
-        "objective_after": None,
-    }
-    if budget <= 0:
-        return record
-    with torch.no_grad():
-        objective = float((_forward_chunked(block, x_b) - y_b).pow(2).mean())
-    record["objective_before"] = objective
-    order: list[tuple[str, int, int]] = []
-    for tag, latent in (("u", fac.u_latent), ("v", fac.v_latent)):
-        flat = latent.detach().abs().reshape(-1)
-        k = min(int(budget), int(flat.numel()))
-        if k <= 0:
-            continue
-        # Ascending |latent|, ties broken by first-seen index order (row-major
-        # within a factor, u's entries ahead of v's): torch.argsort with
-        # stable=True keeps that order, which is what makes the sweep
-        # backend-independent.
-        picked = torch.argsort(flat, stable=True)[:k].tolist()
-        rows, cols = latent.shape
-        for flat_idx in picked:
-            order.append((tag, flat_idx // cols, flat_idx % cols))
-    for tag, i, j in order:
-        latent = fac.u_latent if tag == "u" else fac.v_latent
-        with torch.no_grad():
-            latent.data[i, j] = -latent.data[i, j]
-        _set_linear(linear, fac, factor_mode=factor_mode)
-        with torch.no_grad():
-            candidate = float((_forward_chunked(block, x_b) - y_b).pow(2).mean())
-        record["proposals"] += 1
-        if candidate < objective:
-            objective = candidate
-            record["accepted_u" if tag == "u" else "accepted_v"] += 1
-        else:
-            with torch.no_grad():
-                latent.data[i, j] = -latent.data[i, j]
-            _set_linear(linear, fac, factor_mode=factor_mode)
-    record["objective_after"] = objective
-    return record

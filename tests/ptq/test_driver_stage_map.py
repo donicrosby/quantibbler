@@ -1,4 +1,4 @@
-"""qk-fix-tunefp-teacher: the paper-faithful run record, end to end.
+"""qk-fix-tunefp-teacher: the paper-regime run record, end to end.
 
 The claimable artifact is produced by a REAL driver run on a local tiny
 Qwen3, and the report must show, from its own bytes, that the stages the
@@ -71,41 +71,46 @@ def _max_eval_batches(
 
 
 @pytest.mark.integration
-def test_paper_faithful_run_records_the_algorithm1_stage_map(
+def test_scn_all_conditions_satisfied_yields_true(
     offline_corpus,  # noqa: ANN001, F811
     tiny_model,  # noqa: ANN001, F811
     tmp_path,  # noqa: ANN001
 ):
-    """The whole faithful surface, rehearsed on the tiny Qwen3.
+    """`all_conditions_satisfied_yields_true`: the whole regime surface, end to end.
 
-    Every faithful-path pre-fire ruling is exercised here at once: the App. C
-    budgets, the paper's LB-ADMM solver at the App. C 400-iteration schedule,
-    the greedy polish disabled, the Phase-1 statistics hoisted, the full
-    per-linear STE budget with `declared: paper_ste` on every scoped linear,
-    and the protocol's 128 calibration rows so the computed fidelity verdict
-    has no runtime deviation to deny it.
+    Nothing here is ASSERTED by the launcher: the run declares the regime (admm,
+    the App. C 400-iteration schedule, the protocol's 128 calibration rows, an
+    accelerator) and the report computes the verdict from that declaration. The
+    greedy polish is off, Phase-1 statistics are hoisted, and every scoped
+    linear lands `declared: paper_ste` — all consequences of the same config
+    match.
 
     The `--calibration-seqs 128` is load-bearing, not incidental: [NQ]'s
     protocol is 128 sequences (16 packed batches x 8), and the verdict flips
     false on any other count — which is why the assertion below is `== []`, not
     "empty or named".
     """
-    out_dir = tmp_path / "paper-faithful"
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip(
+            "the paper regime requires an accelerator: an explicit `--device cpu` "
+            "is itself the deviation the verdict names, so this leg cannot run here"
+        )
+    out_dir = tmp_path / "paper-regime"
     max_eval = _max_eval_batches(offline_corpus, tiny_model)
     proc = _run_driver(
         offline_corpus,
         tiny_model,
         out_dir,
+        device="cuda",
         extra=[
-            "--paper-faithful",
             "--solver",
             "admm",
             "--max-admm-iter",
             "400",
             "--calibration-seqs",
             "128",
-            # A faithful claim must use the maximal local eval window; the
-            # driver refuses anything smaller at preflight.
             "--eval-seqs",
             str(max_eval * BATCH),
         ],
@@ -116,7 +121,6 @@ def test_paper_faithful_run_records_the_algorithm1_stage_map(
     # --- the label is a COMPUTED verdict, and here every condition holds ---
     assert report["paper_faithful"] is True
     assert report["fidelity_conditions"] == {
-        "paper_faithful_flag": True,
         "no_runtime_deviations": True,
         "polish_off": True,
         "no_discrete_flip_pass": True,
@@ -129,6 +133,16 @@ def test_paper_faithful_run_records_the_algorithm1_stage_map(
         "capture_is_fp_stream": True,
         "no_stage_failure": True,
         "solver_is_admm": True,
+        # The declared-config half: one condition per regime field, all read off
+        # the declaration this launch carried (`fidelity_config`).
+        "config_solver_is_admm": True,
+        "config_compute_dtype_is_bf16": True,
+        "config_factor_mode_is_binary": True,
+        "config_ablation_is_none": True,
+        "config_layer_scope_is_all": True,
+        "config_admm_iter_matches_regime": True,
+        "config_admm_rho_end_matches_regime": True,
+        "config_device_is_accelerator": True,
         # The evidence half of the claim: every `required` stage of the
         # inventory FIRED in this run (a skip-marked event would not count).
         "required_phase1_statistics_executed": True,
@@ -139,8 +153,11 @@ def test_paper_faithful_run_records_the_algorithm1_stage_map(
         "required_sign_extract_pack_executed": True,
         "required_tune_scales_kd_executed": True,
     }
-    assert report["ste_flip_pass_budget"] == 0
     assert report["calibration_rows"] == 128
+    # The declaration the verdict was computed from is IN the report, so the
+    # label can be audited without consulting the launch argv.
+    assert report["fidelity_config"]["device"] == "cuda"
+    assert report["fidelity_config"]["admm_iter"] == 400
     assert report["tune_seq_len"] == report["seq_len"]
     assert report["runtime_deviations"] == [], report["runtime_deviations"]
     assert report["solver"] == "admm"
@@ -290,23 +307,23 @@ def test_paper_faithful_run_records_the_algorithm1_stage_map(
 
 
 @pytest.mark.integration
-def test_a_faithful_claim_on_the_svd_ablation_is_denied_by_the_computed_verdict(
+def test_scn_solver_mismatch_names_the_deviation(
     offline_corpus,  # noqa: ANN001, F811
     tiny_model,  # noqa: ANN001, F811
     tmp_path,  # noqa: ANN001
 ):
-    """`label_flips_on_mechanism_deviations`, on a real driver run.
+    """`solver_mismatch_names_the_deviation`, on a real driver run.
 
-    The production SVD warm start is the measured ablation and cannot carry
-    the paper's label, whatever the flag says.
+    The production SVD warm start is the measured ablation: its declared config
+    does not match the regime, so the report denies the label and names the
+    field — nobody has to assert or unassert anything.
     """
-    out_dir = tmp_path / "faithful-claim-on-svd"
+    out_dir = tmp_path / "svd-ablation"
     proc = _run_driver(
         offline_corpus,
         tiny_model,
         out_dir,
         extra=[
-            "--paper-faithful",
             "--calibration-seqs",
             "128",
             "--eval-seqs",
@@ -316,24 +333,32 @@ def test_a_faithful_claim_on_the_svd_ablation_is_denied_by_the_computed_verdict(
     assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-2000:]
     report = _report(out_dir)
     assert report["paper_faithful"] is False
-    assert report["fidelity_conditions"]["paper_faithful_flag"] is True
+    assert report["fidelity_conditions"]["config_solver_is_admm"] is False
     assert report["fidelity_conditions"]["solver_is_admm"] is False
     # It is the solver, not the geometry: the row count IS the protocol's.
     assert report["runtime_deviations"] == []
 
 
-def test_diagnostic_run_is_not_labeled_paper_faithful(
+def test_scn_device_mismatch_names_the_deviation(
     offline_corpus,  # noqa: ANN001, F811
     tiny_model,  # noqa: ANN001, F811
     tmp_path,  # noqa: ANN001
 ):
-    """Without the claim the report says so, and the stage map still exists."""
+    """`device_mismatch_names_the_deviation`: a CPU-declared run says why, and
+    the stage map still exists.
+
+    This suite has no accelerator, so every leg here declares `--device cpu`:
+    the label is false for a reason the condition record names, the stage map is
+    still computed, and the run is a diagnostic rather than a regime fire.
+    """
     out_dir = tmp_path / "diagnostic"
     proc = _run_driver(offline_corpus, tiny_model, out_dir)
     assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-2000:]
     report = _report(out_dir)
     assert report["paper_faithful"] is False
-    assert report["ste_flip_pass_budget"] == 0
+    assert report["fidelity_conditions"]["config_device_is_accelerator"] is False
+    assert "paper_faithful_flag" not in report["fidelity_conditions"]
+    assert report["fidelity_config"]["device"] == "cpu"
     assert "stage_map" in report and "stages" in report
     assert "stage_failure" not in report
     # A diagnostic may use a smaller eval window — but the record says so, in
@@ -369,7 +394,6 @@ def test_a_split_tune_geometry_is_named_as_a_runtime_deviation(
         out_dir,
         seq_len=32,
         extra=[
-            "--paper-faithful",
             "--solver",
             "admm",
             "--max-admm-iter",
@@ -391,52 +415,54 @@ def test_a_split_tune_geometry_is_named_as_a_runtime_deviation(
     )
     assert "32" in detail and "16" in detail
     assert report["tune_seq_len"] == 16 and report["seq_len"] == 32
-    # ... and the computed verdict DENIES the claim because of it. The label
-    # was requested and the mechanism is clean (admm, no polish, no extra
-    # discrete stage): the geometry alone is what falls.
+    # ... and the computed verdict names the geometry as the deviation. The
+    # declared config is clean (admm, App. C schedule, the protocol's row
+    # count) except for the device this host forces, so the geometry and the
+    # device are the only deniers.
     assert report["paper_faithful"] is False
     conditions = report["fidelity_conditions"]
-    assert conditions["paper_faithful_flag"] is True
     assert conditions["no_runtime_deviations"] is False
-    assert all(value for key, value in conditions.items() if key != "no_runtime_deviations"), (
-        conditions
-    )
+    assert [key for key, value in conditions.items() if not value] == [
+        "no_runtime_deviations",
+        "config_device_is_accelerator",
+    ], conditions
 
 
-def test_a_faithful_claim_is_refused_at_preflight_on_an_undersampled_eval_window(
+def test_scn_eval_window_guard_dies_with_the_flag(
     offline_corpus,  # noqa: ANN001, F811
     tiny_model,  # noqa: ANN001, F811
     tmp_path,  # noqa: ANN001
 ):
-    """`faithful_fire_uses_maximal_local_evaluation_window`, at preflight.
+    """`eval_window_guard_dies_with_the_flag`: a sliced window is RECORDED, not refused.
 
-    The method label could not see the eval geometry, so a faithful-flagged run
-    on a 27%-coverage sample published a green claim.
-    The refusal is a usage error (nonzero exit, named reason, the number to
-    use), and it fires at preflight — nothing was quantized.
+    The old preflight existed to police a self-asserted claim; the computed
+    verdict does not make that claim, and evaluation comparability is recorded
+    beside the method verdict rather than folded into it. So a smaller eval
+    window starts, finishes and exports — and the artifact says what it covered.
     """
     max_eval = _max_eval_batches(offline_corpus, tiny_model)
     assert max_eval > 1, "fixture corpus too small to exercise an undersampled window"
     out_dir = tmp_path / "undersampled-eval"
+    sliced_sequences = (max_eval - 1) * BATCH
     proc = _run_driver(
         offline_corpus,
         tiny_model,
         out_dir,
-        extra=[
-            "--paper-faithful",
-            "--calibration-seqs",
-            "128",
-            "--eval-seqs",
-            str((max_eval - 1) * BATCH),
-        ],
+        extra=["--calibration-seqs", "128", "--eval-seqs", str(sliced_sequences)],
     )
-    assert proc.returncode != 0
-    assert "--paper-faithful requires the maximal local evaluation window" in proc.stderr
-    assert f"--eval-seqs {max_eval * BATCH} sequences" in proc.stderr
-    assert f"got {(max_eval - 1) * BATCH} sequences" in proc.stderr
-    # Preflight means preflight: no report, no artifact, no partial claim.
-    assert not (out_dir / "quantize_report.json").exists()
-    assert not list(out_dir.glob("layers/*.qpk1"))
+    assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-2000:]
+    report = _report(out_dir)
+    # The window is on record: fewer blocks than the corpus holds, with the
+    # coverage fraction naming the shortfall.
+    record = report["evaluation"]
+    assert record["selected_blocks"] == sliced_sequences
+    assert record["full_local_window_batches"] * BATCH > sliced_sequences
+    assert record["coverage_of_source_tokens"] < 1.0
+    # ... and the eval geometry denies NOTHING: no eval-derived runtime
+    # deviation exists, and the only deniers are the declared config's.
+    assert report["runtime_deviations"] == []
+    assert not any("eval" in str(entry.get("kind", "")) for entry in report["runtime_deviations"])
+    assert report["fidelity_conditions"]["config_device_is_accelerator"] is False
 
 
 def test_an_eval_window_past_the_corpus_is_still_refused_by_the_sizer(
@@ -446,7 +472,7 @@ def test_an_eval_window_past_the_corpus_is_still_refused_by_the_sizer(
 ):
     """One past the maximal window is the sizer's overshoot refusal, unchanged.
 
-    The preflight compares against `full_blocks // BATCH`; asking for more than
+    The sizer compares against `full_blocks // BATCH`; asking for more than
     the corpus holds must still fail in the sizer (which raises on overshoot
     rather than silently clamping), so the two refusals do not shadow each
     other and the maximal number is a hard edge, not a floor with slack.
@@ -457,7 +483,7 @@ def test_an_eval_window_past_the_corpus_is_still_refused_by_the_sizer(
         offline_corpus,
         tiny_model,
         out_dir,
-        extra=["--paper-faithful", "--eval-seqs", str((max_eval + 1) * BATCH)],
+        extra=["--eval-seqs", str((max_eval + 1) * BATCH)],
     )
     assert proc.returncode != 0
     assert "wikitext yields" in proc.stderr

@@ -676,13 +676,13 @@ def test_scratch_dir_pin_rejects_every_sandbox_only_shape(mutate, expected, esca
     assert any(expected in finding for finding in findings), (expected, findings)
 
 
-def test_driver_probe_knobs_are_parser_owned_and_threshold_free():
+def test_driver_probe_knobs_are_env_owned_and_threshold_free():
     """`probe_knob_defaults_and_validation` + `probe_threshold_not_overrideable`,
-    in the lean tier: the two specced knobs are argparse-owned with the specced
-    defaults behind a parse-time positive-int validator, and nothing — no flag,
-    no argument at the call site — re-pins the derived abort line. The runtime
-    half (a non-positive value really is a parse error, exit 2) belongs to the
-    torch-tier driver test; this half runs without torch.
+    in the lean tier: the two specced knobs are read from the ENVIRONMENT behind
+    the QK_ prefix with the specced defaults, the parser does not expose them,
+    and nothing — no flag, no argument at the call site — re-pins the derived
+    abort line. The runtime half (a non-positive value really is a startup
+    refusal) belongs to the torch-tier driver test; this half runs without torch.
     """
     main = [
         node
@@ -698,12 +698,12 @@ def test_driver_probe_knobs_are_parser_owned_and_threshold_free():
             and isinstance(node.args[0], ast.Constant)
         ):
             flags[node.args[0].value] = node
-    for flag, default in (("--probe-interval", 1), ("--probe-batches", 2)):
-        call = flags.get(flag)
-        assert call is not None, f"{flag} is not a driver flag: {sorted(flags)}"
-        kwargs = {kw.arg: kw.value for kw in call.keywords}
-        assert ast.unparse(kwargs["type"]) == "_positive_int", flag
-        assert ast.unparse(kwargs["default"]) == str(default), flag
+    for flag in ("--probe-interval", "--probe-batches"):
+        assert flag not in flags, f"{flag} is back on the operator surface: {sorted(flags)}"
+    # The knobs survive as lane-internal controls, resolved once at startup from
+    # the environment: present, spelled, and defaulted exactly as specced.
+    for name, default in (("QK_PROBE_INTERVAL", 1), ("QK_PROBE_BATCHES", 2)):
+        assert f'_env_probe_knob("{name}", {default})' in _DRIVER_SRC, (name, default)
     banned = ("probe-line", "probe-limit", "probe-threshold", "collapse", "abort-line")
     offenders = [flag for flag in flags if any(word in flag for word in banned)]
     assert offenders == [], f"a flag re-pins the abort line: {offenders}"
@@ -721,7 +721,7 @@ def test_driver_probe_knobs_are_parser_owned_and_threshold_free():
     ]
     assert probe_calls[0].keywords == [], "the call site passes a threshold override"
     # The pipeline receives exactly one probe field, and it is this closure.
-    assert "quantized_config(args, progress_probe=_probe)" in _DRIVER_SRC
+    assert "progress_probe=_probe" in _DRIVER_SRC
 
 
 _DRIVER_SRC = _DRIVER.read_text()

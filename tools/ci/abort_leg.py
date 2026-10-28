@@ -139,8 +139,6 @@ def recorded_command(out_dir: Path) -> list[str]:
         "8",
         "--eval-seqs",
         "16",
-        "--probe-batches",
-        "1",
         "--out",
         str(out_dir),
         "--checkpoint-dir",
@@ -170,6 +168,10 @@ def _offline_env(cache: Path, out_dir: Path) -> dict:
             "OPENBLAS_NUM_THREADS": "4",
             "QUANTIBBLER_KD_TMPDIR": str(kd_tmp),
             "QUANTIBBLER_BREADCRUMBS": str(out_dir / "breadcrumbs.log"),
+            # The probe's batch count is lane instrumentation, not a compression
+            # knob: it is set as a QK_* env var rather than passed as a flag, and
+            # one batch is what this leg wants out of it.
+            "QK_PROBE_BATCHES": "1",
         }
     )
     return env

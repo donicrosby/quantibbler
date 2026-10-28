@@ -12,7 +12,7 @@
 #
 # Knobs, all env — positional arguments are REFUSED, not ignored:
 #   MODEL OUT RANK SOLVER SEQ_LEN TUNE_SEQ_LEN CALIBRATION_SEQS EVAL_SEQS
-#   FACTOR_MODE ABLATION LAYER_SCOPE PAPER_FAITHFUL STE_FLIP_PASS_BUDGET DRY_RUN
+#   FACTOR_MODE ABLATION LAYER_SCOPE DRY_RUN
 #
 # Two defaults are traps worth knowing before you launch: SOLVER defaults to
 # `admm` (the measured ablation showed the ADMM stage earns nothing here —
@@ -58,18 +58,14 @@ TUNE_SEQ_LEN="${TUNE_SEQ_LEN:-}"
 # Root-cause ablation knobs: STRICT PASSTHROUGH, exactly like TUNE_SEQ_LEN —
 # empty means UNSET, so the driver's own default applies. The wrapper never
 # authors a measurement geometry or mode: a launch that claims to be an fp rung
-# must have said so.
+# must have said so. They reach the driver as container ENVIRONMENT (QK_*), not
+# as driver flags: they are measurement surface, not a human's compression
+# knobs, so they live behind the non-user mechanism the driver documents.
+# Passing an empty value is how "unset" is spelled, and the driver reads an
+# empty knob as unset.
 FACTOR_MODE="${FACTOR_MODE:-}"
 ABLATION="${ABLATION:-}"
 LAYER_SCOPE="${LAYER_SCOPE:-}"
-# Paper-faithful claim + the bounded discrete flip pass: STRICT PASSTHROUGH
-# like the ablation knobs, and
-# the wrapper never authors either. PAPER_FAITHFUL=1 is the ONLY way a launch
-# claims the paper's method: it switches the stage budgets to [NQ] App. C and
-# makes a TuneFP vacuity event FAIL the run instead of continuing. An empty or
-# 0 value is the gate-shaped pipeline, which is not the paper.
-PAPER_FAITHFUL="${PAPER_FAITHFUL:-}"
-STE_FLIP_PASS_BUDGET="${STE_FLIP_PASS_BUDGET:-}"
 # The data knobs count SEQUENCES, so the defaults are
 # the [NQ] protocol's own numbers: 128 calibration / 40 eval sequences. The
 # packed-batch size is the driver's business, not the launcher's.
@@ -85,7 +81,7 @@ MODE="${MODE:-ptq}"
 # something other than what was asked for.
 if [ "$#" -ne 0 ]; then
   echo "run-ptq-container.sh takes no arguments; use the env knobs:" >&2
-  echo "  MODEL OUT RANK SOLVER SEQ_LEN TUNE_SEQ_LEN CALIBRATION_SEQS EVAL_SEQS FACTOR_MODE ABLATION LAYER_SCOPE PAPER_FAITHFUL STE_FLIP_PASS_BUDGET DRY_RUN" >&2
+  echo "  MODEL OUT RANK SOLVER SEQ_LEN TUNE_SEQ_LEN CALIBRATION_SEQS EVAL_SEQS FACTOR_MODE ABLATION LAYER_SCOPE DRY_RUN" >&2
   echo "  got: $*" >&2
   exit 2
 fi
@@ -170,17 +166,9 @@ IMAGE_DIGEST="$(docker inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
 # carries the announce plus the advisories. (Before this, the announce went to
 # stdout and mixed with the argv; the split arrived as part of the ablation-knob
 # passthrough repair, so the why is recorded here rather than left to archaeology.)
-# A launch that does not claim paper fidelity is NOT running the paper's method:
-# the gate-shaped stage budgets turn TuneFP into a single step and the vacuity
-# guard into a diagnostic event. Said before the run so the resulting artifact
-# cannot be read as a paper-faithful one.
-if [ "$PAPER_FAITHFUL" != "1" ]; then
-  echo "note: PAPER_FAITHFUL unset -> gate-shaped stage budgets (TuneFP 1 step); the paper's method is PAPER_FAITHFUL=1" >&2
-fi
 echo "run-ptq-container: model=$MODEL rank=$RANK solver=$SOLVER seq_len=$SEQ_LEN" \
   "tune_seq_len=${TUNE_SEQ_LEN:-unset} calibration_seqs=$CALIBRATION_SEQS" \
   "factor_mode=${FACTOR_MODE:-binary} ablation=${ABLATION:-none} layer_scope=${LAYER_SCOPE:-all}" \
-  "paper_faithful=${PAPER_FAITHFUL:-0} ste_flip_pass_budget=${STE_FLIP_PASS_BUDGET:-0}" \
   "compute_dtype=${COMPUTE_DTYPE:-bf16} gpu=${GPU:-0} image=$IMAGE image_digest=$IMAGE_DIGEST" \
   "eval_seqs=$EVAL_SEQS out=$OUT owner=$OWNER card=$CARD" >&2
 
@@ -196,8 +184,8 @@ mkdir -p "$OUT" 2>/dev/null || true
     "$MODEL" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-}"
   printf 'calibration_seqs=%s\neval_seqs=%s\nfactor_mode=%s\nablation=%s\n' \
     "$CALIBRATION_SEQS" "$EVAL_SEQS" "${FACTOR_MODE:-}" "${ABLATION:-}"
-  printf 'layer_scope=%s\npaper_faithful=%s\nste_flip_pass_budget=%s\ncompute_dtype=%s\n' \
-    "${LAYER_SCOPE:-}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "${COMPUTE_DTYPE:-bf16}"
+  printf 'layer_scope=%s\ncompute_dtype=%s\n' \
+    "${LAYER_SCOPE:-}" "${COMPUTE_DTYPE:-bf16}"
   # SOLVER_BACKEND is stamped beside the rho override for the same reason: the
   # solver arm is run identity, and "torch" alone does not say which device ran.
   # Unset resolves to the config default (numpy); the driver re-resolves and
@@ -258,6 +246,9 @@ set -- docker run --rm \
   -e QKB_LAUNCH_ID="$LAUNCH_ID" \
   -e QKB_LAUNCH_OWNER="$OWNER" \
   -e QKB_LAUNCH_CARD="$CARD" \
+  -e QK_FACTOR_MODE="$FACTOR_MODE" \
+  -e QK_ABLATION="$ABLATION" \
+  -e QK_LAYER_SCOPE="$LAYER_SCOPE" \
   -e HF_HOME=/hf \
   -e HF_HUB_OFFLINE=1 \
   -e TRANSFORMERS_OFFLINE=1 \
@@ -351,23 +342,6 @@ fi
 if [ -n "$TUNE_SEQ_LEN" ]; then
   set -- "$@" --tune-seq-len "$TUNE_SEQ_LEN"
 fi
-if [ -n "$FACTOR_MODE" ]; then
-  set -- "$@" --factor-mode "$FACTOR_MODE"
-fi
-if [ -n "$ABLATION" ]; then
-  set -- "$@" --ablation "$ABLATION"
-fi
-if [ -n "$LAYER_SCOPE" ]; then
-  set -- "$@" --layer-scope "$LAYER_SCOPE"
-fi
-# PAPER_FAITHFUL is a boolean FLAG, not a valued option: it is appended only
-# when it was asked for, so an unset knob cannot author the claim.
-if [ "$PAPER_FAITHFUL" = "1" ]; then
-  set -- "$@" --paper-faithful
-fi
-if [ -n "$STE_FLIP_PASS_BUDGET" ]; then
-  set -- "$@" --ste-flip-pass-budget "$STE_FLIP_PASS_BUDGET"
-fi
 
 # DRY_RUN=1 prints the exact command line (copy-pasteable) and stops: the launch
 # is checkable without spending 32g of host RAM and without stealing the
@@ -425,8 +399,8 @@ mkdir -p /opt/data/tmp "$(dirname "$OUT")"
 # the launcher rather than remembered by the person who fired it. The leading
 # `=== run <ISO> rank=…` shape is unchanged -- the watchdog's line-silence scan
 # and the header greps read it.
-printf '=== run %s rank=%s solver=%s seq_len=%s tune_seq_len=%s paper_faithful=%s ste_flip_pass_budget=%s compute_dtype=%s image=%s out=%s owner=%s card=%s ===\n' \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-unset}" "${PAPER_FAITHFUL:-0}" "${STE_FLIP_PASS_BUDGET:-0}" "${COMPUTE_DTYPE:-bf16}" "$IMAGE" "$OUT" "$OWNER" "$CARD" \
+printf '=== run %s rank=%s solver=%s seq_len=%s tune_seq_len=%s compute_dtype=%s image=%s out=%s owner=%s card=%s ===\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RANK" "$SOLVER" "$SEQ_LEN" "${TUNE_SEQ_LEN:-unset}" "${COMPUTE_DTYPE:-bf16}" "$IMAGE" "$OUT" "$OWNER" "$CARD" \
   >> /opt/data/tmp/quantibbler-breadcrumbs.log
 
 

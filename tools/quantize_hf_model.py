@@ -57,6 +57,7 @@ import sys
 import tempfile
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -138,7 +139,16 @@ from quantibbler.ptq.checkpoints import (
     append_stage_event,
     completed_blocks,
 )
-from quantibbler.ptq.config import PrefixProbeAbort, PTQConfig, StageHyper
+from quantibbler.ptq.config import (
+    _ABLATIONS,
+    _FACTOR_MODES,
+    _LAYER_SCOPES,
+    PrefixProbeAbort,
+    PTQConfig,
+    StageHyper,
+    config_matches_paper_regime,
+    declared_regime_config,
+)
 from quantibbler.qk_report import (
     COLLAPSE_LINE,
     EVAL_EVALUATOR,
@@ -420,48 +430,76 @@ def packed_chunks(sequences: int, knob: str) -> int:
     return sequences // BATCH
 
 
-def eval_window_sequences(evaluation: dict) -> int:
-    """The maximal local eval window in the KNOB's unit (sequences).
+def _env_raw(name: str) -> str | None:
+    """An env knob's raw value, or ``None`` when it is unset.
 
-    ``--eval-seqs`` counts sequences ({packed_chunks}'s contract), while
-    ``evaluation_record`` keeps ``full_local_window_batches`` — a harness fact
-    of the sizer, pinned in batches by the report's own tests. The
-    paper-faithful gate is where the two units meet, so the conversion lives
-    here in one named place: a gate that compared a sequence count against a
-    batch count would pass a window eight times too small and call it maximal.
+    Empty counts as unset: a shell knob that was never exported still expands to
+    an empty string in an ``-e QK_X=$VAR`` pass-through, and reading that as a
+    value would refuse a legal launch.
     """
-    return evaluation["full_local_window_batches"] * BATCH
+    return os.environ.get(name, "") or None
 
 
-def _positive_int(text: str) -> int:
-    """argparse type for the probe knobs: a non-positive value is a parse error.
+def _env_choice(name: str, default: str, choices: tuple[str, ...]) -> str:
+    """One enumerated env knob, fail-closed naming the variable and its choices.
 
-    Rejected at parsing, not clamped downstream: a silently-accepted
-    ``--probe-interval 0`` would disable the very probe the run asked for,
-    and the operator would read the absence of probe lines as "healthy".
+    The vocabulary is imported from ``PTQConfig``'s own validators, never
+    re-listed here: a second list is how an accepted value on one path becomes a
+    startup refusal on the other.
     """
-    value = int(text)
+    raw = _env_raw(name)
+    if raw is None:
+        return default
+    if raw not in choices:
+        raise ValueError(
+            f"{name} must be one of {choices}, got {raw!r} (unset or empty means {default!r})"
+        )
+    return raw
+
+
+def _env_probe_knob(name: str, default: int) -> int:
+    """One probe knob: a positive integer, or a named startup refusal.
+
+    Non-integer and non-positive share ONE refusal because both are values that
+    cannot drive the probe: a silently-clamped ``QK_PROBE_INTERVAL=0`` disables
+    the very probe the run wants, and the operator then reads the absence of
+    probe lines as a healthy run.
+    """
+    raw = _env_raw(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
     if value <= 0:
-        raise argparse.ArgumentTypeError(f"expected a positive integer, got {text!r}")
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}")
     return value
 
 
 def quantized_config(
     args: argparse.Namespace,
     progress_probe: Any = None,
+    *,
+    rho_end: float | None = None,
 ) -> PTQConfig:
-    """PTQConfig for real models: gate-shaped stages (TuneFP off — the fp
-    checkpoint needs no polish; STE + global scale KD at the gate's measured
-    lr), paper-style solver knobs, caller-selected rank, and the per-block
-    progress probe when the caller wired one in (None = no probe, the
-    pipeline path is unchanged).
+    """PTQConfig for real models: solver knobs from the run's arguments, the
+    caller-selected rank, and the per-block progress probe when the caller wired
+    one in (None = no probe, the pipeline path is unchanged).
 
-    ``--paper-faithful`` switches the stage budgets to [NQ] App. C verbatim
-    (T_pre/T_post/T_glob = 8 epochs at 1e-4/1e-5/1e-6) and sets
-    ``paper_faithful`` on the config, which makes the TuneFP vacuity guard
-    FAIL the run instead of continuing with pristine weights. That flag is
-    the whole difference between "we ran something" and "we ran the paper's
-    method": the gate-shaped override turns TuneFP into a single step.
+    The stage budgets are DERIVED from the declared config rather than switched
+    by a flag: a run whose config matches the paper regime gets [NQ] App. C
+    verbatim (T_pre/T_post/T_glob = 8 epochs at 1e-4/1e-5/1e-6), every other run
+    keeps the gate-shaped triple, which turns TuneFP into a single step. One
+    conjunction drives this switch and the runtime gates (greedy polish off, the
+    paper_ste declaration, the fail-closed vacuous teacher), so a regime-matching
+    run mechanically carries the App. C schedule and cannot silently deviate
+    from it.
+
+    ``rho_end`` is the run's EFFECTIVE penalty endpoint when the caller resolved
+    one (the driver reads it from the same helper the solver does); recording it
+    on the config is what keeps the regime verdict this config carries and the
+    endpoint the solver ran from disagreeing.
 
     scale_dtype follows --scale-dtype (default float32): v5/v6 proved the
     hard-coded float16 overflows late-block s2 (>65,504 -> inf, 54/196
@@ -469,36 +507,42 @@ def quantized_config(
     post-polish scales are verified bounded; the storage cast now raises
     instead of silently emitting inf.
     """
-    if getattr(args, "paper_faithful", False):
-        stage_pre = StageHyper(1e-4, 4, 8)
-        stage_latent = StageHyper(1e-5, 1, 8)
-        stage_global = StageHyper(1e-6, 1, 8)
-    else:
-        stage_pre = StageHyper(1e-4, 4, 0)
-        stage_latent = StageHyper(2e-3, 4, 3)
-        stage_global = StageHyper(1e-3, 4, 4)
-    return PTQConfig(
-        seed=args.seed,
-        rank=args.rank,
-        compute_dtype=args.compute_dtype,
-        scale_dtype=args.scale_dtype,
-        admm_max_iter=args.max_admm_iter,
-        solver=args.solver,
-        stage_pre=stage_pre,
-        stage_latent=stage_latent,
-        stage_global=stage_global,
-        verbose=True,
-        progress_probe=progress_probe,
+    fields: dict[str, Any] = {
+        "seed": args.seed,
+        "rank": args.rank,
+        "compute_dtype": args.compute_dtype,
+        "scale_dtype": args.scale_dtype,
+        "admm_max_iter": args.max_admm_iter,
+        "solver": args.solver,
+        "stage_pre": StageHyper(1e-4, 4, 0),
+        "stage_latent": StageHyper(2e-3, 4, 3),
+        "stage_global": StageHyper(1e-3, 4, 4),
+        "verbose": True,
+        "progress_probe": progress_probe,
+        # The DECLARED device: whether a run is a paper-regime run is a question
+        # about what it declared, and 'cpu' is the one declaration the paper
+        # regime denies. Where the tensors actually landed is recorded separately
+        # in the report's provenance (solver_device).
+        "device": args.device,
         # Root-cause ablation knobs: solver state, so they ride the checkpoint
         # fingerprint and a resumed fp run can never resume as a binary run.
-        factor_mode=args.factor_mode,
-        ablation=args.ablation,
-        layer_scope=args.layer_scope,
-        # Paper-faithful claim + the bounded discrete flip pass: both are
-        # solver state and both are recorded in the run report.
-        paper_faithful=bool(getattr(args, "paper_faithful", False)),
-        ste_flip_pass_budget=int(getattr(args, "ste_flip_pass_budget", 0)),
-    )
+        "factor_mode": args.factor_mode,
+        "ablation": args.ablation,
+        "layer_scope": args.layer_scope,
+    }
+    if rho_end is not None:
+        fields["rho_end"] = rho_end
+    cfg = PTQConfig(**fields)
+    if config_matches_paper_regime(cfg):
+        # App. C verbatim. The switch is a function of the regime detector, not
+        # a ninth config condition kept in step with it by hand.
+        cfg = replace(
+            cfg,
+            stage_pre=StageHyper(1e-4, 4, 8),
+            stage_latent=StageHyper(1e-5, 1, 8),
+            stage_global=StageHyper(1e-6, 1, 8),
+        )
+    return cfg
 
 
 def remainder_dtype_for_compute_dtype(compute_dtype: str) -> str:
@@ -603,6 +647,7 @@ def _run_identity(
     ppl_baseline_bf16: Any,
     evaluation: dict,
     resume: dict,
+    fidelity_config: dict,
 ) -> dict:
     """Report identity fields shared by every exit path.
 
@@ -636,12 +681,15 @@ def _run_identity(
         "max_admm_iter": args.max_admm_iter,
         "seed": args.seed,
         "ppl_baseline_bf16": ppl_baseline_bf16,
-        "paper_faithful": bool(args.paper_faithful),
-        "ste_flip_pass_budget": int(args.ste_flip_pass_budget),
+        # The declared config the fidelity verdict is computed from, recorded on
+        # every exit path: the label is a verdict ABOUT these values, so a reader
+        # who cannot see them cannot audit it, and an abort report must be as
+        # auditable as a finished one.
+        "fidelity_config": fidelity_config,
         # Geometry deviations from [NQ]'s protocol (sliced tune windows,
         # non-protocol row counts): a stage map that is complete while the
-        # geometry is not the protocol's would make "paper-faithful" a green
-        # label over a deviant artifact.
+        # geometry is not the protocol's would deny the label over a deviant
+        # artifact.
         "runtime_deviations": geometry_deviations(args.seq_len, tune_seq_len, calibration_rows),
         # The emitted container (qk-artifact-blob BW-1): the format asked for,
         # and — once the blob is written — its path and external sha256 (design
@@ -1127,213 +1175,204 @@ def main() -> int:
         print(note, flush=True)
         _bread(note)
 
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--model", default="Qwen/Qwen3-0.6B")
-    parser.add_argument("--rank", type=int, default=8)
-    parser.add_argument("--seq-len", type=int, default=512)
-    parser.add_argument(
-        "--tune-seq-len",
-        type=_positive_int,
-        default=None,
-        help="per-block reconstruction window length: the tune stage's "
-        "memory bound. Unset means --seq-len (the pre-flag behavior). "
-        "--seq-len stays the EVALUATION geometry, so this never changes "
-        "what the reported perplexity is measured over",
+    parser = argparse.ArgumentParser(
+        description="Compress a HuggingFace transformer model to sub-1-bit quantized weights.",
     )
-    parser.add_argument(
+    # Flags are grouped by what the operator is choosing, not by the order the
+    # options were added: a human reads this surface to answer "what am I
+    # compressing, how hard, and where does it land".
+    data = parser.add_argument_group("Model and data")
+    quality = parser.add_argument_group("Solver and quality")
+    output = parser.add_argument_group("Output")
+    resources = parser.add_argument_group("Resources")
+    data.add_argument(
+        "--model",
+        default="Qwen/Qwen3-0.6B",
+        help="HuggingFace model id or local snapshot path to compress (default: Qwen/Qwen3-0.6B)",
+    )
+    data.add_argument(
+        "--rank",
+        type=int,
+        default=8,
+        help="factorization rank: the bit-budget control. More rank means more "
+        "bits per weight and less reconstruction error (default: 8)",
+    )
+    data.add_argument(
+        "--seq-len",
+        type=int,
+        default=512,
+        help="evaluation sequence length in tokens: the geometry the reported "
+        "perplexity is measured over (default: 512)",
+    )
+    data.add_argument(
+        "--tune-seq-len",
+        type=int,
+        default=None,
+        help="per-block reconstruction window in tokens, sliced out of the same "
+        "calibration rows; unset means --seq-len, so the tune stage then runs at "
+        "the evaluation geometry (default: unset)",
+    )
+    data.add_argument(
         "--calibration-seqs",
         type=int,
         default=128,
-        help="128 calibration SEQUENCES ([NQ] Sec 3.4/App. C), packed "
-        f"{BATCH} rows per batch (16 batches); the count must be a multiple of {BATCH}",
+        help=f"calibration sequences, packed {BATCH} rows per batch; must be a "
+        f"multiple of {BATCH} (default: 128)",
     )
-    parser.add_argument(
+    data.add_argument(
         "--eval-seqs",
         type=int,
         default=40,
-        help=f"40 held-out evaluation SEQUENCES, packed {BATCH} rows per batch "
-        f"({40 // BATCH} batches); the count must be a multiple of {BATCH}",
+        help=f"held-out evaluation sequences, packed {BATCH} rows per batch; must "
+        f"be a multiple of {BATCH} (default: 40)",
     )
-    parser.add_argument(
-        "--probe-interval",
-        type=_positive_int,
-        default=1,
-        help="run the per-block progress probe every N blocks from depth 2 "
-        "(default 1 = every block boundary); non-positive is a parse error",
+    data.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="random seed for the calibration and evaluation block ordering (default: 0)",
     )
-    parser.add_argument(
-        "--probe-batches",
-        type=_positive_int,
-        default=2,
-        help="eval batches in the probe slice, taken as the head of the "
-        "held-out set (default 2); non-positive is a parse error",
-    )
-    parser.add_argument("--max-admm-iter", type=int, default=400)
-    parser.add_argument(
+    quality.add_argument(
         "--solver",
         choices=("admm", "svd"),
         default="admm",
-        help="warm-start source: 400-iter LB-ADMM or plain truncated SVD "
-        "(ablation: within 0.003 cos, orders faster at high rank)",
+        help="warm-start source: 'admm' (LB-ADMM, the production path) or 'svd' "
+        "(truncated SVD, a faster ablation that measures within 0.003 cos at low "
+        "rank) (default: admm)",
     )
-    parser.add_argument(
-        "--factor-mode",
-        choices=("binary", "fp"),
-        default="binary",
-        help="root-cause ablation: `fp` removes the binary constraint entirely "
-        "(continuous latents; no sign, no STE, no bit-flip polish). This is a "
-        "MEASUREMENT — it packs nothing and never exports an artifact",
-    )
-    parser.add_argument(
-        "--ablation",
-        choices=("none", "untuned-signs"),
-        default="none",
-        help="binary ablation: export sign() of the balance latents with the "
-        "Eq. 8 scale fold and ZERO refinement (no polish, no TuneLatentSTE) — "
-        "it separates 'the bits cannot hold it' from 'the optimizer is not "
-        "finding it'",
-    )
-    parser.add_argument(
-        "--layer-scope",
-        choices=("all", "self_attn", "mlp"),
-        default="all",
-        help="factorize only the linears whose module path contains the named "
-        "component; every other linear stays full precision",
-    )
-    parser.add_argument(
-        "--scale-dtype",
-        choices=("float16", "float32"),
-        default="float32",
-        help="qpk1 scale storage dtype (float16 overflows to inf when any "
-        "scale exceeds 65,504 — the cast now raises instead of shipping it)",
-    )
-    parser.add_argument(
-        "--remainder-dtype",
-        choices=REMAINDER_DTYPES,
-        default=None,
-        help="storage dtype of the exported artifact's remainder sidecars "
-        "(embedding, lm_head, norms), declared in the manifest — the only thing "
-        "the loader reads to size them. UNSET (the default) tracks the pipeline "
-        "compute dtype (bf16 compute -> bf16 sidecars, fp32/float64 compute -> "
-        "fp32 sidecars): one declared dtype end to end unless the operator asks "
-        "otherwise. bf16 halves those bytes and is lossy (8 mantissa bits); "
-        "compute and storage dtypes are separately declared, so 'compute bf16 + "
-        "store fp32' is a legal, declared combination",
-    )
-    parser.add_argument(
-        "--checkpoint-dir",
-        type=Path,
-        default=None,
-        help="per-block solve checkpoints (fingerprint-guarded) and the ONE way "
-        "to opt into crash resume of the dominant-cost stage: name the directory "
-        "a previous launch printed. Default: a FRESH per-run directory — a shared "
-        "stable default is how one model's block archives get restored into "
-        "another model's solve",
-    )
-    parser.add_argument(
-        "--no-checkpoints",
-        action="store_true",
-        help="disable solve checkpointing entirely",
-    )
-    parser.add_argument(
-        "--paper-faithful",
-        action="store_true",
-        help="claim paper fidelity: [NQ] App. C stage budgets verbatim "
-        "(T_pre/T_post/T_glob = 8 epochs at 1e-4/1e-5/1e-6), and any TuneFP "
-        "vacuity event FAILS the run instead of continuing with pristine "
-        "weights (qk-fix-tunefp-teacher A3). The report's stage_map names "
-        "every deviation that remains",
-    )
-    parser.add_argument(
-        "--ste-flip-pass-budget",
+    quality.add_argument(
+        "--max-admm-iter",
         type=int,
-        default=0,
-        help="bounded discrete sign-flip proposals per factor per linear "
-        "(qk-fix-ste-sign-adaptation fallback 3). 0 disables the pass; any "
-        "nonzero value is an EXPLICIT DEVIATION from the paper and is "
-        "recorded as such in the run report. INERT under --paper-faithful: "
-        "the paper's path is sign+pack on whatever signs STE produced "
-        "(Algorithm 1 lines 20-23), so the pass never fires and the record "
-        "carries `declared: paper_ste` with the measured crossings",
+        default=400,
+        help="ADMM iteration cap per layer (default: 400)",
     )
-    parser.add_argument(
+    quality.add_argument(
         "--compute-dtype",
         default="bf16",
         choices=("bf16", "float32", "float64"),
-        help="the ONE dtype the pipeline computes in (consumed by lb_admm, "
-        "block_recon and every stage). bf16 is the default; float32 and float64 "
-        "are selectable non-defaults (float64 remains the paper-regime reference, "
-        "reachable but never default). bf16/float32 require the torch backend — "
-        "the NumPy parity oracle is float64-only and refuses them by name. The "
-        "value is recorded in launch.env, the run report and every solver-probe "
-        "row, so an artifact is identifiable from its own directory rather than "
-        "from someone's scrollback: two arms whose rows are indistinguishable are "
-        "the same provenance gap as an unlabelled rho_end. Accumulation dtypes are "
-        "derived from this (float32 under bf16), never a second knob.",
+        help="the one dtype the pipeline computes in, end to end (consumed by "
+        "lb_admm, block_recon and every stage). bf16 is the default; float32 and "
+        "float64 are selectable non-defaults, and the float64 NumPy backend is "
+        "the parity oracle that refuses bf16 by name. The value is recorded in "
+        "launch.env, the run report and every solver-probe row, so an artifact is "
+        "identifiable from its own directory. Accumulation dtypes are derived "
+        "from this, never a second knob (default: bf16)",
     )
-    parser.add_argument(
-        "--device",
-        default="auto",
-        choices=("auto", "cpu", "cuda"),
-        help="where the torch stages run (capture, TuneFP, STE, eval). 'auto' takes "
-        "the accelerator or REFUSES -- it never falls back to CPU, because a silent "
-        "fallback is how a production fire ran 21 hours on one socket while its own "
-        "launch record printed device=cpu and nobody read it. A CPU run is still "
-        "available by explicit name: --device cpu. The per-linear SOLVER "
-        "stays NumPy/CPU either way: its weights already hand off via .cpu().numpy() "
-        "and back, roughly 200 crossings of small matrices across the whole run, "
-        "which costs seconds rather than hours -- so moving the autograd stages does "
-        "not require porting the solver. Timed on the CPU path: the torch stages are "
-        "about 69%% of wall, which is what this moves.",
+    output.add_argument(
+        "--out",
+        type=Path,
+        default=Path("artifacts") / "model-qpk1",
+        help="artifact directory to write (default: artifacts/model-qpk1)",
     )
-    parser.add_argument(
-        "--max-threads",
-        type=int,
-        default=None,
-        help="cap on the CPU thread count the good-guest sizing computes "
-        "(min(computed, N)). The default is the computed value — cores minus a "
-        "load-aware margin — so this flag only ever TIGHTENS the bound. For an "
-        "explicit opt-out of the sizing entirely, use --no-good-guest",
-    )
-    parser.add_argument(
-        "--no-good-guest",
-        action="store_true",
-        help="disable the good-guest bounds: no thread-pool environment is set "
-        "and the GPU memory cap is skipped. For benchmarking on a dedicated "
-        "host; the default is considerate",
-    )
-    parser.add_argument(
-        "--gpu-memory-fraction",
-        type=float,
-        default=None,
-        help="override the 0.85 per-process GPU memory cap",
-    )
-    parser.add_argument(
-        "--gpu-memory-gb",
-        type=float,
-        default=None,
-        help="absolute per-process GPU memory cap in GB. On a unified-memory "
-        "APU (device memory IS host RAM) this is the bound that actually "
-        "protects co-tenants — the fraction alone can still drain the host",
-    )
-    parser.add_argument(
-        "--device-audit",
-        action="store_true",
-        help="fail closed on any tensor argument whose device disagrees with the "
-        "module's own parameters, naming the call site. For debugging a device "
-        "mismatch; off by default (a long run must not die to its own instrument)",
-    )
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--out", type=Path, default=Path("artifacts") / "model-qpk1")
-    parser.add_argument(
+    output.add_argument(
         "--container-format",
         choices=("blob", "dir"),
         default="blob",
-        help="exported container: blob (a single .qpk beside the working "
-        "directory, the canonical form) or dir (directory only). Spec "
-        "qk-artifact-blob BW-1; the report records the blob's sha256.",
+        help="exported container: 'blob' writes a single .qpk beside the artifact "
+        "directory and records its sha256 in the report; 'dir' writes the "
+        "directory only (default: blob)",
+    )
+    output.add_argument(
+        "--scale-dtype",
+        choices=("float16", "float32"),
+        default="float32",
+        help="storage dtype of the per-layer scales in the artifact: float16 "
+        "halves those bytes and overflows to inf above 65,504, which the cast "
+        "refuses rather than shipping (default: float32)",
+    )
+    output.add_argument(
+        "--remainder-dtype",
+        choices=REMAINDER_DTYPES,
+        default=None,
+        help="storage dtype of the artifact's remainder sidecars (embedding, "
+        "untied lm_head, norms), declared in the manifest — the only thing the "
+        "loader reads to size them. default: tracks compute dtype (bf16 compute "
+        "-> bf16 sidecars, float32/float64 compute -> fp32 sidecars), so one "
+        "declared dtype runs end to end unless asked otherwise; bf16 halves those "
+        "bytes and is lossy (8 mantissa bits)",
+    )
+    output.add_argument(
+        "--checkpoint-dir",
+        type=Path,
+        default=None,
+        help="directory for the per-block solve checkpoints, and the one way to "
+        "opt into crash resume of the dominant-cost stage: name the directory a "
+        "previous launch printed (default: a fresh per-run directory — a shared "
+        "stable default is how one model's block archives get restored into "
+        "another model's solve)",
+    )
+    output.add_argument(
+        "--no-checkpoints",
+        action="store_true",
+        help="disable solve checkpointing entirely, so this launch cannot be "
+        "resumed (default: off)",
+    )
+    resources.add_argument(
+        "--device",
+        default="auto",
+        choices=("auto", "cpu", "cuda"),
+        help="where the torch stages run (capture, TuneFP, STE, eval). 'auto' "
+        "takes the accelerator or REFUSES — it never falls back to CPU, because "
+        "a silent fallback is how a production fire ran 21 hours on one socket "
+        "while its own launch record printed device=cpu. A CPU run is still "
+        "available by explicit name: --device cpu. The per-linear solver stays "
+        "NumPy/CPU either way, since its weights already hand off through the "
+        "host (default: auto)",
+    )
+    resources.add_argument(
+        "--max-threads",
+        type=int,
+        default=None,
+        help="cap on the CPU thread count the automatic sizing computes "
+        "(min(computed, N)); the default is the computed value — cores minus a "
+        "load-aware margin — so this only ever tightens the bound. For an "
+        "explicit opt-out of the sizing entirely, use --no-good-guest "
+        "(default: the computed bound)",
+    )
+    resources.add_argument(
+        "--no-good-guest",
+        action="store_true",
+        help="disable the good-guest bounds: no thread-pool environment is set "
+        "and the GPU memory cap is skipped. For benchmarking on a dedicated host "
+        "(default: off)",
+    )
+    resources.add_argument(
+        "--gpu-memory-fraction",
+        type=float,
+        default=None,
+        help="per-process GPU memory fraction cap (default: 0.85)",
+    )
+    resources.add_argument(
+        "--gpu-memory-gb",
+        type=float,
+        default=None,
+        help="absolute per-process GPU memory cap in GB. On a unified-memory APU "
+        "(device memory IS host RAM) this is the bound that protects co-tenants — "
+        "the fraction alone can still drain the host (default: unset)",
+    )
+    resources.add_argument(
+        "--device-audit",
+        action="store_true",
+        help="fail closed on any tensor argument whose device disagrees with the "
+        "module's own parameters, naming the call site. A debugging instrument; "
+        "off by default so a long run cannot die to its own instrument "
+        "(default: off)",
     )
     args = parser.parse_args()
+
+    # --- lane-internal knobs: env-only, resolved once at startup -----------
+    # These five are instrument and ablation surface, not parameters a human
+    # chooses when compressing a model, so they live in the environment with a
+    # QK_ prefix and the parser never exposes them. Resolving them HERE, once,
+    # into the same namespace the parser used to fill, is what keeps one config
+    # path: `quantized_config` and every report field below read `args.factor_mode`
+    # exactly as they did when the flag existed, with no second route into the
+    # config.
+    args.factor_mode = _env_choice("QK_FACTOR_MODE", "binary", _FACTOR_MODES)
+    args.ablation = _env_choice("QK_ABLATION", "none", _ABLATIONS)
+    args.layer_scope = _env_choice("QK_LAYER_SCOPE", "all", _LAYER_SCOPES)
+    args.probe_interval = _env_probe_knob("QK_PROBE_INTERVAL", 1)
+    args.probe_batches = _env_probe_knob("QK_PROBE_BATCHES", 2)
 
     # Remainder storage dtype tracks the compute dtype when unset: one declared
     # dtype end to end. The two are separately settable (compute bf16 + store
@@ -1447,29 +1486,14 @@ def main() -> int:
         f"(paper_table_comparable={evaluation['paper_table_comparable']})",
         flush=True,
     )
-    # PREFLIGHT, before any quantization work: a faithful claim on this
-    # evaluator must use its maximal local window. Anything smaller is a
-    # sample presented as the split, and hours of PTQ should not be spent to
-    # discover that at report time. Raised as a ValueError like the sizer's
-    # overshoot refusal beside it (a usage error, not a run verdict): the
-    # driver's single exit path belongs to the gate's verdict, so a config
-    # refusal fails loudly here instead of implying a completed run.
-    # The knob counts sequences; `evaluation` records the window in batches (a
-    # harness fact, kept). The comparison is made in the knob's unit, so the
-    # gate's demanded value and the recorded one are the same kind of number.
-    full_window_sequences = eval_window_sequences(evaluation)
-    if args.paper_faithful and args.eval_seqs != full_window_sequences:
-        raise ValueError(
-            f"--paper-faithful requires the maximal local evaluation window: "
-            f"--eval-seqs {full_window_sequences} sequences "
-            f"(wikitext test at seq {args.seq_len} yields "
-            f"{evaluation['full_blocks']} blocks = "
-            f"{evaluation['full_local_window_batches']} batches of {BATCH}); "
-            f"got {args.eval_seqs} sequences ({evaluation['selected_blocks']} blocks, "
-            f"{evaluation['coverage_of_source_tokens']:.3%} of source tokens). "
-            "Diagnostics may use a smaller window and will record it; a "
-            "faithful claim may not."
-        )
+    # There is deliberately NO eval-window preflight here anymore. The guard
+    # belonged to the self-asserted fidelity flag (a claim that the run IS the
+    # protocol had to use the protocol's whole evaluation window), and the
+    # computed verdict does not make that claim: evaluation comparability is a
+    # harness fact recorded in `evaluation` beside the method verdict, never a
+    # condition of it. The sliced window stays recorded (selected blocks and
+    # source-token coverage), so a reader sees exactly what was scored without
+    # the choice denying a label it has no business denying.
 
     # --- independent tune geometry ---------------------------------------
     # `--seq-len` is the EVALUATION protocol (WT2 at 2048 for the bar) and
@@ -1516,7 +1540,7 @@ def main() -> int:
     def _probe(host_model: Any, depth: int, name: str) -> None:  # noqa: ANN001
         """Boundary check: measure the live prefix, record it, abort on collapse.
 
-        Called by the pipeline after each block's write-back. ``--probe-interval``
+        Called by the pipeline after each block's write-back. ``QK_PROBE_INTERVAL``
         lives here, not in the pipeline: the pipeline contract stays "one call
         per processed block" with no interval knowledge. The abort threshold is
         the shared derived ``COLLAPSE_LINE`` via ``probe_aborts`` — there is no
@@ -1637,6 +1661,22 @@ def main() -> int:
         image_digest=os.environ.get("QUANTIBBLER_IMAGE_DIGEST", "unknown"),
         admitted_by_fingerprint=_resume_admission(_ckpt_dir) if restored else None,
     )
+    # The run's config, built HERE so the declaration it carries can be recorded
+    # in the report beside the verdict computed from it: `quantized_config` picks
+    # the stage budgets from the same regime test the gates use, and
+    # `declared_regime_config` hands back the eight declared fields — one
+    # builder, so the schedule the pipeline runs and the declaration the report
+    # attests cannot describe different runs. `rho_end` arrives already resolved
+    # (see `_rho_prov` above) so the config carries the endpoint the solver will
+    # use, not a second reading of it.
+    cfg_ptq = quantized_config(args, progress_probe=_probe, rho_end=_rho_end_value)
+    fidelity_config = declared_regime_config(cfg_ptq)
+    print(
+        "      regime: "
+        + " ".join(f"{key}={value}" for key, value in fidelity_config.items())
+        + f" -> paper_regime={config_matches_paper_regime(cfg_ptq)}",
+        flush=True,
+    )
     # Identity fields shared by every report path, built once (see
     # `_run_identity`: the probe-abort and stage-failure reports must be as
     # self-describing as a completion report).
@@ -1649,13 +1689,14 @@ def main() -> int:
         ppl_baseline_bf16=ppl_base,
         evaluation=evaluation,
         resume=resume,
+        fidelity_config=fidelity_config,
     )
 
     try:
         qm = quantize_model(
             model,
             calib,
-            quantized_config(args, progress_probe=_probe),
+            cfg_ptq,
             checkpoint_dir=_ckpt_dir,
             recorder=_record,
             stage_sink=stage_events,
@@ -1765,14 +1806,15 @@ def main() -> int:
                 artifact=measured_artifact,
             )
         # The fidelity label is a COMPUTED verdict over the run's own record:
-        # the flag AND an empty deviation list AND no mechanism-class deviation.
-        # Every condition is recorded beside it, so a reader can see which one
-        # denied the claim.
+        # the declared config's match against the paper regime AND an empty
+        # deviation list AND no mechanism-class deviation AND evidence each
+        # required stage fired. Every condition is recorded beside it, so a
+        # reader can see which one denied the label.
         faithful_label, fidelity_conditions = fidelity_verdict(
             prov["solver"],
             identity["runtime_deviations"],
             stage_events,
-            requested=bool(args.paper_faithful),
+            config=identity["fidelity_config"],
         )
         report = {
             "model": args.model,
@@ -1829,11 +1871,13 @@ def main() -> int:
             "container": identity["container"],
             # Stage record + Algorithm 1 map: every
             # executed stage resolved against lines 0-28 with its deviations
-            # named, so "paper-faithful" is auditable from the report alone.
-            # `paper_faithful` is the COMPUTED verdict (flag AND no deviation),
-            # with its condition record beside it.
+            # named, so the label is auditable from the report alone.
+            # `paper_faithful` is the COMPUTED verdict (the declared config
+            # against the paper regime, plus no deviation), with its condition
+            # record and the declaration it was computed from beside it.
             "paper_faithful": faithful_label,
             "fidelity_conditions": fidelity_conditions,
+            "fidelity_config": identity["fidelity_config"],
             # Beside the method verdict, never inside it: evaluation
             # comparability is a harness fact (coverage, windowing, evaluator),
             # not a property of the quantization method or calibration
@@ -1843,7 +1887,6 @@ def main() -> int:
             # is built once from launch state, so every exit path carries the
             # same key.
             "resume": identity["resume"],
-            "ste_flip_pass_budget": int(args.ste_flip_pass_budget),
             "runtime_deviations": identity["runtime_deviations"],
             "stages": [{"event": event, **info} for event, info in stage_events],
             "stage_map": stage_map(stage_events),

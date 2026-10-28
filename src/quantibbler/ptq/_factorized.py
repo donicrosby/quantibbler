@@ -296,7 +296,8 @@ def extract_and_pack(
             f"refusing to extract binaries for {name!r}: this run carries "
             "factor_mode='fp', so its latents are a MEASUREMENT and must never "
             "be sign-converted into a binary artifact (qk-root-cause-ablation "
-            "D-5). Drop --factor-mode fp for a run that exports."
+            "D-5). Unset QK_FACTOR_MODE (or set it to 'binary') for a run that "
+            "exports."
         )
     from .. import kernels
 

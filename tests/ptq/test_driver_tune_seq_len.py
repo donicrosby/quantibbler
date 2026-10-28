@@ -129,6 +129,7 @@ def _run_driver(
     out_dir: Path,
     seq_len: int = SEQ_LEN,
     extra: list[str] | None = None,
+    device: str = "cpu",
 ) -> subprocess.CompletedProcess:
     """Invoke the real driver the way the user's command line invokes it."""
     env = dict(os.environ)
@@ -138,6 +139,9 @@ def _run_driver(
     env["QKB_LAUNCH_OWNER"] = "pytest"
     env["HF_HUB_CACHE"] = str(corpus_root)
     env["QUANTIBBLER_BREADCRUMBS"] = str(out_dir / "breadcrumbs.log")
+    # The probe slice is lane instrumentation and env-owned now: one batch keeps
+    # the probe cheap, and the report records the count the run actually used.
+    env["QK_PROBE_BATCHES"] = "1"
     kd_tmp = out_dir / "kd-tmp"
     kd_tmp.mkdir(parents=True, exist_ok=True)
     env["QUANTIBBLER_KD_TMPDIR"] = str(kd_tmp)
@@ -147,8 +151,10 @@ def _run_driver(
         # 'auto' now refuses without an accelerator, and this suite has none:
         # asking for CPU by name is the point of the change. The silence it
         # replaces is what let a production fire run 21 hours on one socket.
+        # It is also the DECLARED device the regime verdict reads, so a leg that
+        # needs the paper regime has to declare an accelerator here.
         "--device",
-        "cpu",
+        device,
         "--model",
         str(model_dir),
         "--rank",
@@ -163,8 +169,6 @@ def _run_driver(
         "16",
         "--eval-seqs",
         "16",
-        "--probe-batches",
-        "1",
         "--out",
         str(out_dir),
         "--checkpoint-dir",

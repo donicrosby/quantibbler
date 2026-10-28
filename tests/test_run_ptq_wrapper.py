@@ -45,8 +45,6 @@ _KNOBS = (
     "FACTOR_MODE",
     "ABLATION",
     "LAYER_SCOPE",
-    "PAPER_FAITHFUL",
-    "STE_FLIP_PASS_BUDGET",
     "COMPUTE_DTYPE",
     "IMAGE",
     "GPU",
@@ -309,31 +307,19 @@ def test_dry_run_announces_nothing_it_need_not_and_the_advisories_it_must():
     assert "SEQ_LEN=512 is a diagnostic geometry" in default.stderr
     assert "rank=8 solver=admm seq_len=512" in default.stderr
     assert "run-ptq-container: model=" not in default.stdout
-    # A launch that does not claim paper fidelity is not running the paper's
-    # method (gate-shaped stage budgets, TuneFP at one step): the wrapper says
-    # so, and the flag never reaches the command line unasked.
-    assert "PAPER_FAITHFUL unset" in default.stderr
+    # The fidelity claim left the launcher entirely: the report computes the
+    # verdict from the declared config, so there is nothing here to announce,
+    # record, or pass through.
+    assert "PAPER_FAITHFUL" not in default.stderr
     assert "'--paper-faithful'" not in default.stdout
-    assert "paper_faithful=0 ste_flip_pass_budget=0" in default.stderr
+    assert "paper_faithful" not in default.stderr
+    assert "ste_flip_pass_budget" not in default.stderr
 
-    # The claimable split run: eval geometry, tune window AND the paper-faithful
-    # claim all chosen -> silent.
-    split = _launch(
-        RANK="512", SOLVER="svd", SEQ_LEN="2048", TUNE_SEQ_LEN="512", PAPER_FAITHFUL="1"
-    )
+    # The resolvable split run: eval geometry AND tune window chosen -> silent.
+    split = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048", TUNE_SEQ_LEN="512")
     assert split.returncode == 0
     assert "note:" not in split.stderr, split.stderr
     assert "rank=512 solver=svd seq_len=2048" in split.stderr
-    assert "paper_faithful=1" in split.stderr
-    assert "'--paper-faithful'" in split.stdout
-
-    # The discrete flip pass is a STRICT PASSTHROUGH: unset means the driver's
-    # own default, set means the flag and its value reach the driver.
-    flip = _launch(STE_FLIP_PASS_BUDGET="4")
-    assert flip.returncode == 0, flip.stderr
-    assert "'--ste-flip-pass-budget' '4'" in flip.stdout
-    assert "ste_flip_pass_budget=4" in flip.stderr
-    assert "'--ste-flip-pass-budget'" not in default.stdout
 
     # The OOM-shaped launch is ANNOUNCED, not refused: seq 2048 with the tune
     # window left unset is the geometry that died at the ceiling, so the wrapper
@@ -342,6 +328,29 @@ def test_dry_run_announces_nothing_it_need_not_and_the_advisories_it_must():
     assert oom.returncode == 0, oom.stderr
     assert "SEQ_LEN=2048 with TUNE_SEQ_LEN unset" in oom.stderr
     assert "rank=512 solver=svd seq_len=2048" in oom.stderr
+
+
+def test_the_measurement_knobs_reach_the_container_as_environment():
+    """`FACTOR_MODE`/`ABLATION`/`LAYER_SCOPE` are env pass-throughs, not argv.
+
+    The driver parser no longer accepts them: they are measurement surface a
+    human never writes, so they travel as QK_* container environment. Set means
+    the value reaches the container; unset means an EMPTY value, which the driver
+    reads as unset — never a wrapper-chosen geometry.
+    """
+    set_run = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048", FACTOR_MODE="fp")
+    assert set_run.returncode == 0, set_run.stderr
+    assert "'-e' 'QK_FACTOR_MODE=fp'" in set_run.stdout
+    assert "'--factor-mode'" not in set_run.stdout
+
+    default = _launch(RANK="512", SOLVER="svd", SEQ_LEN="2048")
+    assert default.returncode == 0, default.stderr
+    # Empty is how "unset" is spelled, and it is spelled for all three: the
+    # launcher never authors an ablation mode or a scope.
+    for knob in ("QK_FACTOR_MODE", "QK_ABLATION", "QK_LAYER_SCOPE"):
+        assert f"'-e' '{knob}='" in default.stdout, (knob, default.stdout)
+    assert "'--ablation'" not in default.stdout
+    assert "'--layer-scope'" not in default.stdout
 
 
 def test_scn_seam_oracle_is_dry_run_rc(monkeypatch):

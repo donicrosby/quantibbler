@@ -27,11 +27,11 @@ import pytest
 from quantibbler import qk_report as R
 
 #: One real payload per REQUIRED stage, trimmed from a real driver run's
-#: ``quantize_report.json`` ``stages`` (tiny Qwen3 fixture, ``--paper-faithful``
+#: ``quantize_report.json`` ``stages`` (tiny Qwen3 fixture, the paper regime
 #: with ``--checkpoint-dir`` set). Trimmed, not invented: the keys are what the
 #: emitters always send, which is the contract the reader enforces, and the
 #: values are the shape a faithful run really records (``polish_rounds`` 0 is
-#: what the paper-faithful path records — the polish is off).
+#: what the paper-regime path records — the polish is off).
 _REAL_PAYLOADS: dict[str, dict] = {
     "phase1_statistics": {
         "linears": ["layers.0.inner.self_attn.q_proj"],
@@ -135,6 +135,20 @@ def test_every_inventory_stage_has_a_journal_payload_shape():
         assert R._STAGE_PAYLOAD_KEYS[key], f"required stage {key!r} has an empty payload shape"
 
 
+#: A declared config that IS the paper regime: the verdict is computed from the
+#: declaration, so a green-label test has to declare one.
+_PAPER_REGIME_CONFIG = {
+    "solver": "admm",
+    "compute_dtype": "bf16",
+    "factor_mode": "binary",
+    "ablation": "none",
+    "layer_scope": "all",
+    "admm_iter": 400,
+    "rho_end": 1.0,
+    "device": "cuda",
+}
+
+
 def test_the_verdict_alone_blesses_a_name_only_record():
     """The MOTIVATION for the gate, pinned where it is visible.
 
@@ -148,7 +162,7 @@ def test_the_verdict_alone_blesses_a_name_only_record():
     delete it.
     """
     names_only = _name_only_records()
-    label, conditions = R.fidelity_verdict("admm", [], names_only, requested=True)
+    label, conditions = R.fidelity_verdict("admm", [], names_only, config=_PAPER_REGIME_CONFIG)
     assert label is True
     assert all(conditions.values()), conditions
     # The JOURNAL form of those same names is `(event, {})` — nothing to attest
@@ -180,7 +194,7 @@ def test_a_real_record_from_every_required_stage_validates_as_one_run():
     """The whole inventory at once: what a resumed run's journal must contain."""
     records = [{"event": key, "info": dict(_REAL_PAYLOADS[key])} for key in _REAL_PAYLOADS]
     parsed = [R.stage_journal_record(record) for record in records]
-    label, conditions = R.fidelity_verdict("admm", [], parsed, requested=True)
+    label, conditions = R.fidelity_verdict("admm", [], parsed, config=_PAPER_REGIME_CONFIG)
     assert label is True
     assert all(conditions.values()), conditions
 

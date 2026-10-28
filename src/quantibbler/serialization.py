@@ -186,6 +186,14 @@ class QuantizeReport(ArtifactModel):
     effective_bpw: float | None = None
     qpk1_layer_bytes: int | None = None
     artifact_exported: bool | None = None
+    #: The COMPUTED fidelity verdict, reported by every exit path the driver
+    #: writes (completion, probe abort, stage failure) and never a
+    #: self-assertion: it is derived from the run's declared config against the
+    #: paper regime, so there is no request flag and no "was it asked for"
+    #: state to carry. Still optional in the SCHEMA because this model is a
+    #: permissive reader — an artifact written before the verdict existed (or a
+    #: hand-built partial payload) must load rather than refuse — while every
+    #: report this build emits carries it.
     paper_faithful: bool | None = None
     wall_seconds: float | None = None
     report_error: str | None = None

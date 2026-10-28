@@ -3,7 +3,79 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import Any
+
+#: The paper-regime config fields, in report order: `("solver",
+#: "compute_dtype", "factor_mode", "ablation", "layer_scope", "admm_iter",
+#: "rho_end", "device")`.
+#:
+#: ONE list. The verdict's `config_*` conditions, the CI referee's re-derivation
+#: of the conjunction, and the runtime gates' regime test all read this tuple and
+#: :func:`paper_regime_conditions` rather than a second hand-kept name list — a
+#: copy of the field set is how a ninth regime field silently loses its
+#: condition. The values [NQ] App. C prescribes are the predicates below.
+PAPER_REGIME_CONFIG_FIELDS: tuple[str, ...] = (
+    "solver",
+    "compute_dtype",
+    "factor_mode",
+    "ablation",
+    "layer_scope",
+    "admm_iter",
+    "rho_end",
+    "device",
+)
+
+
+def paper_regime_conditions(config: Any) -> dict[str, bool]:
+    """The eight ``config_*`` conditions for one declared-config mapping.
+
+    The label is computed against the config the run DECLARED — the machine
+    checks the config, the user never asserts it — so this is where the
+    declared-vs-paper comparison lives, as data rather than as a boolean baked
+    into the caller.
+
+    ``config`` is a mapping of the fields named by
+    :data:`PAPER_REGIME_CONFIG_FIELDS`; anything else (``None``, a partial
+    record, a field of the wrong type) is a DEVIATION, never a pass. An
+    unlabelled config must not happen to satisfy the regime: absence of a
+    declaration is not a declaration of the regime's value.
+
+    ``device`` is the device the run actually resolved to, so ``"cpu"`` is the
+    one value that denies it — an unset/unknown device denies too (nothing was
+    labelled), while ``"cuda"``/``"cuda:0"`` satisfy it. ``rho_end`` is the
+    run's effective endpoint: the interval is the live spec's, and a value that
+    is not a number is a deviation rather than a crash.
+    """
+    fields = config if isinstance(config, Mapping) else {}
+    rho_end = fields.get("rho_end")
+    try:
+        rho_in_interval = 0.0 <= float(rho_end) <= 1.0
+    except (TypeError, ValueError):
+        rho_in_interval = False
+    device = fields.get("device")
+    return {
+        "config_solver_is_admm": fields.get("solver") == "admm",
+        "config_compute_dtype_is_bf16": fields.get("compute_dtype") == "bf16",
+        "config_factor_mode_is_binary": fields.get("factor_mode") == "binary",
+        "config_ablation_is_none": fields.get("ablation") == "none",
+        "config_layer_scope_is_all": fields.get("layer_scope") == "all",
+        "config_admm_iter_matches_regime": fields.get("admm_iter") == 400,
+        "config_admm_rho_end_matches_regime": rho_in_interval,
+        "config_device_is_accelerator": (
+            isinstance(device, str) and bool(device) and device.lower() != "cpu"
+        ),
+    }
+
+
+def config_matches_paper_regime(config: Any) -> bool:
+    """The config-match conjunction, over a declared-config mapping.
+
+    The runtime gates and the CI referee both ask this one question, so the
+    answer cannot differ between the stage that runs and the script that audits:
+    a run that matches the regime on every declared field IS a paper-regime run.
+    """
+    return all(paper_regime_conditions(config).values())
 
 
 def _stage_pair(entry: Any) -> tuple[Any, Any]:
@@ -26,19 +98,22 @@ def fidelity_conditions(
     runtime_deviations: Any,
     stages: Any,
     *,
-    requested: Any,
+    config: Any,
     stage_failure: bool = False,
 ) -> dict[str, bool]:
     """The named conditions behind the ``paper_faithful`` verdict.
 
     The reported label is a COMPUTED verdict, never a forwarded flag
     (scenarios ``label_flips_on_runtime_deviations`` /
-    ``label_flips_on_mechanism_deviations``): it is the flag AND an empty
-    deviation list AND no mechanism-class deviation AND evidence that every
-    required stage actually executed, and every condition is recorded so a
-    reader can audit the label from the artifact alone. The mechanism list
-    mirrors the spec exactly — greedy-polish rounds, a fired STE discrete flip
-    pass, a STE scale-only re-scope marker, a vacuous-teacher event, a stage
+    ``label_flips_on_mechanism_deviations``): it is the declared config's match
+    against the paper regime AND an empty deviation list AND no
+    mechanism-class deviation AND evidence that every required stage actually
+    executed, and every condition is recorded so a reader can audit the label
+    from the artifact alone. ``config`` is the declared-config mapping
+    :func:`paper_regime_conditions` reads — one condition per regime field, so a
+    deviating config names the field it deviates on instead of denying the label
+    anonymously. The mechanism list mirrors the spec exactly — greedy-polish
+    rounds, a STE scale-only re-scope marker, a vacuous-teacher event, a stage
     failure, and a solver other than LB-ADMM.
 
     Required-stage execution (scenario
@@ -64,6 +139,10 @@ def fidelity_conditions(
     not deviations, and no condition here reads them.
     """
     polish_rounds = 0
+    # The discrete sign-flip mechanism is deleted, so no STE row can carry the
+    # key this reads -- the condition below is satisfied by construction. The
+    # read stays as the tripwire for an emitter that re-enters the vocabulary:
+    # a key nobody can write today is exactly what a canary must still see.
     flip_pass = False
     rescope = False
     vacuous = False
@@ -97,7 +176,6 @@ def fidelity_conditions(
         elif event == "tune_fp_vacuous_teacher":
             vacuous = True
     conditions = {
-        "paper_faithful_flag": bool(requested),
         "no_runtime_deviations": not bool(runtime_deviations),
         "polish_off": polish_rounds == 0,
         "no_discrete_flip_pass": not flip_pass,
@@ -118,6 +196,8 @@ def fidelity_conditions(
         "no_stage_failure": not bool(stage_failure),
         "solver_is_admm": solver == "admm",
     }
+    # The declared-config half of the verdict, one condition per regime field.
+    conditions.update(paper_regime_conditions(config))
     for key, _lines, _description, _deviation, required in _STAGE_LINES:
         if required:
             conditions[f"required_{key}_executed"] = executions.get(key, 0) > 0
@@ -129,7 +209,7 @@ def fidelity_verdict(
     runtime_deviations: Any,
     stages: Any,
     *,
-    requested: Any,
+    config: Any,
     stage_failure: bool = False,
 ) -> tuple[bool, dict[str, bool]]:
     """``(label, conditions)`` for a run — the label is the conjunction.
@@ -142,7 +222,7 @@ def fidelity_verdict(
         solver,
         runtime_deviations,
         stages,
-        requested=requested,
+        config=config,
         stage_failure=stage_failure,
     )
     return all(conditions.values()), conditions
@@ -194,8 +274,7 @@ _STAGE_LINES: tuple[tuple[str, str, str, str | None, bool], ...] = (
         "optimizer, one block-output loss) -- a DECLARED deviation from "
         'Algorithm 1 line 19\'s "the current target linear layer" prose; the '
         "[NQ] App. C factorized-stage budget is consumed once for the whole "
-        "block; the bounded discrete flip pass is a named deviation when its "
-        "budget is nonzero",
+        "block",
         True,
     ),
     ("sign_extract_pack", "20-23", "sign extraction and packing", None, True),
@@ -414,6 +493,9 @@ def stage_map(stages: list) -> dict:
             "row_time_s": times.get(key, {}).get("row_time_s"),
         }
     out["tune_fp"]["vacuous_events"] = counts.get("tune_fp_vacuous_teacher", 0)
+    # Schema compatibility, never a live reading: the mechanism that emitted
+    # `flip_pass` is deleted, so this key stays in the schema for readers that
+    # know it and can only ever be False.
     out["ste"]["discrete_flip_pass"] = any(
         isinstance(info, dict)
         and any(

@@ -137,6 +137,10 @@ def _run_driver(
     env["QKB_LAUNCH_OWNER"] = "pytest"
     env["HF_HUB_CACHE"] = str(corpus_root)
     env["QUANTIBBLER_BREADCRUMBS"] = str(out_dir / "breadcrumbs.log")
+    # The probe's batch count is lane instrumentation and env-owned: this suite
+    # wants the probe cheap, which is a choice the driver no longer exposes on
+    # its operator surface.
+    env["QK_PROBE_BATCHES"] = "1"
     # The KD teacher-logit cache needs a directory that EXISTS
     # (`tempfile.TemporaryDirectory` does not create parents), and this test must
     # not inherit the host's scratch dir: the driver's default was the sandbox
@@ -167,8 +171,6 @@ def _run_driver(
         "8",
         "--eval-seqs",
         "16",
-        "--probe-batches",
-        "1",
         "--out",
         str(out_dir),
         "--checkpoint-dir",
@@ -213,33 +215,37 @@ def test_compute_dtype_flag_is_live_and_reaches_the_solve(
 
 
 @pytest.mark.parametrize(
-    ("flag", "value"),
+    ("knob", "value"),
     [
-        ("--probe-interval", "0"),
-        ("--probe-interval", "-2"),
-        ("--probe-batches", "0"),
+        ("QK_PROBE_INTERVAL", "0"),
+        ("QK_PROBE_INTERVAL", "-2"),
+        ("QK_PROBE_BATCHES", "0"),
+        ("QK_PROBE_INTERVAL", "abc"),
+        ("QK_PROBE_BATCHES", "1.5"),
     ],
 )
-def test_probe_knobs_reject_non_positive_values_at_parse_time(flag, value, tmp_path):  # noqa: ANN001
-    """`probe_knob_defaults_and_validation`, runtime half: exit 2, not a clamp.
+def test_scn_probe_non_integer_rejected(knob, value, tmp_path):  # noqa: ANN001
+    """`probe_non_integer_rejected` + `probe_knob_defaults_and_validation`.
 
-    Parsing happens before the model is touched, so this needs no fixture —
-    and that is the point: a bad knob can never be silently absorbed as
-    "the probe just did not run".
+    Runtime half: a non-positive or non-integer probe knob refuses at STARTUP
+    naming the value, rather than being clamped into "the probe just did not
+    run". It happens before the model is touched, so this needs no fixture.
     """
     proc = subprocess.run(
-        [sys.executable, str(DRIVER), flag, value, "--out", str(tmp_path / "out")],
+        [sys.executable, str(DRIVER), "--out", str(tmp_path / "out")],
         cwd=REPO_ROOT,
+        env={**os.environ, "QKB_LAUNCH_OWNER": "pytest", knob: value},
         capture_output=True,
         text=True,
         timeout=300,
     )
-    assert proc.returncode == 2, (proc.returncode, proc.stdout[-2000:], proc.stderr[-2000:])
-    assert "expected a positive integer" in proc.stderr, proc.stderr[-2000:]
+    assert proc.returncode != 0, (proc.returncode, proc.stdout[-2000:])
+    assert knob in proc.stderr and value in proc.stderr, proc.stderr[-2000:]
+    assert "positive integer" in proc.stderr, proc.stderr[-2000:]
 
 
-def test_driver_help_exposes_the_two_knobs_and_no_threshold_flag():
-    """The knobs are documented; the abort line is not a flag at all."""
+def test_scn_probe_knobs_absent_from_help():
+    """The probe knobs are lane instrumentation: no operator surface exposes them."""
     proc = subprocess.run(
         [sys.executable, str(DRIVER), "--help"],
         cwd=REPO_ROOT,
@@ -248,8 +254,8 @@ def test_driver_help_exposes_the_two_knobs_and_no_threshold_flag():
         timeout=300,
     )
     assert proc.returncode == 0, proc.stderr[-2000:]
-    assert "--probe-interval" in proc.stdout
-    assert "--probe-batches" in proc.stdout
+    for knob in ("--probe-interval", "--probe-batches"):
+        assert knob not in proc.stdout, f"{knob} is back on the operator surface"
     for banned in ("probe-line", "probe-threshold", "abort-line", "collapse-line", "probe-limit"):
         assert banned not in proc.stdout, f"{banned} is a threshold override in disguise"
 

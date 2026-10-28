@@ -433,5 +433,65 @@ None at spec time. Implementation may surface:
 
 ## Implementation crystallization
 
-To be filled by the implementer — decisions made during coding that the spec
-left open, and any flag whose removal uncovered an unexpected dependency.
+### 2026-10-27 — implementation
+
+The spec left four things open that coding had to settle. Each is recorded here
+so it is not re-litigated, and each names the alternative it rules out.
+
+**C1. The regime's `device` axis is a DECLARED field on `PTQConfig`, not an env
+read at the gate.** The conjunction includes `device != "cpu"`, so the four
+runtime gates (which only ever see a `PTQConfig`) need the device where they
+run. The alternatives were (a) reading `QUANTIBBLER_DEVICE` at each gate, which
+makes the verdict depend on process state a config cannot carry and leaves three
+resolvers to drift, and (b) a ninth condition that re-derives the device from
+the tensors, which is not a config fact at all. `PTQConfig.device` (default
+`"cpu"`, so a defaults-only unit fixture is NOT a regime run) is declared by the
+driver from `--device`; the resolved device still travels separately in
+`provenance.solver_device`, and the report records the DECLARED value in
+`fidelity_config`, so the declaration and the placement are each named once.
+Consequence worth stating: **on a CPU-only host no driver run can match the
+regime** — an explicit `--device cpu` is itself a deviation — so the paper-regime
+integration leg is a GPU-host leg and skips with a named reason elsewhere.
+
+**C2. `rho_end` in the conjunction is the config field, and the driver writes
+the EFFECTIVE endpoint onto it.** `QK_RHO_END` is a solve-time override, so a
+conjunction reading only the field could bless a run whose solver used an
+out-of-range endpoint. The driver resolves it once (the same helper the solver
+calls) and passes it into `quantized_config`, so the config the gates read and
+the endpoint the solver uses are the same number. Residual, named: a DIRECT API
+caller that sets `QK_RHO_END` out of range and never sets the field is not seen
+by the conjuction; the driver launch path is.
+
+**C3. tasks.md 8.2's "(always present, no longer optional)" is implemented as
+semantics, not as a pydantic tightening.** `QuantizeReport.paper_faithful` stays
+`bool | None = None`. Making it a required field would make
+`dump_report`'s validator refuse a partial payload, which is pinned behaviour:
+`tests/test_qk_report_resume.py::test_a_report_written_before_the_record_existed_still_parses`
+asserts that a legacy report with no such key still loads (`faithful is True`).
+The repurpose the row asks for IS in: the field is documented as the COMPUTED
+verdict, every exit path this build writes carries it, and both facts are now
+pinned (`test_scn_no_request_flag_anywhere`, the driver legs' condition-set
+assertions). Tightening the schema would have traded a named back-compat
+contract for a type annotation the spec delta does not require.
+
+**C4. The surviving-flags table omitted two flags; both survive, with operator
+help.** `--gpu-memory-gb` and `--device-audit` are in the parser but absent from
+design.md's "complete surviving set". Audited by the same two-level test: an
+absolute per-process GPU memory cap is a real operator knob on a co-tenant host
+(the fraction alone can still drain it), and a fail-closed device auditor is
+what an operator debugging a device mismatch runs. Cutting a flag without a
+per-flag justification is the failure this change exists to remove, so both stay
+and the table in this document should gain them.
+
+Two mechanical consequences of the re-anchoring, both measured in this landing:
+
+- Every fixture that exercised the old `paper_faithful=True` path now stubs the
+  regime verdict instead, patched on the module that HOLDS the call site
+  (`ptq._block_stage`, `ptq._tuning`). Those legs run in the NumPy/float64
+  parity tier, where bf16-on-an-accelerator cannot be declared, so the verdict
+  is stated rather than reproduced; the verdict itself is covered by the report
+  tests (both directions of every axis) and by the driver legs.
+- `report_checks.stage_evidence_findings` now re-derives the conjunction from
+  the report's `fidelity_config` via the shared predicate, so a report that
+  cannot name its declaration cannot turn the effect floor on — the same
+  fail-closed shape the old `paper_faithful_flag` read had.

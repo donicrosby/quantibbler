@@ -25,7 +25,7 @@ from .config import PTQConfig
 #: (1024, 2048, 3072), so ``act(gate(x)) * up(x)`` alone requires TWO 12 GiB
 #: intermediates live at once -- 24 GiB, plus the 4 GiB capture and a 4 GiB
 #: clone, against a 32 GiB container cap. That is what killed the first
-#: paper-faithful run: dmesg anon-rss 33,480,244kB = 99.8% of the cap, a
+#: full-regime run: dmesg anon-rss 33,480,244kB = 99.8% of the cap, a
 #: one-window spike no polling watchdog can catch.
 #:
 #: Chunking bounds the peak by ``chunk_rows`` instead of by capture geometry --

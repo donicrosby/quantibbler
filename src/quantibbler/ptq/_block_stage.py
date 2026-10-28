@@ -37,7 +37,7 @@ from ._stats import (
     _scope_filter,
     _weights_fingerprint,
 )
-from ._ste import _discrete_flip_pass, _tune_latent_ste
+from ._ste import _tune_latent_ste
 from ._tuning import STE_JOINT_SCOPE, STE_RESCOPE_MARKER, TUNE_FP_LOSS_MARKER, _tune_fp
 from .accumulation import (
     accumulation_np_dtype,
@@ -47,7 +47,7 @@ from .accumulation import (
 )
 from .bit_polish import greedy_polish
 from .calibration import LayerStatsBook, collect_stats, robust_diag
-from .config import PTQConfig
+from .config import PTQConfig, config_matches_paper_regime
 from .lb_admm import lb_admm, magnitude_balance
 from .solver_backend import solver_backend_provenance, to_host_np
 
@@ -270,14 +270,16 @@ def reconstruct_block(
     # storage contract needs.
     _compute_dtype_torch = torch_dtype(cfg.compute_dtype)
     # Which stages this run carries (D-2/D-3). ``polish`` is the greedy bit-flip
-    # stage: it is inherently discrete, so only a full binary run performs it.
+    # stage: it is inherently discrete, so only a full binary run performs it,
+    # and only when the run is NOT the paper regime — the regime test replaces
+    # the self-asserted fidelity flag, so "is this the paper's run" is now read
+    # off the declared config rather than claimed by the launcher.
     # ``refine`` is TuneLatentSTE — ``untuned-signs`` skips it by definition
     # (zero refinement is the ablation's content), while ``fp`` keeps it on
     # continuous latents so the ONLY difference from a binary run is the
     # discretization.
-    polish = (
-        cfg.factor_mode == "binary" and cfg.ablation != "untuned-signs" and not cfg.paper_faithful
-    )
+    paper_regime = config_matches_paper_regime(cfg)
+    polish = cfg.factor_mode == "binary" and cfg.ablation != "untuned-signs" and not paper_regime
     refine = cfg.ablation != "untuned-signs"
     facs: dict[str, FactorizedLinear] = {}
     linears_by_name = dict(quantizable_linears)
@@ -620,43 +622,26 @@ def reconstruct_block(
         for name, fac in facs.items():
             per = ste_stats["per_linear"][name]
             linear = linears_by_name[name]
-            if cfg.paper_faithful:
+            if paper_regime:
                 # The paper's Stage 2 -> 3 mechanism, to the letter: STE on
                 # the continuous latents for the full budget, then sign+pack
                 # whatever signs result (Algorithm 1 lines 20-23). A
                 # zero-crossing outcome IS the paper's outcome — a
-                # measurement, not a re-scope — so neither the bounded
-                # discrete flip pass nor the scale-only declaration fire on
-                # this path. The measured count travels in the record.
+                # measurement, not a re-scope — so the scale-only declaration
+                # does not fire on this path. The measured count travels in
+                # the record.
                 per["declared"] = "paper_ste"
             elif per["zero_crossings"]:
-                # Diagnostic path only: no continuous sign crossing, so fall
-                # back to the bounded discrete flip pass (design alt. 3, an
-                # explicit deviation), and if that also accepts nothing,
-                # declare the linear scale-only under the greppable re-scope
-                # marker. A silent zero-flip completion is impossible here.
-                flip = _discrete_flip_pass(
-                    block,
-                    linear,
-                    name,
-                    fac,
-                    x_b,
-                    y_b,
-                    budget=cfg.ste_flip_pass_budget,
-                    factor_mode=cfg.factor_mode,
-                )
-                per["flip_pass"] = flip
-                if flip["accepted_u"] + flip["accepted_v"] > 0:
-                    per["declared"] = "discrete_flip_pass"
-                else:
-                    per["declared"] = "scale_only"
-                    per["rescope_marker"] = STE_RESCOPE_MARKER
+                # Diagnostic path only: the continuous refinement produced no
+                # sign crossing, so the linear is declared scale-only under the
+                # greppable re-scope marker. There is no discrete fallback
+                # behind it: a silent zero-flip completion is impossible here
+                # because this declaration is the alternative.
+                per["declared"] = "scale_only"
+                per["rescope_marker"] = STE_RESCOPE_MARKER
             else:
                 per["declared"] = "paper_ste"
             per["scheduled_steps"] = int(total_ste)
-            # Re-freeze after the ladder: a flip pass mutated this linear's
-            # latents while judging them, and every later block's capture reads
-            # the module, never the record.
             _set_linear(linear, fac, factor_mode=cfg.factor_mode)
             ste_records[name] = per
         if recorder is not None:

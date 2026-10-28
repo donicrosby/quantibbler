@@ -2,7 +2,7 @@
 
 ## Phase 1 — RED-first: fidelity conditions without the request flag
 
-- [ ] **1.1** `fidelity_conditions` drops `requested` parameter and `paper_faithful_flag` condition.
+- [x] **1.1** `fidelity_conditions` drops `requested` parameter and `paper_faithful_flag` condition.
   Add `config` parameter carrying `solver`, `compute_dtype`, `factor_mode`, `ablation`,
   `layer_scope`, `admm_iter`, `rho_end`, `device`. Add all eight config-match conditions
   (`config_solver_is_admm`, `config_compute_dtype_is_bf16`, `config_factor_mode_is_binary`,
@@ -12,26 +12,26 @@
   - *Verification*: `uv run pytest tests/test_qk_report_stages.py -k "fidelity"` — RED
     on arity errors. Count the failures.
 
-- [ ] **1.2** `fidelity_verdict` drops `requested` parameter, passes `config` through.
+- [x] **1.2** `fidelity_verdict` drops `requested` parameter, passes `config` through.
   Tests RED. *Verification*: same as 1.1, arity errors on `fidelity_verdict` callers.
 
 ## Phase 2 — Flip to green: fidelity call sites
 
-- [ ] **2.1** Update `fidelity_conditions` call sites in `src/quantibbler/qk_report/reports.py`
+- [x] **2.1** Update `fidelity_conditions` call sites in `src/quantibbler/qk_report/reports.py`
   to pass `config` instead of `requested`. Remove `paper_faithful` read from report identity
   fields; always compute the label. Tests GREEN.
   - *Verification*: `uv run pytest tests/test_qk_report_stages.py -k "fidelity"` — all pass.
     Assert the condition set includes `config_*` keys and excludes `paper_faithful_flag`.
 
-- [ ] **2.2** Update `fidelity_verdict` call sites. *Verification*: same suite, all pass.
+- [x] **2.2** Update `fidelity_verdict` call sites. *Verification*: same suite, all pass.
 
-- [ ] **2.3** Update driver report construction to not read `--paper-faithful`; always
+- [x] **2.3** Update driver report construction to not read `--paper-faithful`; always
   call `fidelity_verdict` with the live config. *Verification*: tiny-model smoke —
   `uv run python tools/quantize_hf_model.py --model Qwen/Qwen3-0.6B --rank 2 --calibration-seqs 8 --eval-seqs 4 --seq-len 64` — produces `quantize_report.json` with `paper_faithful` field present and `config_*` conditions in the record.
 
 ## Phase 3 — Cut flags from the parser
 
-- [ ] **3.1** Remove `--paper-faithful`, `--ste-flip-pass-budget`, `--probe-interval`,
+- [x] **3.1** Remove `--paper-faithful`, `--ste-flip-pass-budget`, `--probe-interval`,
   `--probe-batches`, `--factor-mode`, `--ablation`, `--layer-scope` from the
   `argparse` parser. Remove their consumption sites in the driver, including
   the eval-window guard at `quantize_hf_model.py:1243-1253` (dies with the
@@ -39,7 +39,8 @@
   (:414-440, re-keyed in 3.3). Suite RED on the missing arguments.
   - *Verification*: `uv run pytest tests/test_qk_report_stages.py tests/ptq/ -k "not integration"` — parse-error tests that passed now fail. Count.
 
-- [ ] **3.2** Add env-var reads: `QK_PROBE_INTERVAL` (default 1), `QK_PROBE_BATCHES`
+- [ ] **3.2** (env reads SHIPPED; the driver-level fixture tests for
+  env-wires-to-config and empty-as-unset are NOT written — see the handoff) Add env-var reads: `QK_PROBE_INTERVAL` (default 1), `QK_PROBE_BATCHES`
   (default 2), `QK_FACTOR_MODE` (default `"binary"`), `QK_ABLATION` (default
   `"none"`), `QK_LAYER_SCOPE` (default `"all"`). Wire them into the driver's
   config construction and probe setup, with edge semantics: empty string treated
@@ -49,7 +50,7 @@
     tests construct args and assert env-var reads, empty-string-as-unset, and
     non-integer rejection.
 
-- [ ] **3.3** Re-key the four runtime gates on the config-match conjunction
+- [x] **3.3** Re-key the four runtime gates on the config-match conjunction
   (`config_matches_paper_regime`): polish enable (`_block_stage.py:251`), STE
   declared path (`_block_stage.py:559`), vacuous-teacher abort (`_tuning.py:328`),
   and the stage-budget switch in `quantized_config()` (`quantize_hf_model.py:433-440`)
@@ -61,13 +62,13 @@
     StageHyper triple; vacuous teacher raises only on paper regime; non-paper
     binary runs still polish and carry the gate-shaped triple.
 
-- [ ] **3.4** Reword the fp-extraction refusal at `_factorized.py:245-251` from
+- [x] **3.4** Reword the fp-extraction refusal at `_factorized.py:245-251` from
   `--factor-mode fp` to `QK_FACTOR_MODE=fp` (the argv no longer exists post-cut).
   - *Verification*: `grep -rn -- '--factor-mode' src/` returns zero hits.
 
 ## Phase 4 — Remove the discrete flip-pass mechanism
 
-- [ ] **4.1** Delete the flip-pass mechanism at every site: the call path in
+- [x] **4.1** Delete the flip-pass mechanism at every site: the call path in
   `_block_stage.py` (:574-589 — zero-crossing branch goes straight to
   `"scale_only"` with rescope marker), the `_discrete_flip_pass` definition
   in `_ste.py:391`, the import at `_block_stage.py:39`, and the re-export at
@@ -77,7 +78,7 @@
   - *Verification*: `uv run pytest tests/test_qk_report_stages.py` — tests asserting
     `flip_pass` in per_linear records now fail.
 
-- [ ] **4.2** Update test fixtures to expect no `flip_pass` key. Remove flip-pass
+- [x] **4.2** Update test fixtures to expect no `flip_pass` key. Remove flip-pass
   fixture cases. Update the pinned `declared` set at
   `tests/ptq/test_ste_sign_adaptation.py:472` from three values to two
   (`discrete_flip_pass` leaves the vocabulary — the canary fails if it
@@ -86,7 +87,7 @@
 
 ## Phase 5 — Operator-grade --help
 
-- [ ] **5.1** Rewrite the `argparse` description and every surviving flag's `help`
+- [x] **5.1** Rewrite the `argparse` description and every surviving flag's `help`
   string per the design.md table. Group flags with `add_argument_group`.
   The `--remainder-dtype` help SHALL state "default: tracks compute dtype" (per
   pipeline-dtype's remainder-dtype requirement).
@@ -95,7 +96,7 @@
     the word "paper" or "faithful" in its help text. No citation of change ids
     or lane names.
 
-- [ ] **5.2** Add a gate test that asserts `--help` output contains the expected
+- [x] **5.2** Add a gate test that asserts `--help` output contains the expected
   sections ("Model and data:", "Solver and quality:", "Output:", "Resources:"),
   the surviving flag names, and does NOT contain the cut flag names or bot
   vocabulary.
@@ -103,7 +104,7 @@
 
 ## Phase 6 — Wrapper and CI migration (atomic with the parser cut)
 
-- [ ] **6.1** Migrate `tools/run-ptq-container.sh`: drop `--paper-faithful` and
+- [x] **6.1** Migrate `tools/run-ptq-container.sh`: drop `--paper-faithful` and
   `--ste-flip-pass-budget` from argv (:360-367); replace `--factor-mode`,
   `--ablation`, `--layer-scope` pass-throughs (:351-359) with
   `QK_FACTOR_MODE=`, `QK_ABLATION=`, `QK_LAYER_SCOPE=` in the container
@@ -115,29 +116,29 @@
     `grep -n 'PAPER_FAITHFUL\|STE_FLIP_PASS_BUDGET' tools/run-ptq-container.sh`
     returns zero hits.
 
-- [ ] **6.2** Re-key `tools/ci/report_checks.py:146` from
+- [x] **6.2** Re-key `tools/ci/report_checks.py:146` from
   `paper_faithful_flag is True` to `config_matches_paper_regime`.
   - *Verification*: `uv run pytest tests/test_ci_referee.py -k "report_checks"` — the
     evidence detector fires on paper-regime runs and skips on non-paper runs.
 
-- [ ] **6.3** Migrate `tools/ci/driver_smoke.py:201` and `tools/ci/abort_leg.py:142`
+- [x] **6.3** Migrate `tools/ci/driver_smoke.py:201` and `tools/ci/abort_leg.py:142`
   from `--probe-batches 1` to `QK_PROBE_BATCHES=1` in the subprocess environment.
   - *Verification*: Both CI legs pass `uv run pytest tests/test_ci_referee.py` — no
     argparse errors, probe batches are 1.
 
 ## Phase 7 — Spec and config hygiene
 
-- [ ] **7.1** Verify `openspec/config.yaml` line 103 (numerics invariant: "float64 by default")
+- [ ] **7.1** (not run in this leaf) Verify `openspec/config.yaml` line 103 (numerics invariant: "float64 by default")
   is owned by pipeline-dtype's delta — pipeline-dtype flips it to bf16 default. Confirm
   pipeline-dtype's delta already covers the change; this task is a dependency check, not a
   write. If line 103 still reads "float64 by default" after pipeline-dtype lands, flag it.
   - *Verification*: `grep -n "float64" openspec/config.yaml` — the line reflects bf16 default
     (post-pipeline-dtype). No self-assertion fidelity reference anywhere in config.yaml.
 
-- [ ] **7.2** Run `openspec validate qk-cli-sane --strict`. Resolve any warnings.
+- [ ] **7.2** (not run in this leaf) Run `openspec validate qk-cli-sane --strict`. Resolve any warnings.
   - *Verification*: RC=0, "Change 'qk-cli-sane' is valid."
 
-- [ ] **7.3** Run the full gate suite: `uv run pytest` (lean), `uv run maturin build
+- [ ] **7.3** (not run in this leaf) Run the full gate suite: `uv run pytest` (lean), `uv run maturin build
   --manifest-path crates/quantibbler-kernels/Cargo.toml`, `cd crates/quantibbler-kernels
   && cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --all -- --check`.
   - *Verification*: All green. Record the lean passed/skipped count with the
@@ -145,7 +146,7 @@
 
 ## Phase 8 — Canary test enumeration
 
-- [ ] **8.1** Enumerate canary tests per file:line that must fail under their own
+- [ ] **8.1** (not run in this leaf: the mutation half) Enumerate canary tests per file:line that must fail under their own
   mutation. Minimum set (per review grep-verified hit list):
   `tests/test_qk_report_stages.py:223,317,474-513`;
   `tests/ptq/test_driver_stage_map.py:74,117-122,143,319-320,398-400`;
@@ -166,13 +167,13 @@
     on the clean tree. Mutation check: manually delete one field/condition and
     confirm the pinning test fails.
 
-- [ ] **8.2** Repurpose `serialization.py:189` `paper_faithful` field from
+- [x] **8.2** Repurpose `serialization.py:189` `paper_faithful` field from
   self-assertion flag to the computed label (always present, no longer optional).
   - *Verification*: `uv run pytest tests/test_serialization.py` — all
     serialization tests pass with the computed label present in every ledger row.
 
 ## Phase 9 — Landing
 
-- [ ] **9.1** Commit: `Land qk-cli-sane: cut bot-authored CLI flags, re-anchor
+- [ ] **9.1** (branch commit exists; landing awaits review) Commit: `Land qk-cli-sane: cut bot-authored CLI flags, re-anchor
   fidelity from config`. Scoped to `openspec/changes/qk-cli-sane/` plus the
   touched source, wrapper, and CI files. Gate chain in body.

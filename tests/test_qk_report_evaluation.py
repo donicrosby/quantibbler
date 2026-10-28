@@ -85,6 +85,20 @@ def test_full_block_coverage_still_is_not_a_paper_table_row():
     assert record["paper_table_comparable"] is False
 
 
+#: A declared config that IS the paper regime: the verdict is computed from the
+#: declaration, so a clean-label test has to declare one.
+_PAPER_REGIME_CONFIG = {
+    "solver": "admm",
+    "compute_dtype": "bf16",
+    "factor_mode": "binary",
+    "ablation": "none",
+    "layer_scope": "all",
+    "admm_iter": 400,
+    "rho_end": 1.0,
+    "device": "cuda",
+}
+
+
 def test_an_undersampled_eval_window_does_not_enter_the_method_verdict():
     """`evaluation_limit_does_not_masquerade_as_method_deviation`.
 
@@ -107,7 +121,7 @@ def test_an_undersampled_eval_window_does_not_enter_the_method_verdict():
     assert record["coverage_of_source_tokens"] < 0.3
     # The geometry check has no eval-coverage condition, by design.
     assert geometry_deviations(2048, 2048, 128) == []
-    label, conditions = fidelity_verdict("admm", [], _clean_stages(), requested=True)
+    label, conditions = fidelity_verdict("admm", [], _clean_stages(), config=_PAPER_REGIME_CONFIG)
     assert label is True
     assert "evaluation" not in conditions
     assert "eval_coverage" not in conditions
@@ -125,7 +139,7 @@ def test_non_completion_report_shapes_carry_the_evaluation_record():
         selection_seed=1,
         selection_fingerprint="0123456789abcdef",
     )
-    identity = dict(_ABORT_IDENTITY, paper_faithful=True, evaluation=record)
+    identity = dict(_ABORT_IDENTITY, fidelity_config=_PAPER_REGIME_CONFIG, evaluation=record)
     aborted = abort_report(_abort_exc(), dict(identity, probe={}), _ABORT_HISTORY)
     failure = stage_failure_report(
         SimpleNamespace(
@@ -148,7 +162,7 @@ def test_non_completion_report_shapes_carry_the_evaluation_record():
 def test_scn_label_requires_fp_stream_teacher_provenance():
     """Scenario ``label_requires_fp_stream_teacher_provenance`` (Phase-2 gated).
 
-    A ``paper_faithful`` label owes evidence that the teacher target came from the
+    A computed fidelity label owes evidence that the teacher target came from the
     FP-stream capture. Today no condition in the verdict can see a capture's stream
     provenance, so a run whose teacher read the COMPRESSED stream is labelled
     faithful -- the fidelity hole this closes.
@@ -181,7 +195,7 @@ def test_scn_label_requires_fp_stream_teacher_provenance():
 
     # --- positive control: every condition satisfied, fp-stream provenance -----
     baseline = _with_capture(teacher_source="fp", x_b_stream="fp", y_b_stream="fp")
-    label0, conds0 = R.fidelity_verdict("admm", [], baseline, requested=True)
+    label0, conds0 = R.fidelity_verdict("admm", [], baseline, config=_PAPER_REGIME_CONFIG)
     assert label0 is True, (
         "the positive control does not satisfy the verdict: "
         f"{sorted(k for k, v in conds0.items() if not v)}. Every sub-case below would "
@@ -189,9 +203,9 @@ def test_scn_label_requires_fp_stream_teacher_provenance():
     )
 
     # --- (a) capture carries no stream provenance at all ----------------------
-    label_a, conds_a = R.fidelity_verdict("admm", [], _with_capture(), requested=True)
+    label_a, conds_a = R.fidelity_verdict("admm", [], _with_capture(), config=_PAPER_REGIME_CONFIG)
     assert label_a is False, (
-        "a capture with no stream provenance was labelled paper_faithful; the label "
+        "a capture with no stream provenance was labelled faithful; the label "
         "must require evidence that the teacher came from the fp stream"
     )
     assert any("stream" in n for n in conds_a), (
@@ -200,7 +214,7 @@ def test_scn_label_requires_fp_stream_teacher_provenance():
 
     # --- (b) the capture explicitly came from the compressed stream -----------
     comp = _with_capture(teacher_source="compressed", x_b_stream="compressed")
-    label_b, conds_b = R.fidelity_verdict("admm", [], comp, requested=True)
+    label_b, conds_b = R.fidelity_verdict("admm", [], comp, config=_PAPER_REGIME_CONFIG)
     assert label_b is False, "a compressed-stream teacher capture was labelled faithful"
     assert any("stream" in n for n in conds_b), (
         f"no stream-aware condition exists in the verdict: {sorted(conds_b)}"
@@ -220,7 +234,7 @@ def test_scn_label_requires_fp_stream_teacher_provenance():
             y_b_stream="fp",
             deviation="dual_stream_teacher_target",
         ),
-        requested=True,
+        config=_PAPER_REGIME_CONFIG,
     )
     assert label_d is True, (
         "the documented dual-stream deviation flipped the label; a declared deviation "

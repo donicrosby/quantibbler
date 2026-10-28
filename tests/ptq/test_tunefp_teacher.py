@@ -13,7 +13,6 @@ archived run (bit-identical T0 on all 7 scoped linears, both families).
 """
 
 import ast
-import dataclasses
 import pathlib
 
 import numpy as np
@@ -154,7 +153,7 @@ def _recorder(sink: list) -> object:
 # --------------------------------------------------------------------------
 
 
-def test_scn_vacuous_teacher_carries_both_norms_and_invalidates_fidelity():
+def test_scn_vacuous_teacher_carries_both_norms_and_invalidates_fidelity(monkeypatch):
     """Broken teacher (grad 0 / residual 0) and detached student (grad 0 / residual > 0)."""
     d = 8
     x_b = torch.cat(_calib(d), dim=0)
@@ -221,8 +220,14 @@ def test_scn_vacuous_teacher_carries_both_norms_and_invalidates_fidelity():
         "zero_first_step_gradient"
     )
 
-    # (3) A run claiming paper fidelity fails closed instead of continuing.
-    faithful = dataclasses.replace(cfg, paper_faithful=True)
+    # (3) A paper-regime run fails closed instead of continuing. The regime
+    # verdict is stubbed: the conjunction requires bf16 compute on an
+    # accelerator and this is the NumPy/float64 parity fixture. Patched on the
+    # module that HOLDS the call site — the re-export would be inert.
+    from quantibbler.ptq import _tuning
+
+    monkeypatch.setattr(_tuning, "config_matches_paper_regime", lambda cfg: True)
+    faithful = cfg
     with pytest.raises(VacuousTeacherError, match="vacuous teacher"):
         _tune_fp(
             _TwoLinearBlock(d, seed=0),
