@@ -27,8 +27,9 @@ weight, counted from serialized bytes.
   interpreter.
 - **`quantibbler-kernels`** (Rust) — one kernel implementation, two
   consumers: the server links it directly; Python binds the same code via
-  PyO3. NumPy reference implementations are the executable specification;
-  Rust matches them at 1e-12 (float64) on every probe.
+  PyO3. NumPy reference implementations are the verification fixtures at
+  the declared dtype; Rust must match them within the per-dtype tolerances
+  the qk-kernels capability declares on every probe.
 
 ## Workflow
 

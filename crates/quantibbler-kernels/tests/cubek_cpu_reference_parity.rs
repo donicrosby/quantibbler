@@ -9,7 +9,7 @@
 //!
 //! Three faces exist and none of them compares to itself:
 //! 1. our NumPy reference (`src/quantibbler/kernels/attention_tiled.py`) — the
-//!    executable specification the fixture records;
+//!    verification fixture at the declared dtype the fixture records;
 //! 2. the device face (`tests/gpu_attention_parity.rs`) — compared against (1);
 //! 3. this face — cubek's `flash_attention_v2_reference_with_lse`, compared
 //!    against (1). It is pure CPU: no device, no HIP, no kernel launch. Run it
@@ -369,7 +369,7 @@ fn cpu_reference_agrees_with_the_numpy_reference_on_the_fixture_battery() {
 ///
 /// Reading cubek's reference source, its output denominator is clamped
 /// (`let denom = if l > eps { l } else { eps }`) while its `lse` is `-inf` for a
-/// row with no finite scores. Our reference — the executable specification —
+/// row with no finite scores. Our reference — the verification fixture at the declared dtype —
 /// computes the dense `0/0` and yields **NaN** at those positions, and our
 /// device/spec contract asserts that NaN pattern position-for-position (task
 /// 1.4). So the two implementations agree on `lse = -inf` and *disagree by

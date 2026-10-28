@@ -3,7 +3,7 @@
 
 Emits ``crates/quantibbler-kernels/tests/fixtures/attention_tiled.json``: for
 each battery case, the f32 inputs the device face consumes plus the
-``numpy-reference`` output (the executable specification) widened to f64. The
+``numpy-reference`` output (the verification fixture at the declared dtype). The
 Rust-side test (``tests/gpu_attention_parity.rs``) widens the device's f32
 result back and compares at the spec's budget (rel 1e-5) — a device face is
 never compared to itself.

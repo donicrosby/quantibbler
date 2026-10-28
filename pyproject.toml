@@ -39,7 +39,8 @@ dependencies = [
 [project.optional-dependencies]
 # An extra is strictly for a part of the PROGRAM a product user may not need.
 # `kernels` is the one that qualifies: the NumPy reference implementations in
-# src/quantibbler/kernels/ are the executable specification and run where the
+# src/quantibbler/kernels/ are the verification fixtures at the declared
+# dtype and run where the
 # Rust extension is absent, so the extension stays opt-in for product users.
 # The suite exercises the parity tier, so the same package is ALSO a dev-group
 # dependency below — an extra and a dev group are not exclusive.

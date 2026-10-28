@@ -1,4 +1,4 @@
-"""Tiled exact-attention NumPy reference — the executable specification.
+"""Tiled exact-attention NumPy reference — the verification fixture at the declared dtype.
 
 Change: ``qk-flash-attention``, task 1.2. Implements [FA] §3.1 Algorithm 1
 (tiled FlashAttention forward): outer loop over query blocks, inner loop over

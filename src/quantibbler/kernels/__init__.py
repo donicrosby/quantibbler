@@ -1,9 +1,9 @@
 """Kernel dispatch: Rust extension when available, NumPy reference otherwise.
 
-The NumPy implementations are the executable specification of every kernel;
-the Rust extension must match within the tolerances pinned in
-``openspec/config.yaml`` (verification-gates section): float64 outputs at
-relative tolerance 1e-12, packed outputs byte-identical.
+The NumPy implementations are the verification fixtures at the declared
+dtype; the Rust extension must match within the per-dtype tolerances
+declared by the qk-kernels capability (bf16 backward 1e-2, f32 backward
+1e-6, float64 rel 1e-12), with packed outputs byte-identical.
 
 Dispatch resolution order, applied per call:
 
@@ -106,7 +106,7 @@ def _wants_rust(name: str, explicit: str | None) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# NumPy reference implementations (the executable specification)
+# NumPy reference implementations (verification fixtures at the declared dtype)
 # ---------------------------------------------------------------------------
 
 
@@ -202,7 +202,7 @@ def _is_integral(value: object) -> bool:
 #
 # The scalar trait in the Rust core (``quantibbler_kernels::dtype``) declares
 # one accumulator per dtype; the reference mirrors that table exactly, because
-# the reference IS the executable specification. ``bfloat16`` accumulates in
+# the reference IS the verification fixture at the declared dtype. ``bfloat16`` accumulates in
 # float32 and rounds ONCE at the output, which is what keeps its error an
 # output-precision bound instead of one that grows with the row width.
 

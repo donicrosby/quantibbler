@@ -6,8 +6,8 @@ each battery case, the f32 inputs the device face consumes plus THREE records
 the Rust-side test (``tests/gpu_attention_sage.rs``) asserts against —
 
 - ``faces.quantized-reference``: the output of
-  ``quantibbler.kernels.attention_sage`` (the executable specification of the
-  [SA] §4 scheme; f64) — the device's parity target at the spec's
+  ``quantibbler.kernels.attention_sage`` (the verification fixture at the
+  declared dtype for the [SA] §4 scheme) — the device's parity target at the spec's
   ``rel <= 1e-4`` block-level f32 budget;
 - ``faces.exact``: the output of ``quantibbler.kernels.attention_tiled``
   (the exact f64 tiled face) — the quality reference the quantized path is

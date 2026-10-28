@@ -1,4 +1,4 @@
-"""Quantized tiled-attention NumPy reference — the executable specification.
+"""Quantized tiled-attention NumPy reference — the verification fixture at the declared dtype.
 
 Change: ``qk-sage-attention``, task 1.2. Implements [SA] §4 (SageAttention, the
 INT8 attention scheme) on top of the tiled loop of

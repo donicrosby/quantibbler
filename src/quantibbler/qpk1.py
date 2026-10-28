@@ -21,8 +21,9 @@ Version semantics (D10/D11):
   zero vector it always implicitly was -- NOT a silent default for a missing
   field on a current stream. A version-1 stream is read, never written.
 
-NumPy is the executable specification; the Rust kernels lane must match
-these packed bits exactly (sign-agreement invariant, config.yaml).
+NumPy is the verification fixture at the declared dtype; the Rust kernels
+lane must match these packed bits exactly (sign-agreement invariant,
+config.yaml).
 """
 
 from __future__ import annotations
