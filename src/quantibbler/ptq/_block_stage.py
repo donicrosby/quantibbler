@@ -2,6 +2,11 @@
 TuneFP, precondition, LB-ADMM solve, magnitude balance, latent refinement and
 sign extraction for ONE block, in place -- plus the block's input adapter.
 
+The factorization loop carries the Figure 3 per-target cycle: per target, TuneFP
+on the still-FP remainder, factorize the target, TuneLatentSTE on that one
+target against the block-output objective ([NQ] Eq. 10), harden its signs, next
+target.
+
 Split out of ``block_recon``; same code, same call graph.
 ``reconstruct_block`` is re-exported from ``block_recon``, so every caller and
 every test that patches ``block_recon.reconstruct_block`` keeps working.
@@ -37,8 +42,8 @@ from ._stats import (
     _scope_filter,
     _weights_fingerprint,
 )
-from ._ste import _tune_latent_ste
-from ._tuning import STE_JOINT_SCOPE, STE_RESCOPE_MARKER, TUNE_FP_LOSS_MARKER, _tune_fp
+from ._ste import _tune_latent_ste, harden_target
+from ._tuning import STE_PER_TARGET_SCOPE, STE_RESCOPE_MARKER, TUNE_FP_LOSS_MARKER, _tune_fp
 from .accumulation import (
     accumulation_np_dtype,
     accumulation_spec,
@@ -93,8 +98,8 @@ def reconstruct_block(
         recorder: optional callable invoked as ``recorder(event, **info)``
             with events ``capture`` (x_b, y_b, teacher provenance),
             ``tune_fp`` (with the stage record), ``lb_admm``, ``ste`` (ONE
-            block-scope record carrying the per-linear flip/movement/dead-column
-            rows under the ``block_joint`` scope marker), and
+            record per target linear — its flip/movement/dead-column row plus
+            the ``per_target`` scope marker and the target's name), and
             ``tune_fp_vacuous_teacher`` on the fail-closed guard path.
         layer_offset: naming offset for multi-block models.
         name_prefix: module path of ``block`` inside the host model; layer
@@ -283,7 +288,8 @@ def reconstruct_block(
     refine = cfg.ablation != "untuned-signs"
     facs: dict[str, FactorizedLinear] = {}
     linears_by_name = dict(quantizable_linears)
-    # --- Figure 3 placement: the figure depicts a PER-TARGET-LINEAR cycle —
+    # --- Figure 3 placement: the figure and [NQ] Sec 3.2 Step 3's singular "the
+    # current target linear layer" (:641) depict a PER-TARGET-LINEAR cycle —
     # tune the still-FP remainder, factorize the target, refine the target —
     # not one pass per block. The old pre-group/remainder `split` machinery
     # existed only to serve the falsified once-per-block reading and is gone.
@@ -292,23 +298,18 @@ def reconstruct_block(
     # the first factorization has nothing factorized, so the student block IS
     # the pristine teacher block on the same ``x_b``: the objective is
     # identically zero and so is its gradient — exactly the vacuous shape this
-    # placement removes. Every later target gets TuneFP(still-FP remainder) ->
-    # factorize, so TuneFP fires N-1 times per block; the refinement is ONE
-    # joint TuneLatentSTE pass over the whole factorized set AFTER the loop, not
-    # a per-target pass.
-    # --- TuneLatentSTE budget: the refinement unit is the BLOCK — the stage's
-    # objective is the block output against ``y_b`` and its free parameters are
-    # the block's whole factorized set, all held by ONE optimizer under ONE loss.
-    # The App. C factorized-stage regime (stage lr, 8 epochs, cosine) is
-    # unchanged, but `epochs x (n // batch)` is consumed ONCE for the block where
-    # the per-target cycle handed it to EACH linear; there is deliberately no
-    # per-linear or block-pooled allocation on top of it. The schedule record
-    # carries that single block budget on every per-linear row, so a row cannot
-    # be misread about the budget it ran under.
+    # placement removes. Every target then runs TuneFP(still-FP remainder) ->
+    # factorize -> TuneLatentSTE(this target) -> harden, so TuneFP fires N-1
+    # times and the refinement N times per block.
+    # --- TuneLatentSTE budget: the refinement unit is the LINEAR, so the App. C
+    # factorized-stage regime (stage lr, 8 epochs, cosine) is consumed afresh by
+    # each of the block's N targets — the block's total is N x the regime, where
+    # one block-joint pass spent it once. `epochs x (n // batch)` below is
+    # therefore the PER-FIRE budget, and each fire's row books it as its own
+    # `scheduled_steps` so a row cannot be misread about the budget it ran under.
     n_rows = int(x_b.shape[0])
     bs_latent = max(1, min(cfg.stage_latent.batch_size, n_rows))
     total_ste = max(cfg.stage_latent.epochs * (n_rows // bs_latent or 1), 1)
-    ste_records: dict[str, dict] = {}
     tune_fp_record: dict | None = None
     _tune_pairs = list(zip(stats_book, quantizable_linears, strict=False))
     terminal_loss_weight, loss_weight_source, missing_terminal = _resolve_loss_weight(
@@ -511,19 +512,86 @@ def reconstruct_block(
             fac.s2.copy_(torch.from_numpy(s2_np).to(fac.s2.device))
         facs[name] = fac
         # Freeze this linear's factorized weight into the module NOW: every
-        # later stage in the block (the joint STE below, the TuneFP pass,
-        # the next layer's statistics-free solve) must see the quantized
-        # version of the layers already factorized. The tuned bias goes with
-        # it (see the loop head) — this linear is out of the tunable
-        # remainder from here on, so its bias is final.
+        # later stage in the block (this target's STE, the next target's TuneFP,
+        # the next layer's statistics-free solve) must see the quantized version
+        # of the layers already factorized. The tuned bias goes with it (see the
+        # loop head) — this linear is out of the tunable remainder from here on,
+        # so its bias is final.
         _set_linear(linear, fac, factor_mode=cfg.factor_mode)
 
-        # The refinement does NOT run here: it is ONE joint pass over the whole
-        # factorized set after every factorization has completed (see below).
-        # Refining each linear at this point would pin it at its just-solved
-        # value and hand the remaining targets a neighbour that is already
-        # committed, which is exactly the frozen-context shape the joint pass
-        # exists to remove.
+        # --- Step 3 (line 19), the per-target cycle: refine THIS target against
+        # the block-output objective ([NQ] Eq. 10, :649-651) at the full App. C
+        # factorized-stage budget, then harden it before the next target's TuneFP
+        # and STE run. Algorithm 1 line 19's block-scoped call (:780, one
+        # ``TuneLatentSTE`` after the factorization loop closes) is the declared
+        # tension against Sec 3.2 Step 3's singular target prose (:641) and
+        # Figure 3; the per-target reading governs.
+        if refine:
+            ste_stats = _tune_latent_ste(
+                block,
+                {name: fac},
+                x_b,
+                y_b,
+                cfg,
+                cfg.stage_latent.batch_size,
+                steps=total_ste,
+                label=name_prefix or f"offset{layer_offset}",
+                loss_weight=terminal_loss_weight,
+                loss_weight_source=loss_weight_source,
+                loss_weight_mean_before=loss_weight_mean_before,
+                loss_weight_mean_after=loss_weight_mean_after,
+            )
+            # The fire declares its SCOPE and its TARGET. The row alone cannot
+            # say whether one pass over N linears or N passes over one produced
+            # it, and the same ``declared`` values mean different things in the
+            # two shapes.
+            ste_stats["scope"] = STE_PER_TARGET_SCOPE
+            ste_stats["target"] = name
+            per = ste_stats["per_linear"][name]
+            if paper_regime:
+                # The paper's Stage 2 -> 3 mechanism, to the letter: STE on
+                # the continuous latents for the full budget, then sign+pack
+                # whatever signs result (Algorithm 1 lines 20-23). A
+                # zero-crossing outcome IS the paper's outcome — a
+                # measurement, not a re-scope — so the scale-only declaration
+                # does not fire on this path. The measured count travels in
+                # the record.
+                per["declared"] = "paper_ste"
+            elif per["zero_crossings"]:
+                # Diagnostic path only: the continuous refinement produced no
+                # sign crossing, so the linear is declared scale-only under the
+                # greppable re-scope marker. There is no discrete fallback
+                # behind it: a silent zero-flip completion is impossible here
+                # because this declaration is the alternative.
+                per["declared"] = "scale_only"
+                per["rescope_marker"] = STE_RESCOPE_MARKER
+            else:
+                per["declared"] = "paper_ste"
+            per["scheduled_steps"] = int(total_ste)
+            if cfg.factor_mode != "fp":
+                # Commit the target (Algorithm 1 lines 20-23) BEFORE the next
+                # one: the neighbours of a later fire must be the discrete
+                # values the artifact will carry, not continuous latents the
+                # next pass could keep moving. An fp run is excluded by
+                # construction — its latents ARE the measurement, so
+                # extract_and_pack refuses to sign them (D-5).
+                harden_target(fac, _pname(name))
+                _set_linear(linear, fac, factor_mode=cfg.factor_mode)
+            _note_block_progress(0, f"{name_prefix or 'block'}/ste")
+            if recorder is not None:
+                # ONE record per fire, carrying this target's row. The stage's
+                # own summary (steps, wall time, gradient floor, vacuity,
+                # inertness, scope, target) sits beside it, and the weighting
+                # fields are the same (value, source) pair the TuneFP row
+                # carries, so the two stages cannot be read as different
+                # regimes.
+                payload = dict(ste_stats)
+                payload["total_steps"] = total_ste
+                payload["teacher_source"] = teacher_source
+                payload["teacher_fingerprint"] = teacher_fingerprint
+                payload["capture_index"] = capture_index
+                payload["rescope_marker"] = STE_RESCOPE_MARKER
+                recorder("ste", **payload)
     _note_block_progress(0, f"{name_prefix or 'block'}/lb_admm")
     if recorder is not None:
         # The polish count travels in the existing event: an ablation's log must
@@ -535,9 +603,10 @@ def reconstruct_block(
             elapsed_s=time.perf_counter() - t_solve,
         )
 
-    # --- Step 3 record (line 19), emitted once per block after the
-    # factorization loop so the stage sequence every existing consumer
-    # asserts (capture -> tune_fp -> lb_admm -> ste) is unchanged.
+    # --- The block's stage records are closed while the loop runs (each target
+    # emits its own tune_fp and ste records at its own position in the cycle).
+    # What is left for this point is the ABSENCE case below: a block whose loop
+    # fired no TuneFP at all still owes the record that says so.
     _note_block_progress(0, f"{name_prefix or 'block'}/stats_done")
     if refine:
         if tune_fp_record is None:
@@ -582,84 +651,14 @@ def reconstruct_block(
             }
             if recorder is not None:
                 recorder("tune_fp", **tune_fp_record)
-        _note_block_progress(0, f"{name_prefix or 'block'}/ste")
-        # --- Step 3 (line 19): TuneLatentSTE runs ONCE per block, after EVERY
-        # factorization completes and before the stream swap, jointly over the
-        # block's whole factorized set. ONE optimizer holds every ``(U, V, s1,
-        # s2)`` and ONE loss is taken on the block output against ``y_b`` ([NQ]
-        # Eq. 10), so the correction can trade across linears -- one linear's
-        # residual partially cancelled by another -- which a per-target pass
-        # cannot express: there the other linears are frozen at their
-        # already-degraded values.
-        #
-        # The stage regime is unchanged (the App. C factorized-stage lr, 8
-        # epochs, cosine), consumed ONCE for the whole block where the per-target
-        # cycle handed it to EACH linear. That budget is the deliberate part:
-        # dividing it per linear would put every linear back on a fraction of the
-        # paper's regime, and pooling it would invent one.
-        ste_stats = _tune_latent_ste(
-            block,
-            facs,
-            x_b,
-            y_b,
-            cfg,
-            cfg.stage_latent.batch_size,
-            steps=total_ste,
-            label=name_prefix or f"offset{layer_offset}",
-            loss_weight=terminal_loss_weight,
-            loss_weight_source=loss_weight_source,
-            loss_weight_mean_before=loss_weight_mean_before,
-            loss_weight_mean_after=loss_weight_mean_after,
-        )
-        # A ``paper_ste`` firing is declared BLOCK-JOINT, never implied
-        # per-linear: the rows alone cannot say whether one pass or N produced
-        # them.
-        ste_stats["scope"] = STE_JOINT_SCOPE
-        # Per-linear read-out of the ONE joint pass. Every row was measured
-        # against the same objective because the pass had one objective, which is
-        # what makes the ladder's input a statement about the block rather than
-        # about a frozen neighbour.
-        for name, fac in facs.items():
-            per = ste_stats["per_linear"][name]
-            linear = linears_by_name[name]
-            if paper_regime:
-                # The paper's Stage 2 -> 3 mechanism, to the letter: STE on
-                # the continuous latents for the full budget, then sign+pack
-                # whatever signs result (Algorithm 1 lines 20-23). A
-                # zero-crossing outcome IS the paper's outcome — a
-                # measurement, not a re-scope — so the scale-only declaration
-                # does not fire on this path. The measured count travels in
-                # the record.
-                per["declared"] = "paper_ste"
-            elif per["zero_crossings"]:
-                # Diagnostic path only: the continuous refinement produced no
-                # sign crossing, so the linear is declared scale-only under the
-                # greppable re-scope marker. There is no discrete fallback
-                # behind it: a silent zero-flip completion is impossible here
-                # because this declaration is the alternative.
-                per["declared"] = "scale_only"
-                per["rescope_marker"] = STE_RESCOPE_MARKER
-            else:
-                per["declared"] = "paper_ste"
-            per["scheduled_steps"] = int(total_ste)
-            _set_linear(linear, fac, factor_mode=cfg.factor_mode)
-            ste_records[name] = per
-        if recorder is not None:
-            # ONE block-scope record: the stage's own summary (steps, wall time,
-            # gradient floor, vacuity, inertness, scope) beside its per-linear
-            # rows. The weighting fields are the same (value, source) pair the
-            # TuneFP row carries, so the two stages cannot be read as different
-            # regimes.
-            payload = dict(ste_stats)
-            payload["total_steps"] = total_ste
-            payload["teacher_source"] = teacher_source
-            payload["teacher_fingerprint"] = teacher_fingerprint
-            payload["capture_index"] = capture_index
-            payload["rescope_marker"] = STE_RESCOPE_MARKER
-            payload["per_linear"] = ste_records
-            recorder("ste", **payload)
 
-    # --- Extraction and packing (lines 20-23).
+    # --- Extraction and packing (lines 20-23), for the artifact's layer states.
+    # The cycle already hardened each target through this same ONE latent-to-bit
+    # site, so on a binary run this pass re-extracts bits that are already exact
+    # (the latents hold ±1 and sign(±1) is itself) — it is the artifact
+    # constructor, not a second conversion with its own convention. An fp run
+    # extracted nothing here and hardens nothing: its latents are the
+    # measurement.
     layers: list[QuantizedLayerState] = []
     t_pack = time.perf_counter()
     for name, fac in facs.items():

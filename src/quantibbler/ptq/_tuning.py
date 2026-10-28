@@ -39,13 +39,17 @@ TUNE_FP_LOSS_MARKER = "tune_fp_loss: weighted_mse_nq_3012 (weight source: inform
 
 
 STE_RESCOPE_MARKER = "ste_scale_only_declared"
-# ``STE_JOINT_SCOPE`` — the refinement's scope. TuneLatentSTE runs ONCE per
-# block over the block's whole factorized set, so a firing's scope has to be
-# readable from the record rather than inferred from the pipeline's shape: the
-# same ``declared`` values mean something different when one joint pass over N
-# linears produced them than when N per-linear passes did, and the rows alone
-# cannot tell a reader which.
-STE_JOINT_SCOPE = "block_joint"
+# ``STE_PER_TARGET_SCOPE`` — the refinement's scope. TuneLatentSTE fires ONCE
+# per target linear, after that target's factorization and against the
+# block-output objective, so a firing's scope has to be readable from the record
+# rather than inferred from the pipeline's shape: the same ``declared`` values
+# mean something different when N per-target passes produced them than when one
+# pass over N linears did, and the rows alone cannot tell a reader which. The
+# block-scoped reading (Algorithm 1 line 19, :780 — one call placed after the
+# per-linear factorization loop closes) is the declared tension against [NQ]
+# Sec 3.2 Step 3's singular "the current target linear layer" (:641) and
+# Figure 3; the per-target reading governs.
+STE_PER_TARGET_SCOPE = "per_target"
 
 
 class VacuousTeacherError(RuntimeError):

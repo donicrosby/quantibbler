@@ -43,13 +43,16 @@ Stage changes folded here:
 * ``qk-fix-ste-sign-adaptation`` — per-linear, per-factor flip
   instrumentation; the caller reads it to declare a linear ``paper_ste`` (its
   signs crossed) or ``scale_only`` (the greppable re-scope marker).
-* ``qk-ste-joint`` — ONE joint TuneLatentSTE pass per block over the block's
-  whole factorized set (one optimizer, one block-output loss), declared under
-  the ``block_joint`` scope marker. A DECLARED deviation from Algorithm 1
-  line 19's "the current target linear layer" prose: the stage's objective is
-  the block's reconstruction error and its free parameters are the block's
-  whole factorized set, so the App. C factorized-stage budget is consumed once
-  for the block rather than once per linear.
+* per-target TuneLatentSTE — the refinement fires once per target linear,
+  INSIDE the factorization loop right after the target is factorized, against
+  the block-output objective ([NQ] Eq. 10) and at the full App. C
+  factorized-stage budget per linear; the target is then hardened (its signs
+  extracted into the latents, all four tensors frozen) before the next target
+  runs. Each fire declares its scope (``per_target``) and its target. The
+  block-scoped reading of Algorithm 1 line 19 (:780, one call after the loop
+  closes) is the DECLARED tension against Sec 3.2 Step 3's singular "the
+  current target linear layer" prose (:641) and Figure 3; the per-target
+  reading governs.
 * ``qk-fix-fp-resume-guard`` — the resume guard is driven by the live
   block's expected quantizable names, not by the archive's contents.
 
@@ -184,8 +187,11 @@ from ._ste import (
 from ._ste import (
     _tune_latent_ste as _tune_latent_ste,
 )
+from ._ste import (
+    harden_target as harden_target,
+)
 from ._tuning import (
-    STE_JOINT_SCOPE,
+    STE_PER_TARGET_SCOPE,
     STE_RESCOPE_MARKER,
     TUNE_FP_LOSS_MARKER,
     VacuousTeacherError,
@@ -199,11 +205,12 @@ __all__ = [
     "BlockReconResult",
     "FactorizedLinear",
     "QuantizedLayerState",
+    "STE_PER_TARGET_SCOPE",
     "STE_RESCOPE_MARKER",
-    "STE_JOINT_SCOPE",
     "TUNE_FP_LOSS_MARKER",
     "VacuousTeacherError",
     "extract_and_pack",
+    "harden_target",
     "reconstruct_block",
     "reconstruct_model",
 ]

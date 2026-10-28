@@ -1,7 +1,8 @@
-"""TuneLatentSTE ([NQ] Step 3): joint refinement of (U, V, s1, s2) through the
-straight-through estimator, with the per-factor flip instrumentation the caller
-reads to declare the linear ``paper_ste`` (a sign crossing) or ``scale_only``
-(the re-scope marker).
+"""TuneLatentSTE ([NQ] Step 3): per-target refinement of (U, V, s1, s2) through
+the straight-through estimator, with the per-factor flip instrumentation the
+caller reads to declare the linear ``paper_ste`` (a sign crossing) or
+``scale_only`` (the re-scope marker), plus the harden step (lines 20-23) that
+commits the target's signs before the next target runs.
 
 Split out of ``block_recon``; same code, same call graph.
 """
@@ -14,7 +15,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from ._factorized import FactorizedLinear, _quantized_forward_block
+from ._factorized import FactorizedLinear, _quantized_forward_block, extract_and_pack
 from ._stats import LOSS_WEIGHT_MEAN_NORMALIZATION, _forward_chunked, _optimizer_gradient_floor
 from .config import PTQConfig
 from .progress import ProgressReporter
@@ -35,33 +36,33 @@ def _tune_latent_ste(
     loss_weight_mean_before: float | None = None,
     loss_weight_mean_after: float | None = None,
 ) -> dict:
-    """TuneLatentSTE ([NQ] Step 3): joint refinement of (U, V, s1, s2) with
-    the straight-through estimator against the block-level objective of
-    Eq. 10, T_post steps at the stage lr ([NQ] App. C).
+    """TuneLatentSTE ([NQ] Step 3): refinement of (U, V, s1, s2) with the
+    straight-through estimator against the block-level objective of Eq. 10,
+    T_post steps at the stage lr ([NQ] App. C).
 
-    Scope: ``facs`` IS the refinement unit. The caller hands over the block's
-    ENTIRE factorized set once per block, after every factorization completes
-    and before the stream swap, so ONE optimizer holds every ``(U, V, s1, s2)``
-    and ONE loss is taken on the block output against ``y_b``. That is what lets
-    the correction trade across linears — one linear's residual partially
-    cancelled by another — which a per-target pass cannot express, because there
-    the other linears are frozen at their already-degraded values and every
-    linear is optimized as if its neighbours were exact. Algorithm 1 line 19's
-    "the current target linear layer" prose is a DECLARED deviation from this
-    reading, not the other way round.
+    Scope: ``facs`` IS the refinement unit, and the caller hands over ONE target
+    linear per fire — the one just factorized. The objective is still the block
+    output against ``y_b`` ([NQ] Eq. 10, :649-651), but the free parameters are
+    that one target's four tensors while every neighbour is held at its
+    committed value, which is [NQ] Sec 3.2 Step 3's "the current target linear
+    layer" (:641, singular) and Figure 3. Algorithm 1 line 19's block-scoped
+    call (:780 — one ``TuneLatentSTE`` placed after the per-linear factorization
+    loop closes) is the DECLARED tension with that prose and the figure; the
+    per-target reading governs.
 
     Budget: each call consumes the App. C factorized-stage regime
     ``epochs x (n // batch)`` at the stage lr with the cosine schedule, ONCE.
-    There is no per-linear or block-pooled allocation on top of it. The block
-    forward is the module as it stands, so every block parameter outside
-    ``facs`` is held at its current value.
+    The budget's unit is the LINEAR — a block of N targets spends the regime N
+    times — and there is no pooled allocation behind it. The block forward is
+    the module as it stands, so every block parameter outside ``facs`` is held
+    at its current value.
 
     Instrumentation (scenario ``flip_counts_are_recorded``): per-step,
     per-factor sign crossings of the latents, the relative latent movement, and
-    the scale (s1, s2) movement are recorded for EVERY factorized linear. A
-    linear that finishes with zero crossings on both factors is what the caller
-    turns into the scale-only declaration — a silent zero-flip completion cannot
-    be produced here, because the counts leave the stage in the returned record.
+    the scale (s1, s2) movement are recorded for the target linear. A target
+    that finishes with zero crossings on both factors is what the caller turns
+    into the scale-only declaration — a silent zero-flip completion cannot be
+    produced here, because the counts leave the stage in the returned record.
 
     The bias is deliberately NOT a refinement parameter: the container's bias
     field is the TuneFP stage's product, so a bias moved here would be a
@@ -100,10 +101,12 @@ def _tune_latent_ste(
         """Close the stage's row time on EVERY return path.
 
         A row time is attributable to a linear only when the call refined
-        exactly that linear. A joint call over several facs cannot split its
-        wall time by linear -- the one measurement belongs to the whole set, and
-        dividing it would report a share no clock observed -- so its rows report
-        null and the call's own ``elapsed_s`` carries the stage's time.
+        exactly that linear -- the per-target cycle's shape -- so the target's
+        row carries the fire's own clock. A call over several facs (a direct
+        caller's, never the cycle's) cannot split that one measurement by
+        linear: the measurement belongs to the whole set, and dividing it would
+        report a share no clock observed, so those rows report null and the
+        call's own ``elapsed_s`` carries the stage's time.
         """
         elapsed = time.perf_counter() - t_stage
         stats["elapsed_s"] = elapsed
@@ -360,8 +363,43 @@ def _tune_latent_ste(
     return stats
 
 
+def harden_target(fac: FactorizedLinear, name: str = "") -> None:
+    """Harden one refined target: extract its signs into the latents, freeze it.
+
+    Algorithm 1 lines 20-23 applied INSIDE the per-target cycle instead of only
+    at export. The next target's TuneFP and STE must see the DISCRETE target —
+    the cycle's student is the target plus the still-FP remainder — and a
+    continuous latent left behind would be a second, unstated producer of the
+    bits the artifact carries. Routed through :func:`extract_and_pack`, the ONE
+    latent-to-bit site (``sign(0) = +1``), so the bits written back are exactly
+    the bits the packer emits later: the export re-extraction is idempotent by
+    construction, which is what lets the harden step and the export path coexist
+    without a second latent-to-bit convention.
+
+    The freeze is ``requires_grad_(False)`` on all four tensors: the refinement
+    unit is the target, so a later fire's optimizer must not reach a value the
+    cycle has already committed — the same one-linear-one-pass property the
+    record declares with ``paper_ste``/``scale_only``.
+    """
+    st = extract_and_pack(fac.u_latent.detach(), fac.v_latent.detach(), name=name)
+    device, dtype = fac.u_latent.device, fac.u_latent.dtype
+    with torch.no_grad():
+        # The bits are int8 by contract; the latents hold the compute dtype, so
+        # the write-back widens through float32 (the one grade every float dtype
+        # here can express) rather than casting int8 to bf16, which has no NumPy
+        # scalar type and would raise at exactly the dtype this pipeline uses.
+        fac.u_latent.data.copy_(
+            torch.from_numpy(np.ascontiguousarray(st.Ub.astype(np.float32))).to(device, dtype)
+        )
+        fac.v_latent.data.copy_(
+            torch.from_numpy(np.ascontiguousarray(st.Vb.astype(np.float32))).to(device, dtype)
+        )
+    for param in (fac.u_latent, fac.v_latent, fac.s1, fac.s2):
+        param.requires_grad_(False)
+
+
 def _fac_params(fac: FactorizedLinear) -> tuple[torch.Tensor, ...]:
-    """The paper's joint refinement parameter set for one linear (Eq. 10)."""
+    """The paper's refinement parameter set for one linear (Eq. 10)."""
     return (fac.u_latent, fac.v_latent, fac.s1, fac.s2)
 
 
