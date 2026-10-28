@@ -20,11 +20,12 @@ packed layer state SHALL carry it into the container.
 
 ### Requirement: The TuneFP record SHALL declare the bias movement
 
-The TuneFP stage record SHALL report `bias_delta_rel` — the relative movement
-of the tuned linears' bias vectors — beside `weight_delta_rel`, which is
-computed over all tuned parameters and therefore cannot say on its own whether
-the bias compensation is real. A stage with no bias-bearing tunables SHALL
-record no value, never a confident zero.
+The TuneFP stage record SHALL report `bias_delta_rel` — the tuned linears'
+relative bias movement — beside `weight_delta_rel`, which spans all tuned
+parameters and cannot alone attest the bias compensation. The record SHALL name
+which of three causes left the figure absent, never a confident `0.0`: no
+bias-bearing tunables (`bias_tunables` 0); a stage that never ran (`steps` 0);
+or an all-zero bias baseline (`steps` non-zero, division undefined).
 
 #### Scenario: tunefp_record_declares_bias_movement
 
@@ -32,3 +33,11 @@ record no value, never a confident zero.
 - **THEN** its record's `bias_delta_rel` equals the relative bias movement
   recomputed from a pre-stage snapshot, and when the tunable linears carry no
   bias the field carries no value.
+
+#### Scenario: tunefp_record_bias_movement_undefined_over_all_zero_baseline
+
+- **WHEN** the stage runs over bias-bearing linears whose selected biases are
+  all exactly `0.0` at stage entry
+- **THEN** its record's `bias_delta_rel` carries no value while `bias_tunables`
+  and `steps` are both non-zero — the relative movement has no denominator, so
+  it is left undefined rather than reported as a confident `0.0`.

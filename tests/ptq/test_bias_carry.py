@@ -1,7 +1,7 @@
 """qk-bias-carry: the container carries the per-linear bias, and the tuning
 stage's bias is what the artifact ships.
 
-Five claims, one test each:
+Eight claims, one test each:
 
 * ``tuned_bias_survives_factorization`` — the bias a tuning pass wrote to a
   remainder linear is the bias the factorized artifact carries. The stage is
@@ -26,6 +26,15 @@ Five claims, one test each:
   pinned at the pack boundary: ``bias=False`` linears through
   ``reconstruct_block`` -> ``serialize`` carry a PRESENT, exactly-zero v2 bias,
   not an omitted field and not a confident non-zero.
+* ``zero_weight_baseline_records_no_value`` — the weight arm of the same rule:
+  a stage whose tuned parameters are ALL exactly 0.0 at entry has no
+  denominator, so the row carries ``None`` and never a confident ``0.0``;
+  pinned for both degenerate arms (weights tuned off zero beside the zero
+  baseline, and nothing moved beside it), with ``inert`` left ``None`` beside a
+  relative figure that does not exist.
+* ``nonzero_baseline_records_zero_when_nothing_moves`` — the discriminator the
+  ``None`` rule must not swallow: a NON-zero baseline with nothing moved still
+  records a measured ``0.0``, for both the weight and the bias figure.
 """
 
 import numpy as np
@@ -36,7 +45,7 @@ from quantibbler import qpk1
 from quantibbler.ptq import _block_stage
 from quantibbler.ptq.api import QuantizedModel
 from quantibbler.ptq.block_recon import _tune_fp, reconstruct_block
-from quantibbler.ptq.config import PTQConfig
+from quantibbler.ptq.config import PTQConfig, StageHyper
 
 BIAS_INIT = 0.25
 SENTINEL = 7.5
@@ -106,6 +115,29 @@ class _ZeroInitBiasBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.fc2(torch.relu(self.fc1(x)))
+
+
+class _ZeroWeightLinearBlock(nn.Module):
+    """One float64 linear whose weight is initialized to EXACTLY 0.0, with no
+    bias — the zero-init output-projection shape (residual-block output layers,
+    adapter/LoRA B matrices, gated units) that ``_BiasBlock`` expresses only for
+    biases.
+
+    With no bias the tuned set IS the weight, so the aggregate entry baseline is
+    exactly zero: the ``den == 0`` arm of the weight figure. ``out = W x`` with
+    ``W == 0`` and a non-zero target still has a non-zero gradient in ``W``, so
+    the stage runs and moves the weight off zero — the arm the old record
+    reported as ``weight_delta_rel: 0.0``.
+    """
+
+    def __init__(self, d: int) -> None:
+        super().__init__()
+        self.fc = nn.Linear(d, d, bias=False, dtype=torch.float64)
+        with torch.no_grad():
+            self.fc.weight.zero_()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc(x)
 
 
 def _calib(d: int, n: int = 4, seq: int = 8, seed: int = 1) -> list[torch.Tensor]:
@@ -443,3 +475,146 @@ def test_zero_bias_baseline_records_no_value():
     assert bden_still == 0.0, "the baseline is exactly zero — no denominator"
     assert bnum_still == 0.0, "the held zero baseline did not move"
     assert rec_still["bias_delta_rel"] is None
+
+
+def test_zero_weight_baseline_records_no_value():
+    """An all-zero weight baseline is no denominator: ``None``, never a 0.0.
+
+    The weight arm of the same defect the bias figure already fixed (design
+    D12: "no value, never a confident 0.0"). ``weight_delta_rel``'s ``den`` is
+    the entry snapshot's squared norm over EVERY tuned parameter, so a stage
+    whose selected linears are all exactly 0.0 at entry — a zero-init output
+    projection, a LoRA B matrix, a gated unit — has no denominator at all, and
+    the tail used to record ``0.0``: "the weights never moved", even when the
+    stage had tuned them OFF zero. Both degenerate arms are pinned here, each
+    against movement recomputed from a held snapshot:
+
+    * ``num > 0`` — the stage tuned the weights off zero, and the old row read
+      ``0.0``: the exact lie the defect is about.
+    * ``num == 0`` — nothing moved either. A zero baseline is no denominator
+      whether or not anything moved, so this is still no value, never a
+      legitimate 0.0.
+
+    A zero baseline also leaves inertness undecidable — ``inert`` is compared
+    against the relative movement — so ``inert`` stays ``None`` beside it
+    rather than claiming a verdict about a figure that does not exist. (The
+    zero-baseline arm cannot be produced by freezing the parameters: a frozen
+    tunable set has an exactly-zero first-step gradient, so the vacuous-teacher
+    guard returns before the tail is reached. The held arm therefore runs its
+    steps with an lr small enough that the step's update does not register.)
+    """
+    d = 6
+    x_b = torch.cat(_calib(d), dim=0)
+
+    def _run(*, lr: float) -> tuple[dict, float, float]:
+        block = _ZeroWeightLinearBlock(d)
+        with torch.no_grad():
+            # A non-zero target: the loss gradient in the zero weight is real.
+            y_b = block(x_b) * 1.2 + 0.1
+        cfg = PTQConfig(
+            solver_backend="numpy",
+            rank=3,
+            cosine_schedule=False,
+            stage_pre=StageHyper(lr, 4, 8),
+        )
+        before = [p.detach().clone() for p in block.parameters()]
+        rec = _tune_fp(
+            block,
+            x_b,
+            y_b,
+            cfg,
+            cfg.stage_pre.batch_size,
+            label="zero-weight",
+            tune_names=["fc"],
+            factorized_in_block=1,
+        )
+        num = den = 0.0
+        with torch.no_grad():
+            for p, p0 in zip(block.parameters(), before, strict=True):
+                num += float((p.detach() - p0).pow(2).sum())
+                den += float(p0.pow(2).sum())
+        return rec, num, den
+
+    # (b) The weights were tuned off a zero baseline: nonzero movement,
+    # undefined relative figure. The recorded 0.0 said "never moved" about a
+    # weight the stage demonstrably moved.
+    rec_moved, num_moved, den_moved = _run(lr=1e-4)
+    assert rec_moved["steps"] > 0, "the stage must run for this measurement"
+    assert den_moved == 0.0, "the baseline is exactly zero — no denominator"
+    assert num_moved > 0.0, "the stage did move the weight off zero"
+    assert rec_moved["weight_delta_rel"] is None
+    assert rec_moved["inert"] is None, "no relative figure, so no inertness verdict either"
+
+    # (a) The same zero baseline with nothing moved: still no value (a zero
+    # denominator cannot yield a ratio), and the row says so rather than
+    # claiming a measured 0.0. `steps > 0` distinguishes this from the
+    # never-ran arm the same `None` also covers.
+    rec_still, num_still, den_still = _run(lr=1e-300)
+    assert rec_still["steps"] > 0, "the stage runs its steps; nothing measurable moved"
+    assert den_still == 0.0, "the baseline is exactly zero — no denominator"
+    assert num_still == 0.0, "the held zero baseline did not move measurably"
+    assert rec_still["weight_delta_rel"] is None
+    assert rec_still["inert"] is None
+
+
+def test_nonzero_baseline_records_zero_when_nothing_moves():
+    """The discriminator the ``None`` rule must not swallow: 0.0 stays 0.0.
+
+    A NON-zero baseline with no measurable movement is a legitimate, measured
+    ``0.0`` — the row the ``None`` rule above must never swallow. Pinned for
+    both figures in one run: the aggregate ``weight_delta_rel`` and the
+    ``bias_delta_rel`` beside it, over linears that carry a non-zero weight and
+    a non-zero bias.
+
+    The movement here is zero because the per-step update rounds back on the
+    parameter dtype (``lr`` small enough that ``p - update == p`` bitwise), not
+    because the parameters are frozen: a frozen tunable set has a zero
+    first-step gradient and returns via the vacuous-teacher guard with no
+    figure at all, which is a different arm. What this row pins is the
+    REACHABLE legit-zero: the stage ran, moved nothing, and the record says
+    ``0.0`` — never ``None``, which is reserved for no denominator.
+    """
+    d = 6
+    block = _BiasBlock(d, seed=13)
+    x_b = torch.cat(_calib(d), dim=0)
+    with torch.no_grad():
+        y_b = block(x_b) * 1.2 + 0.1
+    cfg = PTQConfig(
+        solver_backend="numpy",
+        rank=3,
+        cosine_schedule=False,
+        stage_pre=StageHyper(1e-300, 4, 8),
+    )
+    before = [p.detach().clone() for p in block.parameters()]
+    bias_before = [m.bias.detach().clone() for m in (block.fc1, block.fc2)]
+    rec = _tune_fp(
+        block,
+        x_b,
+        y_b,
+        cfg,
+        cfg.stage_pre.batch_size,
+        label="legit-zero",
+        tune_names=["fc1", "fc2"],
+        factorized_in_block=1,
+    )
+
+    num = den = 0.0
+    with torch.no_grad():
+        for p, p0 in zip(block.parameters(), before, strict=True):
+            num += float((p.detach() - p0).pow(2).sum())
+            den += float(p0.pow(2).sum())
+    bnum = bden = 0.0
+    with torch.no_grad():
+        for m, b0 in zip((block.fc1, block.fc2), bias_before, strict=True):
+            bnum += float((m.bias.detach() - b0).pow(2).sum())
+            bden += float(b0.pow(2).sum())
+
+    assert rec["steps"] > 0, "the stage must run for this measurement"
+    assert den > 0.0 and num == 0.0, "a real baseline, and nothing moved"
+    assert rec["weight_delta_rel"] == 0.0, "a measured non-movement is 0.0, not None"
+    assert bden > 0.0 and bnum == 0.0, "a real bias baseline, and nothing moved"
+    assert rec["bias_delta_rel"] == 0.0, "the bias figure's legit-zero is 0.0 too"
+    assert rec["inert"] is True, (
+        "steps ran and the relative movement is below the parameter dtype's resolution: "
+        "the declared inert regime"
+    )
