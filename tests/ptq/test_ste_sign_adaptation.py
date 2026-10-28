@@ -245,7 +245,7 @@ def test_scn_paper_ste_crosses_a_near_zero_latent_and_records_counts():
     assert len(rec["per_step_flips"]) == 8, "per-step flip counts are missing"
     assert rec["zero_crossings"] is False
     # Both factors' movement and BOTH scale vectors are recorded (scales are
-    # IN the paper's joint parameter set, Eq. 10).
+    # IN the paper's parameter set, Eq. 10).
     assert rec["u_rel_move"] > 0.0 and rec["v_rel_move"] > 0.0
     assert rec["s1_rel_move"] > 0.0 and rec["s2_rel_move"] > 0.0
 
@@ -261,8 +261,10 @@ def test_scn_zero_flip_completion_is_never_silent():
     reconstruct_block(
         block, calib, cfg, cotangent=_fixed_cot(block, calib), recorder=_recorder(sink)
     )
-    ste = [info for event, info in sink if event == "ste"][0]
-    per = ste["per_linear"]
+    ste = [info for event, info in sink if event == "ste"]
+    assert ste, "the STE stage produced no per-target record at all"
+    # One fire per target: flatten the per-target rows into one name -> row map.
+    per = {name: rec for info in ste for name, rec in info["per_linear"].items()}
     assert per, "the STE stage produced no per-linear record at all"
     zero_flip = [n for n, r in per.items() if r["zero_crossings"]]
     assert zero_flip, "fixture did not reproduce the measured zero-flip geometry"
@@ -373,8 +375,12 @@ def test_aborted_step_does_not_skip_the_mechanism_ladder(monkeypatch):
     br.reconstruct_block(
         block, calib, cfg, cotangent=_fixed_cot(block, calib), recorder=_recorder(sink)
     )
-    ste = [info for event, info in sink if event == "ste"][0]
-    rec = ste["per_linear"][poisoned["name"]]
+    ste = [info for event, info in sink if event == "ste"]
+    rec = next(
+        info["per_linear"][poisoned["name"]]
+        for info in ste
+        if poisoned["name"] in info["per_linear"]
+    )
 
     assert rec["zero_crossings"] is True, (
         f"{poisoned['name']}: the rolled-back step's phantom flips reached the "
@@ -392,16 +398,15 @@ def test_aborted_step_does_not_skip_the_mechanism_ladder(monkeypatch):
 
 
 def test_scn_refinement_covers_every_factorized_linear_with_full_budget():
-    """Every scoped linear covers the recorded budget — no pooled split.
+    """Every scoped linear gets the full recorded budget — no pooled split.
 
-    Scope note (supersedes this test's original reading of `total_steps`): the
-    refinement unit is now the BLOCK, not the linear. One joint pass consumes
-    `epochs x (n // batch)` steps, and every per-linear row books every step of
-    it — which is what these assertions check. What is NOT asserted any more is
-    that each linear receives that budget SEVEN TIMES over; the per-target
-    structure that did that is gone. What still holds, and is the point: the
-    budget is never divided across linears (no pooled split), and no linear is
-    left out of the refinement.
+    Scope note (supersedes this test's earlier reading of `total_steps`): the
+    refinement unit is the TARGET LINEAR. The cycle fires once per target, and
+    EACH fire consumes `epochs x (n // batch)` steps for its one linear, so a
+    block of N linears books the regime N times. What is NOT asserted any more is
+    that a single joint pass covered all N: that shape is gone. What still holds,
+    and is the point: the budget is never divided across linears (no pooled
+    split), and no linear is left out of the refinement.
     """
     block = _SevenLinearBlock(seed=41)
     sink: list = []
@@ -412,18 +417,24 @@ def test_scn_refinement_covers_every_factorized_linear_with_full_budget():
     reconstruct_block(
         block, calib, cfg, cotangent=_fixed_cot(block, calib), recorder=_recorder(sink)
     )
-    ste = [info for event, info in sink if event == "ste"][0]
+    ste = [info for event, info in sink if event == "ste"]
+    assert len(ste) == len(SEVEN), "the refinement must fire once per factorized linear"
 
-    assert sorted(ste["per_linear"]) == sorted(SEVEN), (
+    # 8 epochs x (8 rows // batch 4) — the paper's per-linear budget, and it is
+    # what EVERY linear receives as its OWN fire.
+    total = ste[0]["total_steps"]
+    assert total == cfg.stage_latent.epochs * (8 // cfg.stage_latent.batch_size)
+    covered: dict[str, dict] = {}
+    for info in ste:
+        assert "allocation" not in info, "a block-pooled allocation survived the re-ruling"
+        name = info["target"]
+        assert list(info["per_linear"]) == [name], "a fire's record is its target's row"
+        covered[name] = info["per_linear"][name]
+    assert sorted(covered) == sorted(SEVEN), (
         "refinement did not cover every factorized linear in the block"
     )
-    # 8 epochs x (8 rows // batch 4) — the paper's per-linear budget, and it
-    # is what EVERY linear receives.
-    total = ste["total_steps"]
-    assert total == cfg.stage_latent.epochs * (8 // cfg.stage_latent.batch_size)
-    assert "allocation" not in ste, "a block-pooled allocation survived the re-ruling"
     for name in SEVEN:
-        rec = ste["per_linear"][name]
+        rec = covered[name]
         assert rec["scheduled_steps"] == total, name
         assert rec["steps"] == total, name
         assert {
@@ -442,11 +453,10 @@ def test_scn_refinement_covers_every_factorized_linear_with_full_budget():
 def test_full_budget_is_per_linear_not_a_pooled_split():
     """The recorded budget is NOT divided across the block's linears.
 
-    Scope note (supersedes this test's original reading): the budget belongs to
-    the block's single joint pass, not to each linear separately — but the
-    property under test is unchanged, that it is never divided BY the linear
-    count, so a budget smaller than the linear count still runs in full and every
-    linear books it.
+    Scope note (supersedes this test's earlier reading): each target's fire
+    consumes the App. C regime in full for its one linear; the property under
+    test is unchanged, that the budget is never divided BY the linear count, so
+    a budget smaller than the linear count still runs in full for every target.
 
     Seed note: this fixture family's divergence-gate fires were the ``lb_admm``
     exit double-rescale (both factors scaled by ``||W~||_F``, so the
@@ -468,12 +478,14 @@ def test_full_budget_is_per_linear_not_a_pooled_split():
     reconstruct_block(
         block, calib, cfg, cotangent=_fixed_cot(block, calib), recorder=_recorder(sink)
     )
-    ste = [info for event, info in sink if event == "ste"][0]
-    assert "allocation" not in ste
-    total = ste["total_steps"]
+    ste = [info for event, info in sink if event == "ste"]
+    assert len(ste) == len(SEVEN)
+    total = ste[0]["total_steps"]
     assert total == 1 * (8 // 4)  # epochs x (rows // batch), per linear
-    for name in SEVEN:
-        rec = ste["per_linear"][name]
+    for info in ste:
+        assert "allocation" not in info
+        name = info["target"]
+        rec = info["per_linear"][name]
         assert rec["scheduled_steps"] == total
         assert rec["steps"] == total
         # The zero-budget "not_scheduled" residual is gone: every linear runs.
@@ -623,13 +635,15 @@ def test_scn_paper_faithful_records_measured_crossings_with_no_rescope(paper_reg
     reconstruct_block(
         block, calib, cfg, cotangent=_fixed_cot(block, calib), recorder=_recorder(sink)
     )
-    ste = [info for event, info in sink if event == "ste"][0]
-    assert ste["per_linear"], "no per-linear STE record"
-    for name, rec in ste["per_linear"].items():
+    ste = [info for event, info in sink if event == "ste"]
+    assert ste, "no per-target STE record"
+    for info in ste:
+        name = info["target"]
+        rec = info["per_linear"][name]
         assert rec["declared"] == "paper_ste", name
         assert "flip_pass" not in rec, name
         assert "rescope_marker" not in rec, name
-        assert rec["scheduled_steps"] == ste["total_steps"], name
+        assert rec["scheduled_steps"] == info["total_steps"], name
         # The measurement still travels, so a zero-crossing geometry is on
         # record rather than hidden by the declaration.
         assert isinstance(rec["zero_crossings"], bool)

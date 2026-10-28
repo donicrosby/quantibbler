@@ -7,7 +7,7 @@ whose config matches the paper regime gets the [NQ] App. C triple verbatim, ever
 other run keeps the gate-shaped triple (which turns TuneFP into a single step).
 This is one of the four runtime gates re-keyed off the config-match conjunction,
 and it is the only one with no executing test on any host: the sibling pin
-(``test_ste_joint.py::test_scn_joint_budget_is_the_appendix_c_regime_once_per_block``)
+(``test_ste_per_target.py::test_scn_joint_budget_is_the_appendix_c_regime_once_per_block``)
 asserts the arithmetic on its OWN ``StageHyper``, and the one e2e regime leg skips
 without CUDA.
 

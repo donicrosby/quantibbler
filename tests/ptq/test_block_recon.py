@@ -58,8 +58,9 @@ def _calib(d: int, n: int = 4, seq: int = 8, seed: int = 1) -> list[torch.Tensor
 
 def test_scn_block_loop_order():
     """quantized_prefix_inputs: block b > 0 sees the *quantized* prefix's
-    outputs as X_b and the fp block's output on those inputs as Y_b; within
-    a block the stage order is TuneFP -> LB-ADMM -> TuneLatentSTE."""
+    outputs as X_b and the fp block's output on those inputs as Y_b; within a
+    block the per-target cycle is TuneLatentSTE per target inside the
+    factorization loop (target 1 first, no preceding TuneFP), then LB-ADMM."""
     d = 8
     b0, b1 = _TinyBlock(d, seed=0), _TinyBlock(d, seed=1)
     events: list[str] = []
@@ -89,13 +90,18 @@ def test_scn_block_loop_order():
     reconstruct_model(model, calib, cfg, recorder=recorder, stats_book=book)
     assert captured["inputs"][1].shape == x.shape
 
-    # Stage order per block: capture -> tune_fp -> lb_admm -> ste. Additional
-    # record events (the sign-extraction stage map entry) are filtered out
-    # here: the assertion is about the Algorithm 1 stage ORDER, not about the
+    # Stage order per block, per the per-target cycle: capture; then, INSIDE the
+    # factorization loop, each target's STE fire — target 1 first with NO
+    # preceding TuneFP, every later target preceded by its TuneFP(still-FP
+    # remainder) pass; then the block's closing lb_admm event. _TinyBlock carries
+    # two quantizable linears, so that is one TuneFP and two STE fires per block.
+    # Additional record events (the sign-extraction stage map entry) are filtered
+    # out here: the assertion is about the Algorithm 1 stage ORDER, not the
     # record's exact event count.
+    per_block = ["capture", "ste", "tune_fp", "ste", "lb_admm"]
     alg1 = [e for e in events if e in ("capture", "tune_fp", "lb_admm", "ste")]
-    assert alg1[:4] == ["capture", "tune_fp", "lb_admm", "ste"]
-    assert alg1[4:8] == ["capture", "tune_fp", "lb_admm", "ste"]
+    assert alg1[: len(per_block)] == per_block
+    assert alg1[len(per_block) : 2 * len(per_block)] == per_block
     assert events.count("sign_extract_pack") == 2
 
     # Block 1's captured input (quantized-prefix advance) differs from the

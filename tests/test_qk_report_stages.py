@@ -118,21 +118,22 @@ def test_stage_map_names_missing_stages_as_not_executed_never_omits_them():
 
 def test_stage_map_reports_row_time_per_stage_row():
     """Scenario ``ste_tunefp_gpu_zero_algorithm_change``: per-stage row-time is
-    reported — one row per fire, and the STE fire is the BLOCK."""
+    reported — one row per fire, and an STE row is one TARGET's fire (its
+    per-linear map carries the one linear it refined)."""
     stages = [
         ("tune_fp", {"elapsed_s": 12.0, "steps": 8}),
         ("tune_fp", {"elapsed_s": 6.0, "steps": 8}),
         ("lb_admm", {"polish_rounds": 0}),
-        ("ste", {"elapsed_s": 3.0, "per_linear": {"attn.q": {}, "attn.o": {}}}),
+        ("ste", {"elapsed_s": 3.0, "per_linear": {"attn.q": {}}}),
         ("ste", {"elapsed_s": 9.0, "per_linear": {"mlp.up_proj": {}}}),
     ]
     mapped = stage_map(stages)
     assert mapped["tune_fp"]["rows"] == 2
     assert mapped["tune_fp"]["elapsed_s"] == 18.0
     assert mapped["tune_fp"]["row_time_s"] == 9.0
-    # The STE rows are the BLOCK fires, not the refined linears: a joint pass's
-    # wall time belongs to the block it refined, and its per-linear rows carry no
-    # share of it.
+    # The STE rows are the FIRES, not a sum over the refined linears: since the
+    # per-target cycle each fire refines exactly one linear, so its wall time is
+    # that fire's own clock and the row time is the mean over fires.
     assert mapped["ste"]["rows"] == 2
     assert mapped["ste"]["elapsed_s"] == 12.0
     assert mapped["ste"]["row_time_s"] == 6.0
@@ -156,7 +157,7 @@ def test_stage_row_times_do_not_count_a_skipped_fire_or_a_null_reading():
     ]
     times = stage_row_times(stages)
     assert times["tune_fp"] == {"rows": 1, "elapsed_s": 4.0, "row_time_s": 4.0}
-    # The STE unit is the block fire, and this record carries no time for it: a
+    # The STE unit is the fire, and this record carries no time for it: a
     # per-linear reading is not its row, and an unreadable record stays null
     # rather than borrowing one.
     assert times["ste"] == {"rows": 1, "elapsed_s": None, "row_time_s": None}
@@ -195,10 +196,11 @@ def _clean_stages() -> list:
         (
             "ste",
             {
+                "scope": "per_target",
                 "per_linear": {
                     "attn.q": {"declared": "paper_ste", "zero_crossings": True},
                     "mlp.down_proj": {"declared": "paper_ste", "zero_crossings": False},
-                }
+                },
             },
         ),
         ("sign_extract_pack", {"extracted": 7}),
@@ -294,6 +296,7 @@ def test_scn_condition_set_names_every_config_field():
         "no_vacuous_teacher",
         "no_stage_failure",
         "solver_is_admm",
+        "ste_per_target",
         *_PAPER_REGIME_CONDITIONS,
         *(f"required_{key}_executed" for key in _REQUIRED_STAGES),
     }
@@ -443,6 +446,25 @@ def test_fidelity_label_flips_on_mechanism_deviations(name, mutate, denied):  # 
     assert label is False, name
     assert conditions[denied] is False, name
     assert all(value for key, value in conditions.items() if key != denied), (name, conditions)
+
+
+def test_fidelity_label_flips_on_a_retired_block_joint_ste_scope():
+    """An STE row declaring the RETIRED `block_joint` scope denies the label.
+
+    Spec delta r4 (S-2): the fidelity conditions record the STE scope. The
+    per-target cycle is the AMEND path (`ste_per_target: true`); a `block_joint`
+    marker — the joint-pass scope this AMEND replaces — on a paper-regime run is
+    a mechanism-class deviation, named by the `ste_per_target` condition falling
+    rather than by a second key that could read green while the label did not.
+    """
+    stages = [
+        (event, {**info, "scope": "block_joint"} if event == "ste" else info)
+        for event, info in _clean_stages()
+    ]
+    label, conditions = fidelity_verdict("admm", [], stages, config=_PAPER_REGIME_CONFIG)
+    assert label is False
+    assert conditions["ste_per_target"] is False
+    assert all(value for key, value in conditions.items() if key != "ste_per_target")
 
 
 def test_fidelity_label_flips_on_a_non_admm_solver_and_on_a_stage_failure():

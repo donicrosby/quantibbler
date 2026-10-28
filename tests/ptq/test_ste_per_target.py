@@ -1,11 +1,14 @@
-"""qk-ste-joint: TuneLatentSTE refines a block's whole factorized set in one pass.
+"""qk-pertarget-cycle: TuneLatentSTE fires per target, one linear at a time.
 
-Scenarios (``openspec/changes/qk-ste-joint/specs/qk-ptq/spec.md``):
+Scenarios (``openspec/changes/qk-pertarget-cycle/specs/qk-ptq/spec.md``):
 
-* ``ste_refines_all_factorized_linears_in_one_block_pass`` — the refinement is
-  ONE pass per block over every factorized linear, one optimizer and one loss.
-* ``ste_record_is_one_block_record_with_per_linear_rows`` — one block-scope
-  record carrying the per-linear rows and a scope marker.
+* ``ste_refines_all_factorized_linears_in_one_block_pass`` — N fires per block,
+  each on ONE target linear (the per-target reading; the once-per-block joint
+  pass is the superseded shape this file's predecessors pinned).
+* ``per_target_ste_refines_one_linear_at_a_time``.
+* ``per_target_ste_cycle_sequence``.
+* ``per_target_budget_is_appendix_c_per_linear``.
+* ``ste_record_is_one_block_record_with_per_linear_rows``.
 * ``dead_columns_are_recorded_per_linear``.
 * ``joint_pass_uses_the_normalized_weight_and_the_floor``.
 * ``joint_budget_is_the_appendix_c_regime_once_per_block``.
@@ -15,27 +18,28 @@ The per-linear movement figure's honesty is pinned beside that scenario set:
 zero is no denominator, so the figure is `None`, never a confident `0.0`) and
 its discriminator ``test_nonzero_baseline_records_zero_when_nothing_moves``.
 
-The measured defect these pin shut: the shipped per-target structure emitted one
-STE record per block whose seven rows carried seven DIFFERENT objective readings
-(0.2098, 0.2321, 0.5454, 0.5727, 1.0080, 1.4611, 1.5653), i.e. one block
-objective measured seven times at seven different contexts — each linear refined
-against neighbours already committed. The rows also cannot say which of the two
-structures produced them, which is what the scope marker is for.
+Plus the harden step (Algorithm 1 lines 20-23) the cycle runs between targets:
+sign extraction through the ONE latent-to-bit site, idempotent by construction —
+a second extraction of an already-hardened target flips zero bits — and a freeze
+that keeps a later fire's optimizer out of the committed target.
 """
 
 import contextlib
 import io
 
+import numpy as np
 import pytest
 import torch
 from torch import nn
 
 from quantibbler.ptq.block_recon import (
-    STE_JOINT_SCOPE,
+    STE_PER_TARGET_SCOPE,
     FactorizedLinear,
     _dead_columns,
     _set_linear,
     _tune_latent_ste,
+    extract_and_pack,
+    harden_target,
     reconstruct_block,
 )
 from quantibbler.ptq.config import PTQConfig, StageHyper
@@ -130,7 +134,7 @@ def _block_cfg(*, stage_latent: StageHyper | None = None) -> PTQConfig:
     )
 
 
-def _run_block(seed: int = 31, cfg: PTQConfig | None = None) -> dict:
+def _run_events(seed: int = 31, cfg: PTQConfig | None = None) -> list[tuple[str, dict]]:
     block = _SevenLinearBlock(seed=seed)
     calib = _calib(8, seed=seed)
     sink: list = []
@@ -142,9 +146,16 @@ def _run_block(seed: int = 31, cfg: PTQConfig | None = None) -> dict:
             cotangent=_fixed_cot(block, calib),
             recorder=_recorder(sink),
         )
-    ste = [info for event, info in sink if event == "ste"]
-    assert len(ste) == 1, f"expected exactly one STE record per block; got {len(ste)}"
-    return ste[0]
+    return sink
+
+
+def _ste_records(sink: list[tuple[str, dict]]) -> list[dict]:
+    return [info for event, info in sink if event == "ste"]
+
+
+def _run_block(seed: int = 31, cfg: PTQConfig | None = None) -> list[dict]:
+    """The block's per-target STE fires — one record per target linear."""
+    return _ste_records(_run_events(seed=seed, cfg=cfg))
 
 
 # --------------------------------------------------------------------------
@@ -153,13 +164,15 @@ def _run_block(seed: int = 31, cfg: PTQConfig | None = None) -> dict:
 
 
 def test_scn_ste_refines_all_factorized_linears_in_one_block_pass(monkeypatch):
-    """ONE invocation per block, holding the block's ENTIRE factorized set.
+    """N fires per block, each holding EXACTLY ONE target linear.
 
-    The refinement unit is the block: a per-target call can only ever offer one
-    linear as free parameters, so a correction needing two linears to move
-    together is not in its reachable set. The count and the argument are the
-    discriminator between the two structures, and they are read from the call
-    rather than inferred from the rows.
+    The record count and each call's free set are the discriminator between the
+    per-target cycle and the superseded joint pass: the joint reading is ONE
+    call holding all N linears; the cycle is N calls each holding one. A
+    per-target call can only ever offer one linear as free parameters, so a
+    correction needing two linears to move together is not in its reachable set
+    — that is the reading the AMEND ruling restores, and this count is what
+    separates it from the falsified block-joint shape.
     """
     from quantibbler.ptq import _block_stage as stage
 
@@ -182,28 +195,53 @@ def test_scn_ste_refines_all_factorized_linears_in_one_block_pass(monkeypatch):
             recorder=_recorder([]),
         )
 
-    assert len(calls) == 1, f"the refinement ran {len(calls)} times for one block: {calls}"
-    assert calls[0] == sorted(SEVEN), (
-        f"the joint pass did not receive the block's whole factorized set: {calls[0]}"
+    assert len(calls) == len(SEVEN), f"the refinement ran {len(calls)} times for one block: {calls}"
+    assert all(len(c) == 1 for c in calls), f"a fire held more than one target linear: {calls}"
+    assert sorted(name for c in calls for name in c) == sorted(SEVEN), (
+        "the cycle did not cover every factorized linear exactly once"
     )
 
 
-def test_scn_joint_budget_is_the_appendix_c_regime_once_per_block():
-    """The App. C factorized-stage regime, consumed once for the whole block.
+def test_scn_per_target_ste_refines_one_linear_at_a_time():
+    """Each fire's record carries one row — the target's own objective reading.
 
-    `epochs x (rows // batch_size)` — the same regime the per-target cycle handed
-    EACH linear, now spent once. Every row books that one budget, so a row cannot
-    be read as a per-linear share of it.
+    The joint pass could not do this: every row shared one block objective
+    measured once, so a row could not be attributed to a linear. Here each fire
+    is scored against the block output at its own point in the cycle and its
+    record names the target and holds exactly that target's row.
     """
-    cfg = _block_cfg(stage_latent=StageHyper(1e-3, 4, 8))
-    rec = _run_block(cfg=cfg)
-    expected = cfg.stage_latent.epochs * (8 // cfg.stage_latent.batch_size)
-    assert rec["total_steps"] == expected
-    assert rec["steps"] == expected, "the stage did not run its recorded budget"
-    assert "allocation" not in rec, "a block-pooled allocation is not part of the regime"
-    for name, row in rec["per_linear"].items():
-        assert row["scheduled_steps"] == expected, name
-        assert row["steps"] == expected, name
+    recs = _run_block()
+    assert len(recs) == len(SEVEN)
+    targets = [r["target"] for r in recs]
+    assert sorted(targets) == sorted(SEVEN), targets
+    for r in recs:
+        assert list(r["per_linear"]) == [r["target"]], (
+            "a fire's record must carry exactly its target's row"
+        )
+        row = r["per_linear"][r["target"]]
+        assert {"u_rel_move", "v_rel_move", "residual_before", "residual_after"} <= set(row)
+
+
+def test_scn_per_target_ste_cycle_sequence():
+    """The cycle order: factorize target i → STE(i) → harden → next target.
+
+    Target 1 is factorized first with NO preceding TuneFP; every later target is
+    preceded by its TuneFP(still-FP remainder) pass. So the interleaved
+    TuneFP/STE record stream is a STE, then (TuneFP, STE) repeated N−1 times —
+    the shape that shows STE runs INSIDE the factorization loop rather than once
+    after it closes.
+    """
+    sink = _run_events()
+    seq = [(event, info.get("target")) for event, info in sink if event in ("ste", "tune_fp")]
+    events = [event for event, _ in seq]
+    assert events == ["ste"] + ["tune_fp", "ste"] * (len(SEVEN) - 1), events
+    ste_targets = [target for event, target in seq if event == "ste"]
+    assert len(set(ste_targets)) == len(SEVEN), (
+        f"an STE fire repeated a target instead of advancing: {ste_targets}"
+    )
+    assert all(target is not None for target in ste_targets), (
+        "every STE fire must name the target it refined"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -212,34 +250,22 @@ def test_scn_joint_budget_is_the_appendix_c_regime_once_per_block():
 
 
 def test_scn_ste_record_is_one_block_record_with_per_linear_rows():
-    """One record, per-linear rows, and ONE measurement behind every row.
+    """One record per fire: its scope, its target, and the target's one row.
 
-    The shared-per-row objective is the determinism the per-target structure
-    cannot produce: there, each row measured the block objective at its own
-    point in the cycle (and the values differ), so equal readings across rows are
-    only possible when a single pass measured the block once.
+    A per-target fire CAN attribute its wall time to the single linear it
+    refined, so the target's row carries the fire's own clock (the joint pass
+    could not — its one measurement belonged to the whole set).
     """
-    rec = _run_block()
-
-    assert rec["scope"] == STE_JOINT_SCOPE, (
-        "a joint firing must declare its scope; the rows alone cannot say whether "
-        "one pass or N produced them"
-    )
-    per = rec["per_linear"]
-    assert sorted(per) == sorted(SEVEN), "the record must cover every factorized linear"
-
-    for key in ("residual_before", "residual_after", "gradient_norm"):
-        values = {row[key] for row in per.values()}
-        assert len(values) == 1, (
-            f"{key} differs across rows ({sorted(values)}): the rows were not produced "
-            "by one pass over one block objective"
+    recs = _run_block()
+    assert len(recs) == len(SEVEN)
+    for r in recs:
+        assert r["scope"] == STE_PER_TARGET_SCOPE, (
+            "a per-target firing must declare its scope; the rows alone cannot "
+            "say whether one pass or N produced them"
         )
-    row = per["mlp.down_proj"]
-    assert row["residual_after"] <= row["residual_before"], "the joint pass made the block worse"
-    assert rec["elapsed_s"] is not None and rec["elapsed_s"] > 0.0, (
-        "the block's own wall time is the stage's row time; per-linear shares are null"
-    )
-    for name, row in per.items():
+        assert r["target"] in SEVEN
+        assert list(r["per_linear"]) == [r["target"]]
+        row = r["per_linear"][r["target"]]
         assert {
             "dead_columns",
             "flips_u",
@@ -249,17 +275,18 @@ def test_scn_ste_record_is_one_block_record_with_per_linear_rows():
             "v_rel_move",
             "s1_rel_move",
             "s2_rel_move",
-        } <= set(row), name
-        assert row["elapsed_s"] is None, (
-            f"{name}: a per-linear share of a joint pass would name a share no clock observed"
+        } <= set(row), r["target"]
+        assert r["elapsed_s"] is not None and r["elapsed_s"] > 0.0, (
+            "the fire's own wall time is the target's row time"
         )
+        assert row["elapsed_s"] == r["elapsed_s"]
 
 
 def test_scn_dead_columns_are_recorded_per_linear():
     """A rank component with a zero factor column carries no sign, and is counted.
 
-    The count is the only thing that can distinguish an effective joint pass from
-    one whose rank budget is partly inert by construction.
+    The count is the only thing that can distinguish an effective fire from one
+    whose rank budget is partly inert by construction.
     """
     linear = nn.Linear(16, 12, bias=False, dtype=torch.float64)
     gen = torch.Generator().manual_seed(5)
@@ -277,12 +304,6 @@ def test_scn_dead_columns_are_recorded_per_linear():
         "a dead column in EITHER factor kills the rank component; the counts must union"
     )
 
-    # ... and the row reports it, measured after the pass (a component the pass
-    # did not revive stays dead).
-    _set_linear(linear, fac)
-    with torch.no_grad():
-        fac.u_latent.data[:, 0] = 0.0
-        fac.v_latent.data[:, 1] = 0.0
     _set_linear(linear, fac)
     x_b = torch.randn(8, 4, 16, generator=gen, dtype=torch.float64)
     y_b = torch.randn(8, 4, 12, generator=gen, dtype=torch.float64)
@@ -299,24 +320,62 @@ def test_scn_dead_columns_are_recorded_per_linear():
 
 
 def test_scn_joint_pass_uses_the_normalized_weight_and_the_floor():
-    """The joint pass consumes the resolved unit-mean weight and the floor guard."""
+    """Every fire consumes the resolved unit-mean weight and the floor guard."""
     from quantibbler.ptq.block_recon import LOSS_WEIGHT_MEAN_NORMALIZATION
 
-    rec = _run_block()
-    assert rec["loss_weight"] == "terminal_grad"
-    assert rec["loss_weight_normalization"] == LOSS_WEIGHT_MEAN_NORMALIZATION
-    assert rec["loss_weight_mean_after"] == pytest.approx(1.0), (
-        "the weight handed to the joint loss is not unit mean"
-    )
-    assert rec["loss_weight_mean_before"] > 0.0, "the pre-normalization scale is not on the record"
-    assert rec["gradient_floor"] is not None and rec["gradient_floor"] > 0.0, (
-        "the joint pass must carry the resolution-derived floor it guarded on"
-    )
-    assert rec["inert"] is not None, "a completed joint pass declares its inertia"
+    recs = _run_block()
+    assert recs
+    for r in recs:
+        assert r["loss_weight"] == "terminal_grad"
+        assert r["loss_weight_normalization"] == LOSS_WEIGHT_MEAN_NORMALIZATION
+        assert r["loss_weight_mean_after"] == pytest.approx(1.0), (
+            "the weight handed to the loss is not unit mean"
+        )
+        assert r["loss_weight_mean_before"] > 0.0, (
+            "the pre-normalization scale is not on the record"
+        )
+        assert r["gradient_floor"] is not None and r["gradient_floor"] > 0.0
+        assert r["inert"] is not None, "a completed fire declares its inertia"
 
 
 # --------------------------------------------------------------------------
-# The provable separation, on a fixture where the correction needs BOTH linears
+# The App. C budget, per linear — consumed afresh for EVERY target
+# --------------------------------------------------------------------------
+
+
+def test_scn_per_target_budget_is_appendix_c_per_linear():
+    """Each fire books the App. C regime for its ONE linear, undivided."""
+    cfg = _block_cfg(stage_latent=StageHyper(1e-3, 4, 8))
+    recs = _run_block(cfg=cfg)
+    expected = cfg.stage_latent.epochs * (8 // cfg.stage_latent.batch_size)
+    assert len(recs) == len(SEVEN)
+    for r in recs:
+        assert r["total_steps"] == expected, r["target"]
+        assert r["steps"] == expected, f"{r['target']}: the stage did not run its recorded budget"
+        assert "allocation" not in r, "a block-pooled allocation is not part of the regime"
+        row = r["per_linear"][r["target"]]
+        assert row["scheduled_steps"] == expected, r["target"]
+        assert row["steps"] == expected, r["target"]
+
+
+def test_scn_joint_budget_is_the_appendix_c_regime_once_per_block():
+    """The block's TOTAL is N× the regime — one full budget per target.
+
+    Where the superseded joint pass spent `epochs x (rows // batch)` ONCE for the
+    block and handed every linear a share of that one pass, the cycle spends it
+    afresh for each target; the sum across a block of N linears is N× the regime.
+    """
+    cfg = _block_cfg(stage_latent=StageHyper(1e-3, 4, 8))
+    recs = _run_block(cfg=cfg)
+    expected = cfg.stage_latent.epochs * (8 // cfg.stage_latent.batch_size)
+    assert len(recs) == len(SEVEN)
+    assert sum(r["total_steps"] for r in recs) == expected * len(SEVEN), (
+        "the block's total STE budget is not N× the App. C factorized-stage regime"
+    )
+
+
+# --------------------------------------------------------------------------
+# The per-target call holds ONE linear and leaves its neighbours bit-identical
 # --------------------------------------------------------------------------
 
 
@@ -337,12 +396,7 @@ class _Chain(nn.Module):
 
 
 def _chained_factors(seed: int = 11, d: int = 8, rank: int = 4, near_zero: bool = True):
-    """A two-linear chain with both linears factorized, or the same fresh pair.
-
-    The target comes from a DIFFERENT teacher, so the block objective cannot be
-    closed by either linear alone; the latents sit near the sign boundary, which
-    is what makes the pass's effect measurable through the sign-mapped forward.
-    """
+    """A two-linear chain with both linears factorized, or the same fresh pair."""
     gen = torch.Generator().manual_seed(seed)
     x_b = torch.randn(8, 4, d, generator=gen, dtype=torch.float64)
     teacher = _Chain(d, seed=seed + 100)
@@ -371,26 +425,19 @@ def _params(fac: FactorizedLinear):
     return (fac.u_latent, fac.v_latent, fac.s1, fac.s2)
 
 
-def test_joint_pass_frees_every_factorized_linear_at_once():
-    """A correction needing BOTH linears is reachable only when both are free.
+def test_per_target_call_holds_one_linear_and_leaves_the_neighbour_bit_identical():
+    """A fire's free set is ONE linear; its neighbour is not merely unmoved.
 
     Provable, and that is why this is the fixture: a per-target call's optimizer
-    holds ONE linear's parameters, so the neighbour's parameters are bit-identical
-    after it runs — the neighbour is not merely unmoved, it is not in the
-    optimization at all. The joint pass holds both, moves both, and lowers the
-    block objective on the same fixture and the same budget.
-
-    What is deliberately NOT claimed here: that the joint pass beats the
-    SEQUENTIAL composition's residual. Measured across seeds and budgets that
-    ordering is non-monotone, because the composition gets two bounded passes
-    where the joint pass gets one.
+    holds ONE linear's parameters, so the neighbour's parameters are
+    bit-identical after it runs — the neighbour is not in the optimization at
+    all. This is the property the cycle relies on when it hardens each target
+    before the next fires.
     """
     cfg = PTQConfig(
         solver_backend="numpy", compute_dtype="float64", rank=4, stage_latent=StageHyper(0.3, 1, 1)
     )
     steps = 48
-
-    # Control: the per-target unit's free set is one linear.
     blk_one, fa_one, fb_one, x_b, y_b = _chained_factors()
     neighbour = [p.detach().clone() for p in _params(fb_one)]
     with _quiet():
@@ -400,27 +447,52 @@ def test_joint_pass_frees_every_factorized_linear_at_once():
         torch.equal(p.detach(), q) for p, q in zip(_params(fb_one), neighbour, strict=True)
     ), "a neighbour's parameters must be untouched by a per-target pass"
 
-    # The joint pass: both linears are free, both move, the block objective drops.
-    blk, fa, fb, x_b, y_b = _chained_factors()
-    before_out = [p.detach().clone() for p in _params(fb)]
-    with _quiet():
-        joint = _tune_latent_ste(
-            blk, {"proj_in": fa, "proj_out": fb}, x_b, y_b, cfg, 1, steps=steps
-        )
-    assert sorted(joint["per_linear"]) == ["proj_in", "proj_out"]
-    for name in ("proj_in", "proj_out"):
-        row = joint["per_linear"][name]
-        assert row["u_rel_move"] > 0.0 and row["v_rel_move"] > 0.0, (
-            f"{name}: a joint pass must have every factorized linear's latents moving"
-        )
-    assert not all(
-        torch.equal(p.detach(), q) for p, q in zip(_params(fb), before_out, strict=True)
-    ), "the second linear did not move: it was not a free parameter"
-    shared = joint["per_linear"]["proj_in"]
-    assert shared["residual_after"] < shared["residual_before"], (
-        f"the joint pass left the block objective at {shared['residual_after']!r} "
-        f"from {shared['residual_before']!r}"
+
+# --------------------------------------------------------------------------
+# The harden step (Algorithm 1 lines 20-23) between targets
+# --------------------------------------------------------------------------
+
+
+def test_harden_is_idempotent_and_freezes_the_target():
+    """Extraction is the ONE latent-to-bit site, and it commits the target.
+
+    The bits written back are the bits :func:`extract_and_pack` emits later, so
+    the export re-extraction is idempotent BY CONSTRUCTION: a second extraction
+    of an already-hardened target flips zero bits. The freeze keeps a later
+    fire's optimizer out of a value the cycle has already committed.
+    """
+    linear = nn.Linear(16, 12, bias=False, dtype=torch.float64)
+    gen = torch.Generator().manual_seed(6)
+    with torch.no_grad():
+        linear.weight.copy_(torch.randn(12, 16, generator=gen, dtype=torch.float64) * 0.4)
+    fac = FactorizedLinear.from_weight(linear.weight.detach(), rank=6)
+
+    harden_target(fac, "probe")
+    assert all(not p.requires_grad for p in (fac.u_latent, fac.v_latent, fac.s1, fac.s2)), (
+        "the harden step must freeze all four tensors"
     )
+
+    st = extract_and_pack(fac.u_latent.detach(), fac.v_latent.detach(), name="probe")
+    assert (np.abs(st.Ub) == 1).all() and (np.abs(st.Vb) == 1).all()
+    # The hardened latent already holds its own sign: re-extraction flips nothing.
+    assert torch.equal(torch.sign(fac.u_latent.detach()), fac.u_latent.detach())
+    assert torch.equal(torch.sign(fac.v_latent.detach()), fac.v_latent.detach())
+
+    before_u = fac.u_latent.detach().clone()
+    before_v = fac.v_latent.detach().clone()
+    harden_target(fac, "probe")  # a second harden must be a no-op
+    assert torch.equal(fac.u_latent.detach(), before_u), "re-hardening moved the latents"
+    assert torch.equal(fac.v_latent.detach(), before_v), "re-hardening moved the latents"
+
+
+# --------------------------------------------------------------------------
+# The provable separation: a zero baseline records no value
+# --------------------------------------------------------------------------
+
+
+def _chained_one(seed: int = 11, d: int = 8, rank: int = 4):
+    blk, fa, fb, x_b, y_b = _chained_factors(seed=seed, d=d, rank=rank)
+    return blk, fa, fb, x_b, y_b
 
 
 def test_zero_baseline_movement_records_no_value():
@@ -432,23 +504,10 @@ def test_zero_baseline_movement_records_no_value():
     parameter never moved" -- about a latent the pass may have moved off zero,
     and that confident zero also entered ``max(moves) < floor_rel``, so a moved
     row could be declared inert on a figure nobody measured.
-
-    Both degenerate arms are pinned here, each against movement recomputed from
-    the held entry snapshot:
-
-    * the zeroed latent MOVED off zero (the old row read exactly ``0.0``);
-    * the zeroed latent was HELD at zero -- a zero denominator is no denominator
-      whether or not anything moved, so this is still no value and not a
-      legitimate measured ``0.0``.
-
-    Reachability note: the driver refuses an all-zero factor at
-    ``magnitude_balance`` ("undefined for an all-zero factor"), so this is a
-    state of the STAGE BOUNDARY -- and that boundary is the contract this
-    function owns, since its refinement unit is the factorized set it is handed.
     """
     cfg = PTQConfig(solver_backend="numpy", rank=4, stage_latent=StageHyper(1e-3, 1, 1))
 
-    # (a) Moved off zero: in a one-linear pass a zeroed factor is the only
+    # (a) Moved off zero: in a one-linear fire a zeroed factor is the only
     # parameter left carrying a gradient -- its sign is zero, so every term of the
     # outer product that multiplies it dies -- and the STE passthrough steps it.
     blk, fa, _fb, x_b, y_b = _chained_factors()
@@ -467,39 +526,15 @@ def test_zero_baseline_movement_records_no_value():
     assert rec["inert"] is None, "no movement figure -- no inertness verdict either"
     assert stats["inert"] is None, "the stage verdict inherits the row's no-answer"
 
-    # (b) Held at zero: the zeroed factor is held out of the optimizer across the
-    # joint pass. Its linear keeps a bias so the neighbour still sees a nonzero
-    # input: a zeroed factor zeroes every OTHER gradient of its own linear, so
-    # without that feed the sibling linear gets no gradient and the whole stage
-    # goes vacuous rather than running over a held baseline.
-    blk, fa, fb, x_b, y_b = _chained_factors()
-    with torch.no_grad():
-        fa.u_latent.data.zero_()
-        fa.bias.data.fill_(0.3)
-    fa.u_latent.requires_grad_(False)
-    entry_u = fa.u_latent.detach().clone()
-    with _quiet():
-        stats = _tune_latent_ste(blk, {"proj_in": fa, "proj_out": fb}, x_b, y_b, cfg, 1, steps=16)
-    rec = stats["per_linear"]["proj_in"]
-    assert stats["steps"] == 16 and not stats["vacuous"], "the stage must run for this"
-    assert float(entry_u.pow(2).sum()) == 0.0, "the entry baseline is exactly zero"
-    assert float((fa.u_latent.detach() - entry_u).pow(2).sum()) == 0.0, (
-        "the held factor stayed where the zero baseline was"
-    )
-    assert rec["u_rel_move"] is None, "held or moved, a zero baseline has no ratio"
-    assert rec["inert"] is None, "no movement figure -- no inertness verdict either"
-    assert stats["inert"] is None, "the stage verdict inherits the row's no-answer"
-
 
 def test_nonzero_baseline_records_zero_when_nothing_moves():
     """The discriminator: a MEASURED zero is still ``0.0``, and not ``None``.
 
     With a non-zero entry baseline and the factor held out of the optimizer
     nothing moves, so the relative movement is a measured ``0.0``. It is the
-    denominator that decides between this and the ``None`` arms above, not the
+    denominator that decides between this and the ``None`` arm above, not the
     movement: 0.0 / anything is a value, while a zero baseline has no ratio at
-    all. The other factors stay tunable, so the stage runs a live gradient and
-    this is not the vacuous path in disguise.
+    all.
     """
     blk, fa, fb, x_b, y_b = _chained_factors()
     fa.u_latent.requires_grad_(False)

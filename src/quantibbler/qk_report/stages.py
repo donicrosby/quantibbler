@@ -26,6 +26,16 @@ PAPER_REGIME_CONFIG_FIELDS: tuple[str, ...] = (
     "device",
 )
 
+#: The STE row-scope marker the per-target cycle RETIRED, kept here so an
+#: old report stays READABLE rather than being denied anonymously: an STE row
+#: that still declares this joint-pass scope (Algorithm 1 line 19's block-scoped
+#: call, the reading the 2026-10-28 AMEND ruling overrides) is a mechanism-class
+#: deviation, and :func:`fidelity_conditions`'s ``ste_per_target`` condition is
+#: the field that names it. The per-target cycle's own rows declare
+#: ``per_target`` (``ptq._tuning.STE_PER_TARGET_SCOPE``); the value is spelled
+#: here, not imported, because ``qk_report`` does not depend on ``ptq``.
+STE_BLOCK_JOINT_SCOPE = "block_joint"
+
 
 def paper_regime_conditions(config: Any) -> dict[str, bool]:
     """The eight ``config_*`` conditions for one declared-config mapping.
@@ -114,7 +124,8 @@ def fidelity_conditions(
     deviating config names the field it deviates on instead of denying the label
     anonymously. The mechanism list mirrors the spec exactly — greedy-polish
     rounds, a STE scale-only re-scope marker, a vacuous-teacher event, a stage
-    failure, and a solver other than LB-ADMM.
+    failure, a solver other than LB-ADMM, and an STE row still declaring the
+    retired ``block_joint`` scope (``ste_per_target`` denied).
 
     Required-stage execution (scenario
     ``required_stage_execution_reads_the_same_record``) is read off this same
@@ -146,6 +157,7 @@ def fidelity_conditions(
     flip_pass = False
     rescope = False
     vacuous = False
+    ste_scopes: set[str] = set()
     captures: list[dict] = []
     executions: dict[str, int] = {}
     for entry in stages or []:
@@ -164,6 +176,12 @@ def fidelity_conditions(
                 # it as polish having happened rather than as zero.
                 polish_rounds = max(polish_rounds, 1)
         elif event == "ste" and isinstance(info, dict):
+            # The STE row carries its SCOPE (the refinement unit). An absent
+            # scope is not collected -- a pre-scope writer is read by the
+            # required-stage condition, not denied here for a field it never had.
+            scope = info.get("scope")
+            if scope is not None:
+                ste_scopes.add(str(scope))
             for rec in (info.get("per_linear") or {}).values():
                 if not isinstance(rec, dict):
                     continue
@@ -195,6 +213,17 @@ def fidelity_conditions(
         "capture_is_fp_stream": not captures or all(c.get("y_b_stream") == "fp" for c in captures),
         "no_stage_failure": not bool(stage_failure),
         "solver_is_admm": solver == "admm",
+        # The STE SCOPE condition (spec delta r4, S-2): the refinement unit is
+        # the per-target linear, and the record SHALL carry it. `ste_per_target`
+        # is the positive condition -- it holds unless an STE row declares the
+        # RETIRED `block_joint` scope (the one `block_joint` marker the spec names;
+        # written `ste_block_joint` in the delta's condition vocabulary), which on
+        # a paper-regime run is a mechanism-class deviation, not a measurement.
+        # Scoped to rows that carry a scope, exactly like `capture_is_fp_stream`:
+        # a record with no STE row is already denied by `required_ste_executed`,
+        # so demanding the marker here too would flip the label on records whose
+        # scope was never at issue. A row that DOES carry the marker denies.
+        "ste_per_target": STE_BLOCK_JOINT_SCOPE not in ste_scopes,
     }
     # The declared-config half of the verdict, one condition per regime field.
     conditions.update(paper_regime_conditions(config))
@@ -269,12 +298,15 @@ _STAGE_LINES: tuple[tuple[str, str, str, str | None, bool], ...] = (
     (
         "ste",
         "19",
-        "TuneLatentSTE: joint block-level factorized-component refinement",
-        "one pass per block, jointly over every factorized linear (one "
-        "optimizer, one block-output loss) -- a DECLARED deviation from "
-        'Algorithm 1 line 19\'s "the current target linear layer" prose; the '
-        "[NQ] App. C factorized-stage budget is consumed once for the whole "
-        "block",
+        "TuneLatentSTE: per-target factorized-component refinement",
+        "one pass per TARGET linear, inside the factorization loop (one "
+        "optimizer, one block-output loss at each fire), the target then "
+        "hardened -- the reading Figure 3 and [NQ] Sec 3.2 Step 3's singular "
+        '"the current target linear layer" prescribe (the per-target reading '
+        "governs); Algorithm 1 line 19's block-scoped pseudocode (:780) is the "
+        "DECLARED tension it overrides. The [NQ] App. C factorized-stage budget "
+        "is consumed afresh for each of the block's linears, so a block of N "
+        "targets spends the regime N times",
         True,
     ),
     ("sign_extract_pack", "20-23", "sign extraction and packing", None, True),
@@ -427,11 +459,14 @@ def stage_row_times(stages: list) -> dict[str, dict]:
     """Per-stage wall time and its cost per ROW, read off the stage records.
 
     ONE row per unit the stage's cost is quoted in (qk-ptq-speedups, scenario
-    ``ste_tunefp_gpu_zero_algorithm_change``): a ``tune_fp`` row is one fire,
-    a ``ste`` row is one BLOCK fire -- the stage runs one joint pass over every
-    factorized linear, so its wall time belongs to the block and dividing it by
-    linear would report a share no clock observed. Every stage's row is
-    therefore one invocation, with the time the record itself carries.
+    ``ste_tunefp_gpu_zero_algorithm_change``): a ``tune_fp`` row is one fire and
+    a ``ste`` row is one TARGET's fire -- since the per-target cycle (AMEND
+    2026-10-28) TuneLatentSTE runs once per linear, so its wall time belongs to
+    that one linear and the row count is the block's fire count. (Pre-AMEND
+    reports carry one block-joint ``ste`` row per block instead; their totals
+    are still the totals the pricing quotes, their per-row means are not
+    comparable.) Every stage's row is therefore one invocation, with the time
+    the record itself carries.
 
     A recorded ``tune_fp`` skip is NOT a row: it did no work and spent no time,
     and counting it would deflate the stage's per-row cost. Rows without a

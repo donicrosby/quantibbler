@@ -44,10 +44,16 @@ from quantibbler.ptq import block_recon as br  # noqa: E402
 from quantibbler.ptq.config import PTQConfig, StageHyper  # noqa: E402
 
 #: The proposal's own row counts at paper geometry ([NQ] 28 blocks): TuneFP fires
-#: N-1 = 6 times per block, and the refinement is ONE joint pass per block over
-#: all 7 scoped linears, so its row count is the block count. Labelled as an
-#: EXTRAPOLATION here: this fixture's block carries one factorized linear, so its
-#: own row count would be 28 fires / 28 blocks, not these.
+#: N-1 = 6 times per block. The ``ste`` entry is the PRE-AMEND block-joint
+#: projection (one joint pass per block over all 7 scoped linears, so its row
+#: count was the block count); under the per-target cycle the refinement fires
+#: once per linear, so the projection's row count is 7 x 28 = 196 TARGET fires
+#: and the measured per-fire wall time is a per-target time -- this entry is NOT
+#: re-derived here (a re-derivation needs a fresh bench run, not new arithmetic),
+#: so do not quote the ``ste`` projection as the per-target cycle's cost.
+#: Labelled as an EXTRAPOLATION either way: this fixture's block carries one
+#: factorized linear, so its own row count would be 28 fires / 28 blocks, not
+#: these.
 PROPOSAL_ROWS = {"tune_fp": 168, "ste": 28}
 
 #: Which dtype each leg runs. The pair IS the comparison: fp64 host reference

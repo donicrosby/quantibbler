@@ -411,8 +411,8 @@ def _dead_columns(fac: FactorizedLinear) -> int:
     for every (output, input) pair, so that component's sign is arbitrary and
     the latents indexing it cannot move the stored weight. Same notion as the
     dead column ``lb_admm`` floors in place of a sign, applied to the refinement
-    record so a reader can tell an effective joint pass from one whose rank
-    budget is partly inert by construction.
+    record so a reader can tell an effective per-target pass from one whose
+    rank budget is partly inert by construction.
     """
     with torch.no_grad():
         u = fac.u_latent.detach()

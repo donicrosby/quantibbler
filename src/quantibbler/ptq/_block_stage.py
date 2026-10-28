@@ -608,49 +608,48 @@ def reconstruct_block(
     # What is left for this point is the ABSENCE case below: a block whose loop
     # fired no TuneFP at all still owes the record that says so.
     _note_block_progress(0, f"{name_prefix or 'block'}/stats_done")
-    if refine:
-        if tune_fp_record is None:
-            # No TuneFP fired. Two distinct causes, named rather than merged:
-            # a block with fewer than two quantizable linears has no second
-            # target for the per-target cycle (legitimate, and run-level
-            # execution counting means a per-block skip cannot false-deny a
-            # faithful run), while a statistics book shorter than the linear
-            # list means the loop was TRUNCATED before the cycle completed.
-            truncated = len(facs) < len(quantizable_linears)
-            tune_fp_record = {
-                "stage": "tune_fp",
-                "label": name_prefix or f"offset{layer_offset}",
-                "skipped": (
-                    "factorization_loop_truncated_before_placement"
-                    if truncated
-                    else "block_carries_no_second_target"
-                ),
-                "tunable": [],
-                "factorized_in_block": len(facs),
-                "capture_index": capture_index,
-                "teacher_source": teacher_source,
-                "teacher_fingerprint": teacher_fingerprint,
-                "marker": TUNE_FP_LOSS_MARKER,
-                "steps": 0,
-                "vacuous": False,
-                # A skip is not an execution: inertness is unknown (None), and the
-                # weighting scale is carried so the row still names its regime
-                # (qk-tune-loss-scale).
-                "inert": None,
-                "loss_weight": ("uniform" if terminal_loss_weight is None else "terminal_grad"),
-                "loss_weight_source": loss_weight_source,
-                "loss_weight_mean_before": loss_weight_mean_before,
-                "loss_weight_mean_after": loss_weight_mean_after,
-                "loss_weight_normalization": (
-                    LOSS_WEIGHT_MEAN_NORMALIZATION if loss_weight_mean_after is not None else None
-                ),
-                "gradient_floor": None,
-                "floor_optimizer_eps": None,
-                "floor_dtype_rel_resolution": None,
-                "floor_param_dtype": None,
-            }
-            if recorder is not None:
-                recorder("tune_fp", **tune_fp_record)
+    if refine and tune_fp_record is None:
+        # No TuneFP fired. Two distinct causes, named rather than merged:
+        # a block with fewer than two quantizable linears has no second
+        # target for the per-target cycle (legitimate, and run-level
+        # execution counting means a per-block skip cannot false-deny a
+        # faithful run), while a statistics book shorter than the linear
+        # list means the loop was TRUNCATED before the cycle completed.
+        truncated = len(facs) < len(quantizable_linears)
+        tune_fp_record = {
+            "stage": "tune_fp",
+            "label": name_prefix or f"offset{layer_offset}",
+            "skipped": (
+                "factorization_loop_truncated_before_placement"
+                if truncated
+                else "block_carries_no_second_target"
+            ),
+            "tunable": [],
+            "factorized_in_block": len(facs),
+            "capture_index": capture_index,
+            "teacher_source": teacher_source,
+            "teacher_fingerprint": teacher_fingerprint,
+            "marker": TUNE_FP_LOSS_MARKER,
+            "steps": 0,
+            "vacuous": False,
+            # A skip is not an execution: inertness is unknown (None), and the
+            # weighting scale is carried so the row still names its regime
+            # (qk-tune-loss-scale).
+            "inert": None,
+            "loss_weight": ("uniform" if terminal_loss_weight is None else "terminal_grad"),
+            "loss_weight_source": loss_weight_source,
+            "loss_weight_mean_before": loss_weight_mean_before,
+            "loss_weight_mean_after": loss_weight_mean_after,
+            "loss_weight_normalization": (
+                LOSS_WEIGHT_MEAN_NORMALIZATION if loss_weight_mean_after is not None else None
+            ),
+            "gradient_floor": None,
+            "floor_optimizer_eps": None,
+            "floor_dtype_rel_resolution": None,
+            "floor_param_dtype": None,
+        }
+        if recorder is not None:
+            recorder("tune_fp", **tune_fp_record)
 
     # --- Extraction and packing (lines 20-23), for the artifact's layer states.
     # The cycle already hardened each target through this same ONE latent-to-bit

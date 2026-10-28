@@ -14,12 +14,18 @@ Per transformer block, sequentially:
    the [NQ] Figure 3 per-target placement ([NQ] Step 1, error-propagation
    mitigation) — fired once per target after the first, so TuneFP tunes the
    still-FP remainder BEFORE that target is factorized;
-4. factorize every scoped linear (module declaration order), then refine the
-   block's factors (U, V, s1, s2) with ONE TuneLatentSTE pass against the
-   block-output objective of Eq. 10 (Step 3, line 19), jointly over ALL of the
-   block's factorized linears at once;
+4. factorize each scoped linear (module declaration order) and, immediately
+   after THAT target's factorization, refine its factors (U, V, s1, s2) with
+   one TuneLatentSTE pass against the block-output objective of Eq. 10
+   (Step 3, line 19) at the full App. C factorized-stage budget per linear;
+   the target is then hardened (its signs extracted into the latents, all
+   four tensors frozen) before the next target runs. The per-target reading
+   of line 19 (Sec 3.2 Step 3's singular "the current target linear layer",
+   :641, and Figure 3) governs; Algorithm 1's block-scoped pseudocode (:780,
+   one call after the loop closes) is the DECLARED tension it overrides;
 5. sign extraction ``sign(U)``/``sign(V)`` (sign(0) = +1) and packing via
-   the qk-kernels dispatch (lines 20-23).
+   the qk-kernels dispatch (lines 20-23) — committed per target at harden
+   time and re-run at export through the same latent-to-bit site.
 
 Embeddings, LM heads and norms stay full precision (A-9); only ``nn.Linear``
 children of the block are factorized. In-block layer order is module

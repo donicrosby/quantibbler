@@ -133,6 +133,10 @@ def test_scn_all_conditions_satisfied_yields_true(
         "capture_is_fp_stream": True,
         "no_stage_failure": True,
         "solver_is_admm": True,
+        # The STE scope condition (spec delta r4, S-2): the refinement unit is
+        # the per-target linear, and this run's STE rows declare it, so no
+        # retired `block_joint` marker is present.
+        "ste_per_target": True,
         # The declared-config half: one condition per regime field, all read off
         # the declaration this launch carried (`fidelity_config`).
         "config_solver_is_admm": True,
@@ -227,18 +231,22 @@ def test_scn_all_conditions_satisfied_yields_true(
     assert "informed assumption" in mapped["tune_fp"]["deviation"]
     # Each cell must describe the ruling IN FORCE and name the reading it
     # supersedes: TuneFP's per-target cycle (the once-per-block placement was
-    # falsified by the 64,151x fire), TuneLatentSTE's one joint pass per block
-    # over the whole factorized set (a DECLARED departure from Algorithm 1
-    # line 19). A cell that still presents a superseded reading as the method
-    # is what these two pins exist to catch.
+    # falsified by the 64,151x fire) and TuneLatentSTE's per-TARGET refinement
+    # (the block-joint pass is the superseded shape; Algorithm 1 line 19's
+    # block-scoped pseudocode is the DECLARED tension the per-target reading
+    # overrides). A cell that still presents a superseded reading as the method
+    # is what these pins exist to catch.
     assert "PER-TARGET" in mapped["tune_fp"]["deviation"], (
         "the tune_fp stage-map cell still carries the overruled placement reading"
     )
     assert "once per block" not in mapped["tune_fp"]["deviation"]
-    assert "jointly over every factorized linear" in mapped["ste"]["deviation"], (
-        "the ste stage-map cell does not describe the joint block pass"
+    assert "per TARGET linear" in mapped["ste"]["deviation"], (
+        "the ste stage-map cell does not describe the per-target refinement"
     )
-    assert "DECLARED deviation" in mapped["ste"]["deviation"], (
+    assert "once per block" not in mapped["ste"]["deviation"], (
+        "the ste stage-map cell still carries the overruled joint-pass reading"
+    )
+    assert "DECLARED tension" in mapped["ste"]["deviation"], (
         "the ste cell names no declared departure from Algorithm 1 line 19"
     )
 
@@ -288,13 +296,15 @@ def test_scn_all_conditions_satisfied_yields_true(
     admm = [stage for stage in report["stages"] if stage["event"] == "lb_admm"]
     assert admm and all(stage["polish_rounds"] == 0 for stage in admm)
 
-    # TuneLatentSTE: ONE joint pass per block over the whole factorized set, with
-    # `paper_ste` on every scoped linear and the measured crossings still on
-    # record. Every row books that one block budget.
+    # TuneLatentSTE: one fire per target linear, each carrying its own target's
+    # row, `paper_ste` on every scoped linear and the measured crossings still on
+    # record. Every fire books the App. C regime for its one linear.
     ste = [stage for stage in report["stages"] if stage["event"] == "ste"]
     assert ste
     for stage in ste:
         assert stage["per_linear"], "no per-linear STE record"
+        assert stage["scope"] and stage["target"], "a fire must declare scope and target"
+        assert list(stage["per_linear"]) == [stage["target"]]
         assert "allocation" not in stage, "a block-pooled allocation survived"
         for name, rec in stage["per_linear"].items():
             assert {"flips_u", "flips_v", "s1_rel_move", "s2_rel_move"} <= set(rec), name

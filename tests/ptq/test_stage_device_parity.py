@@ -283,19 +283,20 @@ def test_scn_ste_tunefp_gpu_zero_algorithm_change() -> None:
         assert c["zero_crossings"] == a["zero_crossings"], name
 
     # Per-stage row-time is reported, so the artifact translates the stage's cost
-    # instead of restating the proposal's estimate: one row per fire, and the STE
-    # fire is the block.
+    # instead of restating the proposal's estimate: one row per fire, and each
+    # fire refines ONE target linear, so the row carries the fire's own clock.
     for tag, rec in (("cpu", cpu), ("accel", acc)):
         assert rec["tune_fp"]["elapsed_s"] > 0.0, tag
-        # The STE stage's row is the BLOCK it refined: one joint pass cannot
-        # split its wall time by linear, so the per-linear rows carry null and
-        # the record itself carries the stage's time.
+        # The per-target fire's row time IS the fire's own clock (a per-target
+        # call refines exactly one linear, so no share has to be invented).
         assert rec["ste"]["elapsed_s"] > 0.0, tag
         for name, per in rec["ste"]["per_linear"].items():
-            assert per["elapsed_s"] is None, (tag, name)
+            assert per["elapsed_s"] == rec["ste"]["elapsed_s"], (tag, name)
         mapped = qk_report.stage_map([(event, info) for event, info in rec["events"]])
         assert mapped["tune_fp"]["row_time_s"] > 0.0, tag
-        assert mapped["ste"]["rows"] == 1, tag
+        # _Block carries TWO quantizable linears: the per-target cycle fires STE
+        # once per target, so two rows, each banking its own fire's wall time.
+        assert mapped["ste"]["rows"] == 2, tag
         assert mapped["ste"]["row_time_s"] > 0.0, tag
 
 
