@@ -11,7 +11,7 @@ Scenarios (``openspec/changes/qk-pertarget-cycle/specs/qk-ptq/spec.md``):
 * ``ste_record_is_one_block_record_with_per_linear_rows``.
 * ``dead_columns_are_recorded_per_linear``.
 * ``joint_pass_uses_the_normalized_weight_and_the_floor``.
-* ``joint_budget_is_the_appendix_c_regime_once_per_block``.
+* ``joint_budget_is_n_times_the_appendix_c_regime``.
 
 The per-linear movement figure's honesty is pinned beside that scenario set:
 ``test_zero_baseline_movement_records_no_value`` (an entry baseline of exactly
@@ -415,7 +415,7 @@ def test_scn_per_target_budget_is_appendix_c_per_linear():
         assert row["steps"] == expected, r["target"]
 
 
-def test_scn_joint_budget_is_the_appendix_c_regime_once_per_block():
+def test_scn_joint_budget_is_n_times_the_appendix_c_regime():
     """The block's TOTAL is N× the regime — one full budget per target.
 
     Where the superseded joint pass spent `epochs x (rows // batch)` ONCE for the
