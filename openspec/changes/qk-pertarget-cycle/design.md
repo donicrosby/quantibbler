@@ -813,3 +813,69 @@ landed and were verified), as does the fold of this change; the
 `qk-scale-imbalance` offline discrimination steps (§22/Q3) remain valid but are
 SECONDARY — if the fixed stages compensate prefix error, the collapse mechanism
 question may dissolve without them.
+
+## 24. PPL audit finding dispositions (2026-10-28)
+
+Evidence: operator PPL audit of 2026-10-28; reports
+`artifacts/qwen3-0.6B-r512-admm-paperfaithful-v6b-pertarget/quantize_report.json`
+and v7 twin; pinned oracle `docs/papers/nanoquant-2602.06694v3.md`.
+
+### F1 — Stage-lr anchoring
+
+**Finding.** Per-tensor relative lr (`lr × median|p|`) at `_ste.py:128` and the
+equivalent TuneScalesKD path strangles effective steps 20–100× below
+[NQ] App. C absolute values (:3005–3006) when the stage input is the balanced
+class (latents O(0.01–1), scales well-conditioned). Measured consequences: U-side
+sign flips ≈ 2–3/linear vs V-side 579–749; KD effective step ~1e-8 (inert).
+
+**Paper citation.** [NQ] App. C :3005: factorized-stage lr = 1e-5 absolute, batch
+size = 1. :3006: global scale reconstruction lr = 1e-6 absolute.
+
+**Disposition: AMENDS the per-tensor-relative-lr-as-inert-stage-cure ruling.**
+The per-tensor anchoring was the polish-era pathological-class fix; under
+balanced inputs it is counterproductive. Stage lrs SHALL be App. C absolute
+values when the input is balanced. Scale-class anchoring moves to the stage
+boundary (gamma-rebalance before lr derivation).
+
+### F2 — Scale-gain contract
+
+**Finding.** `magnitude_balance` (:695–707) folds an LS-optimal scalar
+`α = ⟨W, M⟩ / ‖M‖²_F` with `M = (s1⊙Ub)(s2⊙Vb)ᵀ` into s1, introducing a
+systematic per-layer shrink (measured cos ≈ 0.66–0.85, median ~0.72). [NQ]
+Eq. 8 is the row mean-abs of η-balanced latents with no global LS refit.
+
+**Paper citation.** [NQ] Sec 3.2 Step 2-3 Eq. 8: `[s1]_i = mean(|η û_i|)`,
+`[s2]_j = mean(|η⁻¹ v̂_j|)`. No α refit appears in the paper.
+
+**Disposition: FIXED-IN-BYTES (user implementation lane).** The LS refit is
+removed by the user's implementation commit — this docs commit does not carry
+it; trunk `magnitude_balance` (`lb_admm.py:691–707`) still folds the refit
+until that commit lands. Eq. 8 is the initialization contract. Downstream
+tuning stages (correctly calibrated per F1) compensate the gain. Artifact
+sanity gate gains a per-layer unit-gain leg with band edges calibrated on
+production layers.
+
+### F3 — Refinement cycle (RULED 2026-10-28: AMEND)
+
+**Finding.** Block-joint STE (one App. C budget per block, shared across N
+linears) is a declared deviation from [NQ]'s per-target cycle. Audit evidence:
+~7× budget collapse, un-refined prefixes at TuneFP time, end-of-block moves
+invalidating TuneFP's compensation. The paper carries a prose-vs-pseudocode
+tension: Algorithm 1 line 19 (:780) places one block-scoped
+`TuneLatentSTE(b,X_b,Y_b;T_post)` call after the per-linear factorization
+loop closes — structurally the block-joint shape. The per-target reading derives
+from Sec 3.2 Step 3 prose (:641, "the current target linear layer", singular)
+and Figure 3's per-target cycle encoding.
+
+**Disposition: AMENDED — @user ruling 2026-10-28.** The per-target TuneLatentSTE
+cycle (Sec 3.2 Step 3 prose, Figure 3; per-target reading of Algorithm 1,
+overriding the block-scoped pseudocode at line 19) is restored: TuneFP on
+remainder → factorize target i → per-target STE against the block-output
+objective (Eq. 10) at the FULL App. C factorized-stage budget (8 epochs, bs 1,
+cosine) → harden (sign extraction + freeze) → next target. The ~+8h/run
+wall-time pricing is accepted (+6.1h v6b CPU / +4.2h v7 GPU, measured from
+`quantize_report.json` STE rows). Flip instrumentation retained; the
+`block_joint` scope marker retires (row vocabulary kept for old-report
+readability). The fidelity condition records `ste_per_target: true` /
+`ste_block_joint: false`; the `paper_faithful` label SHALL be qualified by the
+prose-vs-pseudocode citation. No bias tuning in this change (separate surface).
