@@ -351,7 +351,11 @@ def reconstruct_block(
     # and a numpy-arm run silently mislabelled about the arm its balance used.
     # Env is process-global, so one resolution per block covers every layer.
     balance_backend, _balance_source = solver_backend_provenance(cfg.solver_backend)
-    t_solve = time.perf_counter()
+    # The block's solve row is ONE row carrying the block's solve cost, so it is
+    # the SUM of the per-target solve phases — never a window over the whole
+    # loop: the cycle's refinement fires run inside that loop, and a span
+    # covering them would charge the solve with every target's refinement time.
+    solve_elapsed_s = 0.0
     for idx, (entry, (name, linear)) in enumerate(
         zip(stats_book, quantizable_linears, strict=False)
     ):
@@ -385,6 +389,10 @@ def reconstruct_block(
             if recorder is not None:
                 recorder("tune_fp", **tune_fp_record)
 
+        # Re-anchor the clock at THIS target's solve phase. The refinement fire
+        # further down is a different stage with its own row; the solve row must
+        # not wear its wall time.
+        t_solve_iter = time.perf_counter()
         # The target reaches the solver at the DECLARED host grade — float64 for a
         # float64 run (unchanged), float32 for bf16/float32, which is bf16's exact
         # widening and the only NumPy grade it has. Deriving it from compute_dtype
@@ -518,6 +526,8 @@ def reconstruct_block(
         # loop head) — this linear is out of the tunable remainder from here on,
         # so its bias is final.
         _set_linear(linear, fac, factor_mode=cfg.factor_mode)
+        # This target's solve phase closes here, before its refinement fires.
+        solve_elapsed_s += time.perf_counter() - t_solve_iter
 
         # --- Step 3 (line 19), the per-target cycle: refine THIS target against
         # the block-output objective ([NQ] Eq. 10, :649-651) at the full App. C
@@ -600,7 +610,7 @@ def reconstruct_block(
         recorder(
             "lb_admm",
             polish_rounds=cfg.polish_rounds if polish else 0,
-            elapsed_s=time.perf_counter() - t_solve,
+            elapsed_s=solve_elapsed_s,
         )
 
     # --- The block's stage records are closed while the loop runs (each target

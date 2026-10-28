@@ -282,6 +282,63 @@ def test_scn_ste_record_is_one_block_record_with_per_linear_rows():
         assert row["elapsed_s"] == r["elapsed_s"]
 
 
+def test_lb_admm_row_time_excludes_the_per_target_ste_fires(monkeypatch):
+    """The block's solve row must not absorb the refinement wall time.
+
+    The ``lb_admm`` record fires once per block and its ``elapsed_s`` is the
+    block's solve cost — the quantity the report's ``lb_admm`` row and
+    ``row_time_s`` quote. The cycle moved the refinements INSIDE the
+    factorization loop, so a window spanning the whole loop charges the solve
+    with every target's fire. A controlled clock isolates the two: each solve
+    advances it by a token, each fire by a large step, and the row may carry
+    only the solve side.
+    """
+    from quantibbler.ptq import _block_stage as stage
+
+    solve_cost, ste_cost = 1.0, 100.0
+    clock = {"now": 0.0}
+
+    def now() -> float:
+        return clock["now"]
+
+    monkeypatch.setattr(stage.time, "perf_counter", now)
+
+    real_solve = stage.lb_admm
+
+    def solve_spy(*args, **kwargs):
+        out = real_solve(*args, **kwargs)
+        clock["now"] += solve_cost
+        return out
+
+    real_ste = stage._tune_latent_ste
+
+    def ste_spy(*args, **kwargs):
+        out = real_ste(*args, **kwargs)
+        clock["now"] += ste_cost
+        return out
+
+    monkeypatch.setattr(stage, "lb_admm", solve_spy)
+    monkeypatch.setattr(stage, "_tune_latent_ste", ste_spy)
+
+    sink: list = []
+    block = _SevenLinearBlock(seed=31)
+    calib = _calib(8, seed=31)
+    with _quiet():
+        reconstruct_block(
+            block,
+            calib,
+            _block_cfg(),
+            cotangent=_fixed_cot(block, calib),
+            recorder=_recorder(sink),
+        )
+
+    row = [info for event, info in sink if event == "lb_admm"][0]
+    assert row["elapsed_s"] <= len(SEVEN) * solve_cost + 1e-9, (
+        "the block's solve row absorbed the per-target refinement wall time: "
+        f"{row['elapsed_s']!r} against {len(SEVEN)} fires of {ste_cost}"
+    )
+
+
 def test_scn_dead_columns_are_recorded_per_linear():
     """A rank component with a zero factor column carries no sign, and is counted.
 
@@ -483,6 +540,53 @@ def test_harden_is_idempotent_and_freezes_the_target():
     harden_target(fac, "probe")  # a second harden must be a no-op
     assert torch.equal(fac.u_latent.detach(), before_u), "re-hardening moved the latents"
     assert torch.equal(fac.v_latent.detach(), before_v), "re-hardening moved the latents"
+
+
+def test_harden_between_targets_is_wired_once_per_target_in_fire_order(monkeypatch):
+    """Every factorized target is hardened before the NEXT target fires.
+
+    The cycle's discrete commit is the call at the loop tail: the target's
+    signs extracted into its latents and all four tensors frozen. Nothing in
+    the artifact separates it from the export path — the packer signs the
+    latents again — so the WIRING is pinned at the call site: one harden per
+    fire, in fire order, naming that fire's target, with its effect (the
+    latents are their own sign, and frozen) read off the objects it hardened.
+    """
+    from quantibbler.ptq import _block_stage as stage
+
+    hardened: list[tuple[str, FactorizedLinear]] = []
+    real = stage.harden_target
+
+    def spy(fac, name=""):
+        hardened.append((name, fac))
+        return real(fac, name)
+
+    monkeypatch.setattr(stage, "harden_target", spy)
+
+    sink: list = []
+    block = _SevenLinearBlock(seed=31)
+    calib = _calib(8, seed=31)
+    with _quiet():
+        reconstruct_block(
+            block,
+            calib,
+            _block_cfg(),
+            cotangent=_fixed_cot(block, calib),
+            recorder=_recorder(sink),
+        )
+
+    fired = [info["target"] for event, info in sink if event == "ste"]
+    assert len(hardened) == len(SEVEN), (
+        f"the cycle hardened {len(hardened)} of its {len(SEVEN)} targets"
+    )
+    assert [name for name, _ in hardened] == fired, (
+        "each target must be hardened once, in the order the cycle refined them"
+    )
+    for name, fac in hardened:
+        assert torch.equal(torch.sign(fac.u_latent.detach()), fac.u_latent.detach()), name
+        assert torch.equal(torch.sign(fac.v_latent.detach()), fac.v_latent.detach()), name
+        for param in (fac.u_latent, fac.v_latent, fac.s1, fac.s2):
+            assert not param.requires_grad, name
 
 
 # --------------------------------------------------------------------------
