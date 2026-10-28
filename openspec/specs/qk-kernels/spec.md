@@ -83,15 +83,16 @@ the B-update of [LB2] Sec 4.4 (Algorithm 1 line 8).
 
 ### Requirement: Packed binary matvec and matmul
 
-The system SHALL provide packed-domain products against dense float64
-operands: `packed_matvec(packed, n_bits, vec) -> float64 (n_rows,)` and
-`packed_matmul(packed, n_bits, mat) -> float64 (n_rows, k)`, computing
-exactly the arithmetic of unpack(packed) @ operand without materializing an
-expanded binary matrix as the contracted fast path. Accumulation order SHALL
-be fixed (row-element order) in every backend. Packed × packed products are
-out of scope in v0.1.
+The system SHALL provide packed-domain products `packed_matvec(packed,
+n_bits, vec)` and `packed_matmul(packed, n_bits, mat)`, computing exactly
+the arithmetic of unpack(packed) @ operand without materializing an
+expanded binary matrix. The dense-operand dtype SHALL default to float64
+with the v0.1 contract (row-element accumulation order, bit-identical
+outputs). An explicit dtype tag SHALL select float32 or bfloat16 on the
+same generic body. Packed × packed products are out of scope in v0.1.
 
 #### Scenario: matvec_matches_dense_reference
+
 - **WHEN** packed_matvec is applied to a packed (6, 13) factor and a float64
   vector of length 13
 - **THEN** the result equals `unpack_bits(packed, 13, float64) @ vec` within
@@ -99,14 +100,16 @@ out of scope in v0.1.
 - **AND** the result dtype is float64
 
 #### Scenario: matvec_padded
+
 - **WHEN** the packed factor's last row byte contains pad bits and `n_bits`
   is less than 8 × packed-width
 - **THEN** pad bits contribute exactly 0 to every accumulation
 
 #### Scenario: matmul_wide
+
 - **WHEN** packed_matmul is applied to a packed (5, 12) factor and a (12, 3)
   float64 matrix
-- **THEN** the result equals the dense unpack-then-multiply product within float64 rel 1e-12
+- **THEN** the result equals the dense unpack-then-multiply product within declared-dtype relative tolerance
 
 ### Requirement: Joint-ITQ alternating Procrustes solver
 
@@ -204,6 +207,7 @@ against the live registry at add-time and pinned within the config
 dependency-freshness window.
 
 #### Scenario: no_c_family_dependencies
+
 - **WHEN** the kernel crate's dependency tree is inspected (cargo tree) at
   review time
 - **THEN** no C/C++ compiler or C-linked linear-algebra crate (LAPACK/
@@ -211,10 +215,13 @@ dependency-freshness window.
 - **AND** the crate builds with no C toolchain invoked
 
 #### Scenario: float64_default_numerics
+
 - **WHEN** any kernel performs floating-point computation
-- **THEN** it computes in float64
-- **AND** no float32 path exists in v0.1 (float32 is a future, documented,
-  opt-in accelerator)
+- **THEN** it computes in float64 by default
+- **AND** float32 and bfloat16 paths exist only behind an explicit dtype
+  tag (the dtype-generic product requirements), never as a silent default
+- **AND** the solver surface (joint_itq and its splitmix/Gram-Schmidt
+  numerics) stays float64
 
 ### Requirement: Dual-face kernel surface from one core implementation
 
@@ -380,3 +387,255 @@ verified).
   within a block-level f32 budget (rel ≤ 1e-4 vs the reference's own
   quantized arithmetic), and quality metrics vs the EXACT face land inside
   the reference's measured envelope on the same fixtures.
+
+### Requirement: Scalar dtype abstraction with f32 and bf16 first-class
+
+The kernel crate SHALL carry ONE scalar abstraction: a `KernelScalar`
+trait implemented for `f64`, `f32` and `bf16`, each impl declaring the
+accumulator type its products sum in (`f64 -> f64`, `f32 -> f32`,
+`bf16 -> f32`). A `Dtype` tag SHALL resolve a caller-supplied name
+fail-closed. `bf16` values and conversions SHALL come from the `half`
+crate. Generic kernels SHALL be written against the trait bound, never a
+concrete float type.
+
+#### Scenario: dtype_tag_resolution
+
+- **WHEN** the `Dtype` tag is resolved from `"float64"`, `"float32"` and
+  `"bfloat16"`
+- **THEN** each name resolves to its own variant
+- **AND** any other name is refused with an error naming the offending value
+  and the three accepted names
+
+#### Scenario: scalar_trait_covers_three_dtypes
+
+- **WHEN** the crate's scalar trait is inspected
+- **THEN** it is implemented for exactly `f64`, `f32` and `bf16`
+- **AND** each impl declares that dtype's own accumulator (`f64 -> f64`,
+  `f32 -> f32`, `bf16 -> f32`)
+
+### Requirement: FP-remainder packed products generic over the dense-operand dtype
+
+`packed_matvec` and `packed_matmul` SHALL be defined once, generic over the
+dense-operand scalar `T: KernelScalar`, accumulating in `T`'s declared
+accumulator with the accumulation order unchanged (row-element order, left
+to right). Both the rlib face and the PyO3 face SHALL reach the one generic
+body; no second algorithm body SHALL be introduced.
+
+#### Scenario: product_generic_over_operand_dtype
+
+- **WHEN** the packed products are instantiated at `f32` and at `bf16` on a
+  packed factor and a dense operand of that dtype
+- **THEN** both instantiations compile and return a result of the operand's
+  own dtype
+- **AND** both are computed by the same generic body the `f64`
+  instantiation uses
+
+#### Scenario: f64_product_bit_identical
+
+- **WHEN** the committed `f64` parity fixtures run through `packed_matvec`
+  and `packed_matmul` after the refactor
+- **THEN** every float output is bit-identical to the pre-refactor bytes
+- **AND** every packed output is byte-identical
+
+### Requirement: Zero behavior change on the v0.1 f64 product surface
+
+The refactor SHALL be structural, not numeric: every existing `f64` rlib and
+PyO3 call site SHALL compile unchanged and route to the `f64` instantiation,
+their error messages SHALL be unchanged, and no `f64` output SHALL move by
+one ULP. No committed fixture record at any declared dtype SHALL be regenerated by this
+change.
+
+#### Scenario: f64_surface_signature_and_error_unchanged
+
+- **WHEN** the `f64` product entry points are called with the committed
+  fixtures and with malformed shapes
+- **THEN** the results are the ones v0.1 produced
+- **AND** the error strings are the v0.1 literals: `"vec must have length
+  {n_bits}, got {}"`, `"mat length {} is not a multiple of n_bits {n_bits}"`
+  and the `validate_packed` messages, probed by the executing tests named in
+  tasks 2.1/4.2
+
+### Requirement: bf16 cross-face parity at a declared tolerance
+
+The committed fixtures SHALL carry bf16 variants of the packed products,
+run through the rlib, PyO3 and NumPy-reference faces. bf16 deviation from
+exact arithmetic over the declared-dtype operands (unrounded products, declared accumulator) SHALL be bounded as a
+BACKWARD error — 1e-2 relative to the row's term scale `Σ_k |v_k|` — and
+f32 products by the same criterion at 1e-6. Face-to-face agreement SHALL be
+exact, and a tolerance SHALL never be loosened to admit an implementation
+defect.
+
+#### Scenario: bf16_product_within_declared_tolerance
+
+- **WHEN** the bf16 product fixtures run through the rlib, PyO3 and
+  NumPy-reference faces
+- **THEN** each face's deviation from exact arithmetic over the declared-dtype
+  operands (unrounded products, declared accumulator) is within the declared backward-error bound
+- **AND** the f32 products stay within their own declared bound (1e-6 of
+  the term scale)
+- **AND** the three faces agree with each other bit-exactly
+- **AND** the v0.1 `f64` rel 1e-12 gate (Requirement: Packed binary matvec
+  and matmul) is unchanged — these backward-error bounds apply to the `f32`
+  and `bf16` instantiations only
+
+#### Scenario: bf16_packed_still_bit_identical
+
+- **WHEN** fixture records that differ only in dense-operand dtype are
+  generated and run
+- **THEN** the packed bitplane inputs and outputs are byte-identical across
+  the NumPy reference, rlib and PyO3 faces
+- **AND** unpack-then-repack through the integer core is byte-exact — the
+  dtype affects the dense operand only
+
+### Requirement: PyO3 dtype-aware entry points with dtype-consistent buffers
+
+The PyO3 face SHALL expose product entry points that take a dtype tag and
+return an array of the matching dtype (`float64`, `float32`, `bfloat16`).
+A bf16 buffer SHALL cross the boundary as `uint16` bit patterns, documented
+as the wire form, because NumPy has no native bfloat16. An unrecognised tag
+SHALL raise, naming the value.
+
+#### Scenario: pyo3_dtype_tag_selects_output_dtype
+
+- **WHEN** a product is called through the PyO3 face with an explicit dtype
+  tag
+- **THEN** for `f64`/`f32`, the returned array's NumPy dtype is the tagged
+  dtype; for bfloat16, the returned array's dtype is `uint16` (the declared
+  wire form; NumPy has no native bfloat16)
+- **AND** its values agree with the rlib face's bit-exactly
+
+#### Scenario: pyo3_unknown_dtype_refused
+
+- **WHEN** a product is called through the PyO3 face with an unrecognised
+  dtype name
+- **THEN** it raises, naming the offending value, and returns no array
+
+#### Scenario: bf16_wire_form_is_uint16
+
+- **WHEN** a bf16 product is called through the PyO3 face
+- **THEN** its input and output buffers are `uint16` bit patterns whose
+  values are the bf16 encodings
+- **AND** a torch `bfloat16` tensor maps directly through a
+  `view(torch.uint16)`
+
+### Requirement: Integer bitplane core untouched by dtype genericity
+
+`pack_bits`, `unpack_bits` and the packed-layout validation SHALL stay
+integer-only. Dtype genericity SHALL NOT introduce a float type into
+bitplane packing, unpacking, or the packed-bit decoding that feeds the
+products, and the committed packed fixtures' bytes SHALL be unchanged by
+this change.
+
+#### Scenario: bitplane_core_stays_integer
+
+- **WHEN** the bitplane kernels and the packed-bit decoding are inspected
+- **THEN** their signatures and bodies carry only integer types
+- **AND** the committed packed fixtures' bytes are unchanged by this change
+
+### Requirement: No hardcoded dtype in the product surface's signatures or dispatch
+
+On the FP-remainder product surface, no kernel signature and no dispatch
+site SHALL name a concrete float type outside that type's `KernelScalar`
+impl block and the thin `f64` compatibility wrappers. The dtype SHALL be
+carried by the trait bound or by the `Dtype` tag; product bodies SHALL name
+only `T` and `T::Acc`.
+
+#### Scenario: no_hardcoded_dtype_in_product_surface
+
+- **WHEN** the FP-remainder product kernel bodies in `core.rs` — sliced by
+  symbol, never by line number — are searched for a concrete float type
+  name
+- **THEN** no such name occurs in any of them: the bodies name only `T` and
+  `T::Acc`
+- **AND** the product signatures carry the `KernelScalar` bound
+- **AND** the dtype enumeration lives in the dispatch module, not in a
+  kernel
+
+### Requirement: Tiled exact-attention NumPy reference (declared-dtype verification fixture)
+
+The kernels package SHALL provide a NumPy tiled attention reference
+implementing [FA] §3.1 Algorithm 1 (blockwise online softmax with running
+statistics m and ℓ and the exp(m_old − m_new) rescaling identity), in
+float64, with causal masking and GQA group broadcast matching the pinned
+engine conventions (qk-server spec: post-RoPE q/k, post-norm v,
+n_heads/n_kv_heads grouping).
+
+#### Scenario: Reference matches the unblocked formula
+
+- **WHEN** the tiled reference runs the fixture battery (seq ∈ {8, 10, 64},
+  d ∈ {4, 128}, head counts (2,1) and (8,2), optional mask) against the
+  direct formula softmax(QKᵀ/√d + mask)·V computed in float64,
+- **THEN** outputs agree with the direct formula under a two-part gate:
+  infinity-norm relative error ≤ 1e-12 over the whole row, AND
+  per-element relative error ≤ 1e-12 restricted to entries within 1e-2
+  of their row maximum (per-element relative error is undefined near
+  softmax cancellation — an exactly-correct entry of magnitude 1e-4
+  under a row norm O(1) reads as ~1e-11 relative through no fault of
+  the implementation; the restricted clause keeps per-element
+  stringency where it is meaningful, and the inf-norm clause covers
+  the whole row), including ragged
+  lengths where seq is not a multiple of the block size.
+
+#### Scenario: Causal mask semantics
+
+- **WHEN** the reference runs with causal masking on,
+- **THEN** tokens at positions j > i contribute exactly zero to output row i
+  (verified against a −inf-masked dense formula), for every fixture shape.
+
+#### Scenario: Combined causal and additive mask
+
+- **WHEN** the reference runs with causal masking on AND an additive mask
+  that suppresses allowed (lower-triangle) positions,
+- **THEN** both constraints apply together — the additive mask takes
+  effect on top of causal blocking, never silently disabling either —
+  verified against the dense formula carrying the same combined
+  −inf masking.
+
+#### Scenario: Fully-masked row yields the dense NaN pattern
+
+- **WHEN** a fixture masks every score in one row (row max −inf, ℓ = 0),
+- **THEN** that row's output is NaN in exactly the positions the dense
+  `0/0` formula produces them (position-for-position `isnan` match),
+  with no invented fallback value — asserted by a dedicated
+  NaN-pattern check, NOT routed through the finite-output roundoff
+  gate.
+
+### Requirement: CubeCL tiled attention GPU face (exact, f32)
+
+The kernels crate (`gpu` feature) SHALL provide an f32 GPU attention face on
+the adopted `cubek-attention` substrate (registry evidence and contract-gap
+adapters recorded in design.md), with causal masking enabled and no N×N
+score-matrix materialization in global memory. The independent cubek
+`cpu-reference` implementation SHALL be a third face in the parity matrix.
+
+#### Scenario: GPU parity within the reassociation budget
+
+- **WHEN** hardware tests run on a real device,
+- **THEN** the GPU face matches the NumPy reference (widened from f32) with
+  relative error ≤ 1e-5 on the full fixture battery, including ragged
+  tails and the masked positions.
+
+### Requirement: Fail-closed construction of the GPU face
+
+Construction of the GPU face SHALL fail closed: with no usable HIP device it
+returns a typed error carrying the validated staging hint, never a silent
+wrong-compute path.
+
+#### Scenario: Fail-closed construction without hardware
+
+- **WHEN** the face is constructed on a machine with no usable HIP device,
+- **THEN** construction returns a typed error embedding the staging recipe
+  (never a silent wrong-compute path), and the CPU reference face remains
+  the only active implementation.
+
+### Requirement: Double-gated hardware tests
+
+Hardware tests for the face SHALL be double-gated: they execute only when
+`QUANTIBBLER_GPU_TESTS=1` is set AND the `gpu` feature is enabled.
+
+#### Scenario: Both gate states are verified
+
+- **WHEN** the hardware suite runs with the gate unset, and separately with
+  `QUANTIBBLER_GPU_TESTS=1` set,
+- **THEN** the unset state produces clean skips and the set state executes
+  the parity battery.
