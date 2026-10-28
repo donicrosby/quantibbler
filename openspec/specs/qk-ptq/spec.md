@@ -31,7 +31,7 @@ When the `quantibbler-kernels` Rust extension is present, its output on probe in
 
 ### Requirement: Global calibration SHALL produce robust diagonal preconditioners from activation and gradient statistics
 
-Phase 1 SHALL run the calibration data through the fp teacher once, collecting per-linear-layer input/output activation and gradient statistics, and SHALL construct diagonal preconditioners `D~_in` and `D~_out` per layer by clipping diagonal entries to a ceiling tau and applying shrinkage `(1−γ)·entry + γ·mean(D)` (Eq. 3, [NQ] Step 2-1). Entries SHALL be nonnegative and finite. Tau SHALL be an explicit pin or the per-vector 95th percentile.
+Phase 1 SHALL run calibration data through the fp teacher once, collecting per-linear-layer activation and gradient statistics, and SHALL construct diagonal preconditioners `D~_in` and `D~_out` by clipping diagonal entries to a ceiling tau and applying shrinkage `(1−γ)·entry + γ·mean(D)` ([NQ] Eq. 3). Tau SHALL be an explicit verbatim cap when pinned, or the per-vector 95th percentile; a per-vector cap at `max(D)` is a no-op and SHALL NOT be the default. Entries SHALL be nonnegative and finite.
 
 #### Scenario: preconditioner_shape_robustness
 
@@ -994,7 +994,7 @@ The report's `paper_faithful` label SHALL be the conjunction of eight config-mat
 #### Scenario: no_hardcoded_dtype_in_cut_surface
 
 - **WHEN** the implementation is complete
-- **THEN** the cut surface (driver, report, fidelity conditions) contains no hardcoded `torch.float64`, `torch.float32`, `torch.bfloat16`, `np.float64`, or `np.float32` type constants — every dtype reference is parametric on `compute_dtype` or a named accumulation dtype per pipeline-dtype's no-hardcoded-dtype requirement
+- **THEN** the cut surface (driver, report, fidelity conditions) contains no hardcoded `torch.float64`, `torch.float32`, `torch.bfloat16`, `np.float64`, or `np.float32` type constants — every dtype reference is parametric on `compute_dtype` or a named accumulation dtype per this capability's no-hardcoded-dtype requirement
 
 #### Scenario: label_denied_by_stage_condition_still_reports_config_match
 
@@ -1503,7 +1503,7 @@ The per-iteration `min_eigs` eigenvalue computation SHALL run only when the solv
 #### Scenario: diagnostic_run_keeps_the_column
 
 - **WHEN** a diagnostic run enables the probe flag (the Lane 0 harness does)
-- **THEN** every probe row still carries `min_eigs`, satisfying `qk-nanoquant-alignment-lane0`'s harness requirement unchanged
+- **THEN** every probe row still carries `min_eigs`, satisfying the probe harness requirement unchanged
 
 #### Scenario: gating_is_behavior_neutral
 
@@ -2069,7 +2069,7 @@ fires, and SHALL be read back on resume only behind the fingerprint guard and
 only for a directory with a completed block; every re-read line SHALL be
 validated against the known payload shapes and finiteness — a name-only or
 saturated record SHALL never reach the payload-blind required-stage verdict
-(sec-eng t_5855d059).
+.
 
 #### Scenario: resume_journal_is_fingerprint_bound_and_never_synthesizes
 

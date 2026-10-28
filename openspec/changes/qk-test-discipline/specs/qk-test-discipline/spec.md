@@ -1,10 +1,6 @@
-# qk-test-discipline Specification
+# Test discipline delta
 
-## Purpose
-
-Define the test-suite governance contract: a hard wall-time budget per 100 collected tests on the default hot lane, a strict `integration` marker definition that keeps cheap harness stubs in the default lane where the suite actually runs, and the admission criterion that every new test meets before it becomes part of the gate.
-
-## Requirements
+## ADDED Requirements
 
 ### Requirement: suite_time_budget
 

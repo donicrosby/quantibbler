@@ -61,7 +61,7 @@ A guard whose verification step fails SHALL refuse, never proceed. Three states:
 #### Scenario: seam_oracle_is_dry_run_rc
 
 - **WHEN** a wrapper gate test runs
-- **THEN** the wrapper SHALL execute under `DRY_RUN=1` — DRY_RUN walks every gate in order (digest probe, rocm-tag, name guard) and exits before anything can launch, so the run's rc IS the seam oracle at zero launch risk
+- **THEN** the wrapper SHALL execute under `DRY_RUN=1` — DRY_RUN walks every gate in order (digest probe, rocm-tag, name guard) and exits before anything can launch, so the run's rc IS the definitive seam verdict at zero launch risk
 - **AND** the stub SHALL be form-selective: the `{{.Id}}` probe answers with the pinned digest via the `LANE0_IMAGE_DIGEST_ALLOW` door (a stub must satisfy the pin to reach the guard), and the name-inspect answers with a held payload
 - **AND** one run proves the seam and the guard together: rc=0 means the seam is dead and the wrapper talked to the real daemon; rc=2 means the seam is alive AND the guard refused through the full chain — the 2026-10-24 dead-seam run read as a guard pass precisely because nothing stubby ever answered
 

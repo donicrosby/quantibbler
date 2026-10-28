@@ -502,7 +502,7 @@ in `chat_template.jinja` and no `chat_template` field in `tokenizer.json`.
 - **AND** the rendered prompt string equals HF's
   `AutoTokenizer.from_pretrained(<artifact>).apply_chat_template(messages,
   tokenize=False, add_generation_prompt=True)` with thinking off
-  (oracle: `tools/gen_chat_golden.py`, `ENABLE_THINKING=False`)
+  (verified against: `tools/gen_chat_golden.py`, `ENABLE_THINKING=False`)
 
 #### Scenario: CT-3.2 — Committed fixtures reproduce the real-artifact shape
 
@@ -555,7 +555,7 @@ The server SHALL read `remainder_dtype` from the blob header and resolve a
 sizes, extensions, or defaults. A missing or unrecognized `remainder_dtype`
 SHALL refuse startup. The directory path SHALL NOT select `Bf16`: native
 bf16 serving is reachable only through the blob loader (directory loading
-follows qk-artifact-dtype RD-1/RD-2).
+follows the remainder-dtype declaration and remainder-reader requirements).
 
 #### Scenario: BS-2.1 — Bf16 artifact resolves to Bf16
 
@@ -586,9 +586,9 @@ follows qk-artifact-dtype RD-1/RD-2).
 #### Scenario: BS-2.5 — Bf16-declared directory serves widened, never native
 
 - **WHEN** a directory artifact declares `[sidecar] dtype = "bf16"`
-  (qk-artifact-dtype RD-1.1)
+  (remainder-dtype declaration scenario)
 - **THEN** the load succeeds per the sibling's widening contract
-  (qk-artifact-dtype RD-2), `ServingDtype` stays `Fp32`, and the engine
+  (remainder-reader requirement below), `ServingDtype` stays `Fp32`, and the engine
   never routes bf16 kernel dispatch for this artifact — native bf16
   serving is blob-only
 
@@ -614,7 +614,7 @@ pre-change path.
   input vector
 - **THEN** the kernel receives `Dtype::Bf16`, accumulates in f32, and
   the per-output-element backward error vs exact arithmetic over the declared-dtype operands (unrounded products, declared accumulator) is within
-  1e-2 of the row term scale Σ_k |v_k| (qk-kernels-dtype-generic D6)
+  1e-2 of the row term scale Σ_k |v_k| (qk-kernels bf16 cross-face parity tolerance)
 
 ### Requirement: Norm application and logits SHALL use the declared serving dtype
 
@@ -633,7 +633,7 @@ When `ServingDtype::Fp32`, every float path is the pre-change f32 path.
   declared serving-level bound |Δ| ≤ 1e-2 · max(|ref|, 1e-6) — a
   combined absolute-relative form chosen so near-zero reference elements
   cannot make the bound unbounded; the kernel-level backward tolerance
-  (qk-kernels-dtype-generic D6) governs matvec products only, not norm
+  (qk-kernels bf16 cross-face parity tolerance) governs matvec products only, not norm
   statistics
 
 #### Scenario: BS-4.2 — Fp32 norm path is unchanged
@@ -678,7 +678,7 @@ Non-streaming chat and text completion responses SHALL carry a `timings`
 block with `prompt_ms` (u64, milliseconds) measuring the elapsed wall-clock
 from the start of the FIRST prefill forward through the end of the LAST
 prefill forward. Tokenization and template application SHALL be excluded
-(llama.cpp timings.prompt_ms equivalence per the t_72781a70 addendum, so PP
+(llama.cpp timings.prompt_ms equivalence, so PP
 t/s is computed identically across legs). Decode steps SHALL be excluded.
 Streaming responses SHALL omit `timings`.
 
@@ -757,7 +757,7 @@ single-token difference from a "close" logit distribution is a failure.
 - **THEN** both legs' final prefill logits are finite; the worst and median
   elementwise absolute deviations |Δ| = |L_bf16 − L_fp32| are reported in
   the test output (no threshold; per-linear backward error stays with
-  qk-kernels-dtype-generic)
+  qk-kernels bf16 tolerance)
 
 #### Scenario: BS-9.3 — Bf16-leg logits differ from the widened path (must-differ guard)
 
