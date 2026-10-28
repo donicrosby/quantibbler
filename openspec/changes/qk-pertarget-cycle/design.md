@@ -756,8 +756,7 @@ net of exactly `0.0` on 12 TuneFP cycles and 14 STE rows. Code:
 `faithful = report.get("paper_faithful") is True` — that is the **rolled-up
 verdict**, False on any failed run — while the requirement says *"On runs claiming
 paper fidelity, the gate SHALL assert a per-cycle net-reduction test against
-`STEPS_EFFECT_EPS=1e-3`"* (`specs/qk-ptq/spec.md:61`): the CLAIM, which this run
-this run carries a `fidelity_config` matching the paper regime (`config_matches_paper_regime` is True on the declared config). The detector is therefore disabled in exactly the run shape its own
+`STEPS_EFFECT_EPS=1e-3`"* (`specs/qk-ptq/spec.md:61`): the CLAIM, which this run carries: a `fidelity_config` matching the paper regime (`config_matches_paper_regime` is True on the declared config). The detector is therefore disabled in exactly the run shape its own
 scenario names (*"a no-op stage on a faithful run is a finding"*, `:66`).
 Control, same function, same tree: on the pre-instrumentation original report it
 returns **14 presence findings** — the presence half works; only the effect floor
@@ -875,6 +874,5 @@ cosine) → harden (sign extraction + freeze) → next target. The ~+8h/run
 wall-time pricing is accepted (+6.1h v6b CPU / +4.2h v7 GPU, measured from
 `quantize_report.json` STE rows). Flip instrumentation retained; the
 `block_joint` scope marker retires (row vocabulary kept for old-report
-readability). The fidelity condition records `ste_per_target: true` /
-`ste_block_joint: false`; the `paper_faithful` label SHALL be qualified by the
+readability). The fidelity conditions SHALL record the STE scope (`ste_per_target: true` on the AMEND path; a `block_joint` marker on a paper-regime run is a mechanism-class deviation); the `paper_faithful` label SHALL be qualified by the
 prose-vs-pseudocode citation. No bias tuning in this change (separate surface).
