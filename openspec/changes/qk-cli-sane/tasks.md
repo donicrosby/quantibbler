@@ -39,16 +39,23 @@
   (:414-440, re-keyed in 3.3). Suite RED on the missing arguments.
   - *Verification*: `uv run pytest tests/test_qk_report_stages.py tests/ptq/ -k "not integration"` — parse-error tests that passed now fail. Count.
 
-- [ ] **3.2** (env reads SHIPPED; the driver-level fixture tests for
-  env-wires-to-config and empty-as-unset are NOT written — see the handoff) Add env-var reads: `QK_PROBE_INTERVAL` (default 1), `QK_PROBE_BATCHES`
+- [x] **3.2** Add env-var reads: `QK_PROBE_INTERVAL` (default 1), `QK_PROBE_BATCHES`
   (default 2), `QK_FACTOR_MODE` (default `"binary"`), `QK_ABLATION` (default
   `"none"`), `QK_LAYER_SCOPE` (default `"all"`). Wire them into the driver's
   config construction and probe setup, with edge semantics: empty string treated
   as unset, non-integer probe values rejected at startup with a named error.
   Tests GREEN.
-  - *Verification*: `uv run pytest tests/test_qk_report_stages.py -k "env"` — fixture
-    tests construct args and assert env-var reads, empty-string-as-unset, and
-    non-integer rejection.
+  - *Verification*: `uv run pytest tests/ptq/test_driver_env_knobs.py` — driver-level
+    subprocess legs, one per case: every knob EMPTY takes its default (the report's
+    `fidelity_config` and `probe` record it), `QK_FACTOR_MODE=fp` reads back from
+    the report's `fidelity_config.factor_mode`, the probe override
+    (`QK_PROBE_INTERVAL=4 QK_PROBE_BATCHES=1`) lands in `probe`, an invalid choice
+    refuses at startup naming the variable and its accepted values, and each of the
+    seven cut flags is rejected by the parser. `tests/ptq/test_driver_probe.py`
+    keeps the probe knobs' non-integer refusal legs.
+    Discrimination: reading an empty env var as a VALUE reddens the two
+    empty-string legs; ignoring the environment entirely reddens the two wiring
+    legs (both measured).
 
 - [x] **3.3** Re-key the four runtime gates on the config-match conjunction
   (`config_matches_paper_regime`): polish enable (`_block_stage.py:251`), STE
@@ -96,15 +103,17 @@
     the word "paper" or "faithful" in its help text. No citation of change ids
     or lane names.
 
-- [ ] **5.2** (unticked: the verification this row named selected 0 tests, so the
-  tick was vacuous — the gate test does not exist yet) Add a gate test that
-  asserts `--help` output contains the expected
+- [x] **5.2** Add a gate test that asserts `--help` output contains the expected
   sections ("Model and data:", "Solver and quality:", "Output:", "Resources:"),
-  the surviving flag names, and does NOT contain the cut flag names or bot
-  vocabulary.
+  the surviving flag names under their own section, and does NOT contain the cut
+  flag names or bot vocabulary.
   - *Verification*: `uv run pytest tests/ptq/test_driver_help_surface.py -k help` —
-    the gate test belongs in the ptq tier with the driver's other `--help`
-    invocations; the tick returns when it runs green.
+    1 passed. The gate reads the SECTION BODIES only (the `usage:` summary is
+    excluded, so a flag named there but missing from its group still reds),
+    asserts each of the 22 surviving flags sits in its own group, and carries the
+    negative half (all seven cut flags absent, no "paper"/"faithful").
+    Discrimination: putting "faithful" back in the parser description, and putting
+    a cut flag name back in a help string, each redden this leg (both measured).
 
 ## Phase 6 — Wrapper and CI migration (atomic with the parser cut)
 

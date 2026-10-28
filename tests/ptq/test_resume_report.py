@@ -54,7 +54,7 @@ from quantibbler.ptq.checkpoints import (  # noqa: E402
     _FINGERPRINT_PROVENANCE,
     config_fingerprint,
 )
-from quantibbler.ptq.config import PTQConfig  # noqa: E402
+from quantibbler.ptq.config import PTQConfig, declared_regime_config  # noqa: E402
 from quantibbler.qk_report import (  # noqa: E402
     abort_report,
     provenance,
@@ -248,6 +248,20 @@ def test_scn_resume_record_on_failure_paths():
         ppl_baseline_bf16=1.0,
         evaluation={},
         resume=record,
+        # The declared config the fidelity verdict is computed from, built by
+        # the same production builder the driver records (same shape as
+        # `test_artifact_dtype`'s identity fixture): the identity payload
+        # carries the declaration the label is a verdict about, on the failure
+        # shapes too.
+        fidelity_config=declared_regime_config(
+            PTQConfig(
+                rank=1,
+                solver="svd",
+                compute_dtype="float64",
+                admm_max_iter=1,
+                device="cpu",
+            )
+        ),
     )
     assert identity["resume"] is record
     aborted = abort_report(

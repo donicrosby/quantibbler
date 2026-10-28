@@ -51,7 +51,15 @@ SEQ_LEN = 32  # evaluation geometry
 TUNE_SEQ_LEN = 16  # tuning-window geometry, strictly shorter
 BATCH = 8
 BLOCKS = 3
-DRIVER_TIMEOUT = 900
+# A CEILING, not a budget: the driver subprocess is killed here, so it has to sit
+# above the heaviest leg's real cost or a correct run reds as a timeout.
+# Measured anchor: `test_scn_eval_window_guard_dies_with_the_flag`
+# (tests/ptq/test_driver_stage_map.py) PASSED in 1076.37s in isolation on this
+# (loaded, co-tenant) box — its `--calibration-seqs 128` override is load-bearing
+# for `runtime_deviations == []`, so the cost is the leg, not slack. 1800 is that
+# anchor plus headroom for a busier box; the previous 900 killed the leg
+# mid-computation and read as a red.
+DRIVER_TIMEOUT = 1800
 
 
 def _reject_constant(name: str):  # noqa: ANN202
