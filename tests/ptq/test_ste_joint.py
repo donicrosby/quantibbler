@@ -10,6 +10,11 @@ Scenarios (``openspec/changes/qk-ste-joint/specs/qk-ptq/spec.md``):
 * ``joint_pass_uses_the_normalized_weight_and_the_floor``.
 * ``joint_budget_is_the_appendix_c_regime_once_per_block``.
 
+The per-linear movement figure's honesty is pinned beside that scenario set:
+``test_zero_baseline_movement_records_no_value`` (an entry baseline of exactly
+zero is no denominator, so the figure is `None`, never a confident `0.0`) and
+its discriminator ``test_nonzero_baseline_records_zero_when_nothing_moves``.
+
 The measured defect these pin shut: the shipped per-target structure emitted one
 STE record per block whose seven rows carried seven DIFFERENT objective readings
 (0.2098, 0.2321, 0.5454, 0.5727, 1.0080, 1.4611, 1.5653), i.e. one block
@@ -416,3 +421,95 @@ def test_joint_pass_frees_every_factorized_linear_at_once():
         f"the joint pass left the block objective at {shared['residual_after']!r} "
         f"from {shared['residual_before']!r}"
     )
+
+
+def test_zero_baseline_movement_records_no_value():
+    """An all-zero entry baseline is no denominator: ``None``, never a ``0.0``.
+
+    ``_rel_move`` divides the movement by the entry tensor's L2 norm, so a
+    parameter whose entry baseline is exactly zero has no denominator and its
+    relative movement is UNDEFINED. The row recorded ``0.0`` for it -- "the
+    parameter never moved" -- about a latent the pass may have moved off zero,
+    and that confident zero also entered ``max(moves) < floor_rel``, so a moved
+    row could be declared inert on a figure nobody measured.
+
+    Both degenerate arms are pinned here, each against movement recomputed from
+    the held entry snapshot:
+
+    * the zeroed latent MOVED off zero (the old row read exactly ``0.0``);
+    * the zeroed latent was HELD at zero -- a zero denominator is no denominator
+      whether or not anything moved, so this is still no value and not a
+      legitimate measured ``0.0``.
+
+    Reachability note: the driver refuses an all-zero factor at
+    ``magnitude_balance`` ("undefined for an all-zero factor"), so this is a
+    state of the STAGE BOUNDARY -- and that boundary is the contract this
+    function owns, since its refinement unit is the factorized set it is handed.
+    """
+    cfg = PTQConfig(solver_backend="numpy", rank=4, stage_latent=StageHyper(1e-3, 1, 1))
+
+    # (a) Moved off zero: in a one-linear pass a zeroed factor is the only
+    # parameter left carrying a gradient -- its sign is zero, so every term of the
+    # outer product that multiplies it dies -- and the STE passthrough steps it.
+    blk, fa, _fb, x_b, y_b = _chained_factors()
+    with torch.no_grad():
+        fa.u_latent.data.zero_()
+    entry_u = fa.u_latent.detach().clone()
+    with _quiet():
+        stats = _tune_latent_ste(blk, {"proj_in": fa}, x_b, y_b, cfg, 1, steps=16)
+    rec = stats["per_linear"]["proj_in"]
+    assert stats["steps"] == 16 and not stats["vacuous"], "the stage must run for this"
+    assert float(entry_u.pow(2).sum()) == 0.0, "the entry baseline is exactly zero"
+    assert float((fa.u_latent.detach() - entry_u).pow(2).sum()) > 0.0, (
+        "the pass moved the zeroed latent off zero"
+    )
+    assert rec["u_rel_move"] is None, "a zero entry baseline has no ratio to report"
+    assert rec["inert"] is None, "no movement figure -- no inertness verdict either"
+    assert stats["inert"] is None, "the stage verdict inherits the row's no-answer"
+
+    # (b) Held at zero: the zeroed factor is held out of the optimizer across the
+    # joint pass. Its linear keeps a bias so the neighbour still sees a nonzero
+    # input: a zeroed factor zeroes every OTHER gradient of its own linear, so
+    # without that feed the sibling linear gets no gradient and the whole stage
+    # goes vacuous rather than running over a held baseline.
+    blk, fa, fb, x_b, y_b = _chained_factors()
+    with torch.no_grad():
+        fa.u_latent.data.zero_()
+        fa.bias.data.fill_(0.3)
+    fa.u_latent.requires_grad_(False)
+    entry_u = fa.u_latent.detach().clone()
+    with _quiet():
+        stats = _tune_latent_ste(blk, {"proj_in": fa, "proj_out": fb}, x_b, y_b, cfg, 1, steps=16)
+    rec = stats["per_linear"]["proj_in"]
+    assert stats["steps"] == 16 and not stats["vacuous"], "the stage must run for this"
+    assert float(entry_u.pow(2).sum()) == 0.0, "the entry baseline is exactly zero"
+    assert float((fa.u_latent.detach() - entry_u).pow(2).sum()) == 0.0, (
+        "the held factor stayed where the zero baseline was"
+    )
+    assert rec["u_rel_move"] is None, "held or moved, a zero baseline has no ratio"
+    assert rec["inert"] is None, "no movement figure -- no inertness verdict either"
+    assert stats["inert"] is None, "the stage verdict inherits the row's no-answer"
+
+
+def test_nonzero_baseline_records_zero_when_nothing_moves():
+    """The discriminator: a MEASURED zero is still ``0.0``, and not ``None``.
+
+    With a non-zero entry baseline and the factor held out of the optimizer
+    nothing moves, so the relative movement is a measured ``0.0``. It is the
+    denominator that decides between this and the ``None`` arms above, not the
+    movement: 0.0 / anything is a value, while a zero baseline has no ratio at
+    all. The other factors stay tunable, so the stage runs a live gradient and
+    this is not the vacuous path in disguise.
+    """
+    blk, fa, fb, x_b, y_b = _chained_factors()
+    fa.u_latent.requires_grad_(False)
+    entry_u = fa.u_latent.detach().clone()
+    cfg = PTQConfig(solver_backend="numpy", rank=4, stage_latent=StageHyper(1e-3, 1, 1))
+    with _quiet():
+        stats = _tune_latent_ste(blk, {"proj_in": fa}, x_b, y_b, cfg, 1, steps=16)
+    rec = stats["per_linear"]["proj_in"]
+
+    assert stats["steps"] == 16 and not stats["vacuous"], "the stage must run its budget"
+    assert float(entry_u.pow(2).sum()) > 0.0, "the baseline must be non-zero"
+    assert float((fa.u_latent.detach() - entry_u).pow(2).sum()) == 0.0
+    assert rec["u_rel_move"] == 0.0, "a real denominator makes this a measured 0.0"
