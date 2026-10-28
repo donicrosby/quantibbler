@@ -757,8 +757,7 @@ net of exactly `0.0` on 12 TuneFP cycles and 14 STE rows. Code:
 verdict**, False on any failed run — while the requirement says *"On runs claiming
 paper fidelity, the gate SHALL assert a per-cycle net-reduction test against
 `STEPS_EFFECT_EPS=1e-3`"* (`specs/qk-ptq/spec.md:61`): the CLAIM, which this run
-carries (`fidelity_conditions.paper_faithful_flag: true`; `--paper-faithful` on
-the argv). The detector is therefore disabled in exactly the run shape its own
+this run carries a `fidelity_config` matching the paper regime (`config_matches_paper_regime` is True on the declared config). The detector is therefore disabled in exactly the run shape its own
 scenario names (*"a no-op stage on a faithful run is a finding"*, `:66`).
 Control, same function, same tree: on the pre-instrumentation original report it
 returns **14 presence findings** — the presence half works; only the effect floor

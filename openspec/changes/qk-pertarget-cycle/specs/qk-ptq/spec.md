@@ -53,18 +53,18 @@ The TuneFP stage SHALL fire per-target within the factorization loop, ahead of e
 
 ### Requirement: The STE refinement SHALL run once per block over the block's whole factorized set
 
-The per-target STE cycle (AMEND ruling 2026-10-28, @user) SHALL replace the block-joint pass. Per [NQ] Sec 3.2 Step 3 prose (:641, "the current target linear layer", singular) and Figure 3 — not the block-scoped Algorithm 1 line 19 pseudocode (:780, one `TuneLatentSTE(b,X_b,Y_b;T_post)` call placed after the per-linear factorization loop closes) — the STE refinement SHALL fire N times per block, once per target linear after its factorization, each fire consuming the full [NQ] App. C factorized-stage budget per linear ([NQ] App. C :3005). The block-scoped pseudocode (:780) is declared a tension with the per-target prose (:641) and figure; the per-target reading is the governing interpretation per the 2026-10-28 AMEND ruling. The fidelity condition records this as `ste_per_target: true` (the AMEND path), `ste_block_joint: false` (the overruled path); the label `paper_faithful` SHALL be qualified by the prose-vs-pseudocode citation when downstream fidelity machinery keys on it. Per-target restoration adds ~6.1 h/run (v6b CPU: 1.02 h joint STE × 7 ≈ 7.1 h total, +6.1 h) / ~4.2 h/run (v7 GPU: 0.70 h joint → 4.9 h total, +4.2 h), measured from `quantize_report.json` STE stage rows. The `block_joint` scope marker retires (row vocabulary kept for old-report readability).
+The per-target STE cycle (AMEND ruling 2026-10-28, @user) SHALL replace the block-joint pass. Per [NQ] Sec 3.2 Step 3 prose (:641, "the current target linear layer", singular) and Figure 3 — not the block-scoped Algorithm 1 line 19 pseudocode (:780, one `TuneLatentSTE(b,X_b,Y_b;T_post)` call placed after the per-linear factorization loop closes) — the STE refinement SHALL fire N times per block, once per target linear after its factorization, each fire consuming the full [NQ] App. C factorized-stage budget per linear ([NQ] App. C :3005), against the block-output objective ([NQ] Eq. 10, :649–651). The block-scoped pseudocode (:780) is declared a tension with the per-target prose (:641) and figure; the per-target reading is the governing interpretation per the 2026-10-28 AMEND ruling. The fidelity condition records this as `ste_per_target: true` (the AMEND path), `ste_block_joint: false` (the overruled path); the label `paper_faithful` SHALL be qualified by the prose-vs-pseudocode citation when downstream fidelity machinery keys on it. Per-target restoration adds ~6.1 h/run (v6b CPU: 1.02 h joint STE × 7 ≈ 7.1 h total, +6.1 h) / ~4.2 h/run (v7 GPU: 0.70 h joint → 4.9 h total, +4.2 h), measured from `quantize_report.json` STE stage rows. The `block_joint` scope marker retires (row vocabulary kept for old-report readability).
 
 #### Scenario: ste_refines_all_factorized_linears_in_one_block_pass
 
 - **WHEN** a block carrying N factorized linears is reconstructed
 - **THEN** TuneLatentSTE is invoked N times for that block, once per target linear after its factorization — not once with all N linears as free parameters
-- **AND** each per-linear row carries that linear's own block-output objective measurement
+- **AND** each per-linear row carries that linear's own block-output objective ([NQ] Eq. 10, :649–651) measurement
 
 #### Scenario: per_target_ste_refines_one_linear_at_a_time
 
 - **WHEN** a block's reconstruction loop reaches target i after its factorization
-- **THEN** TuneLatentSTE fires on that single target linear against the block-output objective, consuming the full App. C factorized-stage budget (epochs × rows/batch steps at lr 1e-5, [NQ] App. C :3005)
+- **THEN** TuneLatentSTE fires on that single target linear against the block-output objective ([NQ] Eq. 10, :649–651), consuming the full App. C factorized-stage budget (epochs × rows/batch steps at lr 1e-5, [NQ] App. C :3005)
 - **AND** the stage record carries one per-linear row with that target's individual movement metrics
 
 #### Scenario: per_target_ste_cycle_sequence
@@ -153,7 +153,7 @@ The test `test_driver_stage_map.py` SHALL replace the overruled pin (`tune_fp.in
 
 #### Scenario: stage_evidence_gate_on_faithful
 
-- **WHEN** a report claims `paper_faithful_flag: true` (the claim that `--paper-faithful` was on the argv), regardless of the rolled-up `paper_faithful` verdict
+- **WHEN** a report's `fidelity_config` matches the paper regime per `config_matches_paper_regime`, regardless of the rolled-up `paper_faithful` verdict
 - **THEN** the gate verifies that STE's per-cycle net reduction exceeds `STEPS_EFFECT_EPS` for at least one linear — a no-op stage on a faithful run is a finding
 
 #### Scenario: stage_evidence_gate_on_non_faithful
@@ -201,7 +201,7 @@ TuneLatentSTE and TuneScalesKD lrs SHALL be [NQ] App. C absolute values (1e-5 fa
 
 ### Requirement: Eq. 8 scale extraction SHALL be the initialization contract with no global LS refit against W
 
-Magnitude balance SHALL output s1, s2 per [NQ] Eq. 8: row mean-abs of η-balanced latents. No global LS refit SHALL be folded into s1. The shipped scaled-product refit (`lb_admm.py:702–707`: `α = ⟨W, M⟩ / ‖M‖²_F` with `M = (s1⊙Ub)(s2⊙Vb)ᵀ`) SHALL be removed. The artifact sanity gate SHALL gain a per-layer unit-gain leg with the `norm_ratio` field read from `qk_quantized_layers`. This requirement depends on F1 for correct downstream compensation — F1 and F2 SHALL land together.
+Magnitude balance SHALL output s1, s2 per [NQ] Eq. 8: row mean-abs of η-balanced latents. No global LS refit SHALL be folded into s1; the shipped scaled-product refit SHALL be removed. The artifact sanity gate SHALL gain a per-layer unit-gain leg that recomputes the norm ratio from the qpk1 container and the fp weights. This requirement depends on the App.-C-absolute-lr requirement above; the two requirements SHALL land together.
 
 #### Scenario: scales_are_eq8_row_mean_abs_no_refit
 
@@ -211,7 +211,7 @@ Magnitude balance SHALL output s1, s2 per [NQ] Eq. 8: row mean-abs of η-balance
 
 #### Scenario: artifact_sanity_gate_per_layer_unit_gain
 
-- **WHEN** the artifact sanity gate inspects a quantized layer's packed product norm ratio against the original weight W, reading the `norm_ratio` field from `qk_quantized_layers`
+- **WHEN** the artifact sanity gate recomputes a quantized layer's packed product norm ratio against the original weight W, from the qpk1 container and the fp weights
 - **THEN** the ratio `‖(s1⊙Ub)(s2⊙Vb)ᵀ‖_F / ‖W‖_F` falls within the calibrated band
 - **AND** the band edges are derived from measured min/max across production layers, with explicit arithmetic on both sides and a suite test asserting the honest extremes pass
 
@@ -219,4 +219,4 @@ Magnitude balance SHALL output s1, s2 per [NQ] Eq. 8: row mean-abs of η-balance
 
 - **WHEN** the codebase is searched for the LS refit path inside magnitude_balance (the `alpha` computation `α = ⟨W, M⟩ / ‖M‖²_F` with `M = (s1⊙Ub)(s2⊙Vb)ᵀ`)
 - **THEN** the refit code does not exist — magnitude_balance scale output is Eq. 8 only
-- **AND** any consumer that previously depended on the refit's gain normalization receives the raw Eq. 8 scales and SHALL compensate through the downstream tuning stages (TuneLatentSTE, TuneScalesKD) operating at the correct App. C absolute lrs per F1, landed together with this requirement
+- **AND** any consumer that previously depended on the refit's gain normalization receives the raw Eq. 8 scales and SHALL compensate through the downstream tuning stages (TuneLatentSTE, TuneScalesKD) operating at the correct App. C absolute lrs per the App.-C-absolute-lr requirement above, landed together with this requirement
