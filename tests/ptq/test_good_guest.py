@@ -12,6 +12,7 @@ so every branch is constructible here without a loaded host.
 
 import pytest
 
+import quantibbler.good_guest as good_guest
 from quantibbler.good_guest import (
     PRE_IMPORT_ENV,
     apply_thread_env,
@@ -63,12 +64,18 @@ def test_scn_no_good_guest_disables():
     assert all(name not in env for name in PRE_IMPORT_ENV)
 
 
-def test_good_guest_sets_all_three_blas_variables():
+def test_good_guest_sets_all_three_blas_variables(monkeypatch):
     """OMP alone does not size the pool numpy actually uses.
 
     numpy's scipy-openblas is PTHREADS-backed, so OMP/MKL pins leave its pool at
     the visible-CPU count (measured 235.5s vs 3.98s). All three move together.
+
+    Host state is constructed, not read: the expectation must hold on any host,
+    including one small enough that the computed count is already at or below
+    the cap.
     """
+    monkeypatch.setattr(good_guest, "available_cores", lambda: 8)
+    monkeypatch.setattr(good_guest, "loadavg_1m", lambda: 1.0)
     plan = plan_from_argv(["--max-threads", "3"])
     env = {}
     apply_thread_env(plan, environ=env)
