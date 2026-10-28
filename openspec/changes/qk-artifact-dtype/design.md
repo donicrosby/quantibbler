@@ -12,6 +12,18 @@ accepts exactly `lm_head=<path>@fp32` (loader.rs:552-561), and the manifest
 `ScaleDtype` enum (lib.rs:40) declares the per-layer stream scales; the
 remainder has no equivalent.
 
+## Cross-change ruling: remainder dtype default ownership (2026-10-27)
+
+**Orchestrator ruling (2026-10-27):** The active
+`qk-pipeline-dtype` change owns the `--remainder-dtype` default (bf16, tracking
+compute_dtype). This change's default (fp32) and its byte-identity scenario
+RDW-1.1 must fold the pipeline-dtype default flip or sequence after it with an
+explicit `## Supersedes` note — it cannot land with the fp32 default intact.
+The export writer, manifest `[sidecar] dtype`, and report `remainder_dtype`
+field are co-owned: pipeline-dtype sets the default; qk-artifact-dtype defines
+the format contract. This ruling is recorded identically in
+`qk-pipeline-dtype/design.md` and `qk-pipeline-dtype/proposal.md`.
+
 ## D1 — Extension, not a version bump (byte-layout evidence)
 
 The remainder files carry NO self-describing header; their dtype lives only
