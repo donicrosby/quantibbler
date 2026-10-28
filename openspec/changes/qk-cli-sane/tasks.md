@@ -96,11 +96,15 @@
     the word "paper" or "faithful" in its help text. No citation of change ids
     or lane names.
 
-- [x] **5.2** Add a gate test that asserts `--help` output contains the expected
+- [ ] **5.2** (unticked: the verification this row named selected 0 tests, so the
+  tick was vacuous — the gate test does not exist yet) Add a gate test that
+  asserts `--help` output contains the expected
   sections ("Model and data:", "Solver and quality:", "Output:", "Resources:"),
   the surviving flag names, and does NOT contain the cut flag names or bot
   vocabulary.
-  - *Verification*: `uv run pytest tests/test_qk_report_stages.py -k "help"` — GREEN.
+  - *Verification*: `uv run pytest tests/ptq/test_driver_help_surface.py -k help` —
+    the gate test belongs in the ptq tier with the driver's other `--help`
+    invocations; the tick returns when it runs green.
 
 ## Phase 6 — Wrapper and CI migration (atomic with the parser cut)
 
