@@ -119,9 +119,8 @@ class FactorizedLinear(nn.Module):
 
         * accelerator: ``torch.linalg.svd`` at float32 accumulation dtype — an
           explicit, named accumulation site, not the device dtype;
-        * CPU: the NumPy float64 reference path, the executable specification the
-          accelerator lane is accepted against, cast to ``compute_dtype`` before
-          it is stored.
+        * CPU: the NumPy SVD verification fixture at the declared dtype
+          (float64), cast to ``compute_dtype`` before it is stored.
 
         Either way the returned module's parameters are ``compute_dtype``: the
         SVD is an initialization, not a storage decision.
@@ -144,8 +143,7 @@ class FactorizedLinear(nn.Module):
             else:
                 b0 = bias.detach().to(target)
             return cls(u0, v0, b0, compute_dtype=target)
-        # parity-oracle: float64 by design (the NumPy SVD init is the executable
-        # specification the accelerator lane is measured against).
+        # reference-path: float64 by design — the NumPy lane's declared dtype.
         w_np = weight.detach().to(torch.float64).cpu().numpy()
         u_mat, s_vec, vt_mat = np.linalg.svd(w_np, full_matrices=False)
         rr = min(rank, s_vec.size)

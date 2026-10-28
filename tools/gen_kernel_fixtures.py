@@ -3,8 +3,8 @@
 
 Emits one JSON file per scenario family into
 ``crates/quantibbler-kernels/tests/fixtures/``. Every record carries the
-scenario ID, the inputs, the NumPy-reference outputs (the executable
-specification), and the dtype/width metadata the Rust tests need.
+scenario ID, the inputs, the NumPy-reference outputs (the verification
+fixture at the declared dtype), and the dtype/width metadata the Rust tests need.
 
 Records carry a ``faces`` object; the ``numpy-reference`` face is always
 present. When ``quantibbler_kernels`` is importable (i.e. after
