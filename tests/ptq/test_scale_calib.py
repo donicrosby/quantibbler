@@ -140,11 +140,33 @@ def _kd_layer_book(model, rank: int = 4):
     return layers
 
 
+def _post_rebalance_reference(pre):
+    """The trust-region / restore basis is the POST-boundary-rebalance state.
+
+    F1 disposition (2026-10-28): ``calibrate_scales`` collapses each layer's
+    s1/s2 scale-class split product-invariantly at the STAGE BOUNDARY, before
+    it snapshots. Reproduce that basis here (same helper the stage calls) so
+    the bounds compare against what the stage actually references.
+    """
+    from quantibbler.ptq._stage_lr import rebalance_scale_pair
+
+    ref = {}
+    for name, (s1, s2) in pre.items():
+        s1_t = torch.from_numpy(np.array(s1, copy=True))
+        s2_t = torch.from_numpy(np.array(s2, copy=True))
+        rebalance_scale_pair(s1_t, s2_t)
+        ref[name] = (s1_t.numpy(), s2_t.numpy())
+    return ref
+
+
 def test_scn_kd_nonfinite_poison_restores_snapshot():
     """r137-v4 regression: with no armor, one non-finite student forward
     mid-KD poisoned Adam state and 72/196 layers exported NaN scales.
     Every poisoned tensor must come back as its exact pre-stage snapshot;
-    NaN must never reach the layer book (the export gate's last resort)."""
+    NaN must never reach the layer book (the export gate's last resort).
+
+    The snapshot is taken AFTER the F1 stage-boundary rebalance, so the
+    reference is the rebalanced state (``_post_rebalance_reference``)."""
     from quantibbler.ptq.config import StageHyper
 
     torch.manual_seed(0)
@@ -159,6 +181,7 @@ def test_scn_kd_nonfinite_poison_restores_snapshot():
     )
     layers = _kd_layer_book(model)
     pre = {n: (st.s1.copy(), st.s2.copy()) for n, st in layers.items()}
+    ref = _post_rebalance_reference(pre)
 
     # Bomb: the 3rd and later student forwards return NaN logits -> NaN
     # KL loss -> NaN grads -> Adam poisons every scale it touches.
@@ -181,17 +204,20 @@ def test_scn_kd_nonfinite_poison_restores_snapshot():
     assert any(not np.isfinite(v) for v in result.kl_trace)
     for name, st in layers.items():
         assert np.isfinite(st.s1).all() and np.isfinite(st.s2).all(), name
-        # Restored tensors are the EXACT pre-stage snapshot (a clipped NaN
-        # would not compare equal).
-        assert np.array_equal(st.s1, pre[name][0]), name
-        assert np.array_equal(st.s2, pre[name][1]), name
+        # Restored tensors are the EXACT post-boundary-rebalance snapshot (a
+        # clipped NaN would not compare equal).
+        assert np.array_equal(st.s1, ref[name][0]), name
+        assert np.array_equal(st.s2, ref[name][1]), name
 
 
 def test_scn_kd_trust_region_bounds_movement():
     """Adam's unit-scale steps at absolute lr 1e-3 must not randomize
     polished scales (v4: 128 steps x 1e-3 >> q_proj s1 ~ 1e-2). The
     per-entry trust region caps every scale within [0.5x, 2x] of its
-    pre-stage value even at an absurd learning rate."""
+    POST-boundary-rebalance value even at an absurd learning rate.
+
+    F1 disposition (2026-10-28): the reference is the rebalanced state the
+    stage snapshots, not the caller's pre-call copy."""
     from quantibbler.ptq.config import StageHyper
 
     torch.manual_seed(0)
@@ -203,14 +229,15 @@ def test_scn_kd_trust_region_bounds_movement():
     )
     layers = _kd_layer_book(model)
     pre = {n: (st.s1.copy(), st.s2.copy()) for n, st in layers.items()}
+    ref = _post_rebalance_reference(pre)
 
     teacher = _TinyKDModel(seed=1)
     calibrate_scales(model, layers, teacher, batches, cfg)
 
     for name, st in layers.items():
         assert np.isfinite(st.s1).all() and np.isfinite(st.s2).all(), name
-        p1 = np.maximum(np.abs(pre[name][0]), 1e-30)
-        p2 = np.maximum(np.abs(pre[name][1]), 1e-30)
+        p1 = np.maximum(np.abs(ref[name][0]), 1e-30)
+        p2 = np.maximum(np.abs(ref[name][1]), 1e-30)
         assert (st.s1 <= 2.0 * p1 + 1e-30).all() and (st.s1 >= 0.5 * p1 - 1e-30).all(), name
         assert (st.s2 <= 2.0 * p2 + 1e-30).all() and (st.s2 >= 0.5 * p2 - 1e-30).all(), name
 

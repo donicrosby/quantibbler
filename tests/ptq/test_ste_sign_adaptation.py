@@ -199,8 +199,14 @@ def test_scn_ste_records_its_own_objective_effect():
     # starting at its own optimum would make the effect assertion vacuous.
     y_b = linear(x_b).detach() + torch.randn(8, 4, 12, generator=gen, dtype=torch.float64) * 0.5
 
+    # F1 disposition (2026-10-28): balanced inputs step at the App. C ABSOLUTE
+    # lr, so the config lr IS the effective step (the polish-era relative form
+    # multiplied it by each tensor's median). At 1e-2 absolute the rank-6
+    # fixture's latents overshoot and the stage ASCENDS its objective; 1e-3 --
+    # the file's own balanced-regime lr -- descends it, which is what this pin
+    # asserts (an inert stage is the defect under test, not the step size).
     cfg = PTQConfig(
-        solver_backend="numpy", compute_dtype="float64", rank=6, stage_latent=StageHyper(1e-2, 4, 4)
+        solver_backend="numpy", compute_dtype="float64", rank=6, stage_latent=StageHyper(1e-3, 4, 4)
     )
     stats = _tune_latent_ste(linear, {"": fac}, x_b, y_b, cfg, 4, steps=256, label="probe")
     rec = stats["per_linear"][""]

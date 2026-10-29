@@ -16,6 +16,7 @@ import torch
 from torch import nn
 
 from ._factorized import FactorizedLinear, _quantized_forward_block, extract_and_pack
+from ._stage_lr import derive_stage_lr_groups, rebalance_scale_pair
 from ._stats import LOSS_WEIGHT_MEAN_NORMALIZATION, _forward_chunked, _optimizer_gradient_floor
 from .config import PTQConfig
 from .progress import ProgressReporter
@@ -119,18 +120,26 @@ def _tune_latent_ste(
     if not params:
         _stamp()
         return stats
-    # Per-tensor RELATIVE lr: one
-    # absolute lr for all four tensors let Adam step s1 — measured
-    # post-polish scale class 1e-7 vs s2's 1e4 — by ~5e4x its own magnitude
-    # per step, taking block-26 o_proj from nr 0.475 to 4.5e4 (cos negative)
-    # inside one stage. Each tensor now steps at lr_rel * ITS OWN median
-    # magnitude: the step is always relevant to the parameter class it
-    # walks, whatever geometry polish hands over.
-    groups = []
-    for p in params:
-        lr_scale = max(float(p.detach().abs().median()), 1e-30)
-        groups.append({"params": [p], "lr": cfg.stage_latent.lr * lr_scale, "lr_scale": lr_scale})
+    # Scale-class anchoring belongs at the STAGE BOUNDARY, not in the lr: before
+    # any step-size decision the s1/s2 pair is collapsed to a common median by
+    # an exact, product-invariant gamma rescale, so a split left by an upstream
+    # solve can never make one class's step irrelevant to it. The factor travels
+    # in the stage record.
+    rebalance: dict[str, float] = {}
+    with torch.no_grad():
+        for fac_name, fac in facs.items():
+            rebalance[fac_name] = rebalance_scale_pair(fac.s1.data, fac.s2.data)
+    # [NQ] App. C absolute lrs govern the balanced class; the polish-era
+    # per-tensor relative anchor survives only as the pathological else-branch.
+    # F1 disposition (2026-10-28): the relative anchor strangled effective steps
+    # 20-100x below App. C whenever the input was balanced.
+    groups, lr_provenance = derive_stage_lr_groups(params, cfg.stage_latent.lr)
     opt = torch.optim.Adam(groups)
+    stats["lr_class"] = lr_provenance["class"]
+    stats["lr_median"] = lr_provenance["median"]
+    stats["lr_effective"] = lr_provenance["effective_lr"]
+    stats["lr_groups"] = lr_provenance["groups"]
+    stats["rebalance_factor"] = rebalance
     # Same resolution-derived floor as TuneFP (qk-tune-loss-scale, requirement 2),
     # read off THIS optimizer's eps and THESE parameters' dtypes. With f64 latents
     # the product is ~2.2e-24, so the guard fires only for a weight scale that puts

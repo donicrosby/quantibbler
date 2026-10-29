@@ -23,6 +23,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from ._stage_lr import derive_stage_lr_groups, rebalance_scale_pair
 from .accumulation import accumulation_np_dtype
 from .block_recon import QuantizedLayerState
 from .config import PTQConfig
@@ -53,13 +54,33 @@ class ScaleCalibResult:
     Attributes:
         kl_trace: KL value after each optimization step (float64 list).
         n_steps: optimization steps executed.
+        lr_class: the stage's input classification, ``"balanced"`` (App. C
+            ABSOLUTE lrs) or ``"pathological"`` (per-tensor relative form).
+        lr_median: representative median magnitude behind that classification.
+        lr_effective: the lr actually applied to a group (the absolute value
+            when balanced, else the largest relative rate).
+        rebalance_factor: per-layer gamma of the product-invariant stage-boundary
+            rescale, so a consumer can unwind the scale split.
     """
 
-    __slots__ = ("kl_trace", "n_steps")
+    __slots__ = ("kl_trace", "n_steps", "lr_class", "lr_median", "lr_effective", "rebalance_factor")
 
-    def __init__(self, kl_trace: list[float], n_steps: int) -> None:
+    def __init__(
+        self,
+        kl_trace: list[float],
+        n_steps: int,
+        *,
+        lr_class: str | None = None,
+        lr_median: float | None = None,
+        lr_effective: float | None = None,
+        rebalance_factor: dict[str, float] | None = None,
+    ) -> None:
         self.kl_trace = kl_trace
         self.n_steps = n_steps
+        self.lr_class = lr_class
+        self.lr_median = lr_median
+        self.lr_effective = lr_effective
+        self.rebalance_factor = dict(rebalance_factor or {})
 
 
 def _kl_with_logits(teacher_logits: torch.Tensor, student_logits: torch.Tensor, temperature: float):
@@ -138,6 +159,14 @@ def calibrate_scales(
         name: torch.from_numpy(np.ascontiguousarray(st.Vb.astype(work_np))).to(device)
         for name, st in layers.items()
     }
+    # Scale-class anchoring at the STAGE BOUNDARY (F1): collapse each layer's
+    # s1/s2 median split product-invariantly BEFORE any step size is derived, so
+    # the optimizer sees the two classes as comparable. The factor is carried in
+    # the result for a consumer that needs to unwind it.
+    rebalance: dict[str, float] = {}
+    with torch.no_grad():
+        for name in layers:
+            rebalance[name] = rebalance_scale_pair(s1_params[name].data, s2_params[name].data)
     # Pre-stage snapshots (trust-region references + restore sources).
     # .detach()/.cpu() are no-ops on the host path and required once the tensors
     # are device-resident (a bare .numpy() raises there).
@@ -145,15 +174,12 @@ def calibrate_scales(
     pre_s2 = {n: t.detach().cpu().numpy().copy() for n, t in s2_params.items()}
     for t in (*s1_params.values(), *s2_params.values()):
         t.requires_grad_(True)
-    # Per-tensor RELATIVE lr: an
-    # absolute lr 1e-3 is irrelevant to the tensors it steps — at polish
-    # exit s1 can live at 1e-7 while s2 lives at 1e4, so one absolute rate
-    # is 1e4x too small for one side and 1e4x too big for the other. Each
-    # scale tensor now steps at lr_rel * its own median magnitude.
-    groups = []
-    for t in (*s1_params.values(), *s2_params.values()):
-        lr_scale = max(float(t.detach().abs().median()), 1e-30)
-        groups.append({"params": [t], "lr": cfg.stage_global.lr * lr_scale, "lr_scale": lr_scale})
+    # [NQ] App. C :3006 absolute lr (1e-6) governs the balanced class; the
+    # polish-era per-tensor relative anchor survives only as the pathological
+    # else-branch (F1 disposition, 2026-10-28).
+    groups, lr_provenance = derive_stage_lr_groups(
+        (*s1_params.values(), *s2_params.values()), cfg.stage_global.lr
+    )
     opt = torch.optim.Adam(groups)
 
     # Teacher logits, cached once ([NQ] Sec 3.3 memory note). Under a
@@ -326,4 +352,11 @@ def calibrate_scales(
             "(non-finite post-KD scales -> pre-stage snapshot)",
             flush=True,
         )
-    return ScaleCalibResult(kl_trace=kl_trace, n_steps=step)
+    return ScaleCalibResult(
+        kl_trace=kl_trace,
+        n_steps=step,
+        lr_class=lr_provenance["class"],
+        lr_median=lr_provenance["median"],
+        lr_effective=lr_provenance["effective_lr"],
+        rebalance_factor=rebalance,
+    )

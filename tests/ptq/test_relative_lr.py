@@ -1,16 +1,19 @@
-"""r137-v7 post-mortem regressions: per-tensor relative lr + gamma rebalance.
+"""r137-v7 post-mortem regressions: stage-boundary gamma rebalance.
 
 Measured mechanism chain (norm_probe, block 26 o_proj): polish exits
 healthy (nr 0.475, cos +0.475) but with the scale vectors 11 decades
 apart (s1 ~ 3e-7, s2 ~ 2.7e4 — legal, the product is gamma-invariant);
-STE's absolute lr 2e-3 then steps s1 by ~5e4x its own magnitude per
+STE's bare absolute lr then steps s1 by ~5e4x its own magnitude per
 step, ending the stage at nr 4.5e4 with cos NEGATIVE — the single
 largest artifact-quality defect in the pipeline's history.
 
-Fix under test: every tuning stage steps each tensor at
-lr_rel * median|tensor| (the step is always relevant to the parameter
-class it walks), and polish collapses any s1/s2 split at exit via the
-exact gamma rescale (product-invariant).
+Fix under test (F1 disposition, 2026-10-28): scale-class anchoring is the
+STAGE BOUNDARY's job — any s1/s2 split is collapsed by the exact,
+product-invariant gamma rescale BEFORE lr derivation, so the stage steps
+both classes at the [NQ] App. C absolute lr. The polish-era per-tensor
+relative form (``lr * median|p|``) this file originally pinned survives
+only as the pathological else-branch; it no longer governs the balanced
+class (see ``tests/ptq/test_f1_dispositions.py``).
 """
 
 import numpy as np
@@ -40,10 +43,16 @@ def _tiny_block(seed: int = 0):
     return linear, fac
 
 
-def test_scn_ste_relative_lr_preserves_scale_classes():
-    """At a nominal lr that is 1e6x too big for s1's scale class, the
-    per-tensor relative lr must keep s1's class intact (post-STE median
-    within 2x of entry) while still moving the latents."""
+def test_scn_scale_class_split_is_collapsed_at_the_stage_boundary():
+    """F1 disposition (2026-10-28): scale-class anchoring moved from the lr to
+    the STAGE BOUNDARY. A multi-decade s1/s2 split is collapsed
+    product-invariantly BEFORE lr derivation, so an absolute lr can no longer
+    strangle one class while blowing the other up: after the stage both classes
+    sit within ~4x of the rebalanced entry median.
+
+    Superseded shape (per-tensor relative lr, ``lr * median|p|``) was the
+    polish-era cure this replaces; the relative form survives only as the
+    pathological else-branch (``tests/ptq/test_f1_dispositions.py``)."""
     torch.manual_seed(0)
     linear, fac = _tiny_block()
     fac.s1.data.mul_(1e-6)  # force the split: s1 class ~1e-6, s2 ~1e0
@@ -57,17 +66,25 @@ def test_scn_ste_relative_lr_preserves_scale_classes():
     cfg = PTQConfig(
         solver_backend="numpy", compute_dtype="float64", rank=6, stage_latent=StageHyper(1e0, 4, 1)
     )  # brutal lr
-    _tune_latent_ste(linear, {"": fac}, x_b, y_b, cfg, 4)
+    stats = _tune_latent_ste(linear, {"": fac}, x_b, y_b, cfg, 4)
+
+    # The boundary rebalance collapsed the split: gamma == sqrt(median|s2|/median|s1|)
+    # takes s1's median to the geometric mid of the two classes, so
+    # ``pre_s1_med * gamma`` IS the post-rebalance s1 entry median.
+    gamma = stats["rebalance_factor"][""]
+    rebalanced_entry = pre_s1_med * gamma
 
     post_s1_med = float(fac.s1.detach().abs().median())
-    assert post_s1_med > 0.0
-    # Bound: per-step Adam movement ~ lr_rel * median; total steps <= 2
-    # here, so sane relative stepping lands within ~4x. The old absolute
-    # lr overshot this layer's s1 by ~5e4x PER STEP — two orders past
-    # this assert.
-    assert post_s1_med < 4.0 * pre_s1_med, (
-        f"s1 scale class not preserved: {pre_s1_med:.3e} -> {post_s1_med:.3e} "
-        "(absolute-lr blowup regression)"
+    post_s2_med = float(fac.s2.detach().abs().median())
+    assert post_s1_med > 0.0 and post_s2_med > 0.0
+    # Both classes leave the stage within ~4x of the rebalanced entry. The
+    # polish-era blowup this replaces was s1 overshooting by ~5e4x PER STEP
+    # under a bare absolute lr; the boundary rebalance is what removes it.
+    assert post_s1_med < 4.0 * rebalanced_entry, (
+        f"s1 class blown past the rebalanced entry: {rebalanced_entry:.3e} -> {post_s1_med:.3e}"
+    )
+    assert post_s2_med < 4.0 * rebalanced_entry, (
+        f"s2 class blown past the rebalanced entry: {rebalanced_entry:.3e} -> {post_s2_med:.3e}"
     )
 
 
