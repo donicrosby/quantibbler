@@ -16,8 +16,11 @@ start: truncated rank-r SVD of the preconditioned target (A-6).
 Latent magnitude balancing (Step 2-3, Eqs. 7-9) recovers the unscaled
 proxies Û = D~_out⁻¹ P_U and V̂ = D~_in⁻¹ P_V, computes η = sqrt(||V̂||_F /
 ||Û||_F), extracts per-row mean-absolute scales, and fixes the final
-latents U := η Û, V := η⁻¹ V̂. Dead channels (all-zero rows) receive a
-clamped scale floor and sign(0) = +1 at extraction (A-11).
+latents U := η Û, V := η⁻¹ V̂. The extracted scales are then renormalized to
+the continuous-product norm by a symmetric, target-free correction
+γ = sqrt(||UVᵀ||_F / ||M||_F), so the ±1-bitplane product carries the
+continuous product's scale. Dead channels (all-zero rows) receive a clamped
+scale floor and sign(0) = +1 at extraction (A-11).
 
 The solver computes in the DECLARED compute dtype (``PTQConfig.compute_dtype``,
 bf16 by default). Sites that SUM over the design -- the normal equations, the
@@ -30,6 +33,7 @@ float64 grade, which is what the fixtures pin.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 
@@ -123,9 +127,13 @@ class BalanceResult:
         U / V: final latents ``η Û`` / ``η⁻¹ V̂`` (float64).
         Ub / Vb: extracted binary factors ``sign(U)`` / ``sign(V)`` with
             sign(0) = +1 (int8, entries exactly ±1).
-        s1 / s2: scale vectors, per-row mean absolute values, dead rows
-            clamped to ``DEFAULT_SCALE_FLOOR`` (float64).
+        s1 / s2: scale vectors, per-row mean absolute values (Eq. 8) then
+            corrected by the serialization-faithfulness factor ``gamma``; dead
+            rows clamped to ``DEFAULT_SCALE_FLOOR`` (float64).
         eta: equilibrium factor of Eq. 7.
+        gamma: serialization-faithfulness correction factor applied to s1 and s2
+            (``1.0`` when the Eq. 8 product is already norm-faithful to the
+            continuous product).
     """
 
     U: np.ndarray
@@ -135,6 +143,7 @@ class BalanceResult:
     s1: np.ndarray
     s2: np.ndarray
     eta: float
+    gamma: float
 
 
 def _cholesky_factor(xp, h: np.ndarray, trace: ADMMTrace | None = None) -> np.ndarray:
@@ -638,15 +647,20 @@ def magnitude_balance(
     the binaries ``Ub = sign(U)``, ``Vb = sign(V)`` with sign(0) = +1.
     Dead rows (all-zero) receive the clamped ``scale_floor`` (A-11).
 
-    ``target``: the ORIGINAL (un-preconditioned) weight ``W``. Eq. 7 fixes
-    only the U/V norm *ratio*, not the absolute scale of the factorized
-    product ``Ub Vbᵀ ⊙ s``; the initialization-scale analysis (design
-    implementation notes, alpha refit) shows the raw balanced product can
-    sit orders of magnitude off ``W``. When ``target`` is given, the
-    remaining scalar degree of freedom is closed by the least-squares
-    global refit ``α = <W, Ub Vbᵀ> / ||Ub Vbᵀ||²_F``, folded into ``s1``
-    (informed implementation choice; Phase 3 recalibrates the scales
-    afterwards). Without ``target`` the Eq. 7 scale is kept as-is.
+    After Eq. 8 extraction the stage applies a serialization-faithfulness
+    correction. The ±1-bitplane substitution loses the continuous factors'
+    cancellation structure, so the serialized product
+    ``M = diag(s1) Ub Vbᵀ diag(s2)`` drifts from the continuous product
+    ``U Vᵀ`` by a per-layer factor. The scales are renormalized symmetrically by
+    ``γ = sqrt(||UVᵀ||_F / ||M||_F)`` — applied to both s1 and s2, so the Eq. 7
+    norm ratio is preserved — making ``||M||_F == ||UVᵀ||_F`` and recording γ in
+    ``BalanceResult.gamma``. A zero or non-finite product norm raises
+    ``ValueError`` rather than silently skipping.
+
+    ``target``: the ORIGINAL (un-preconditioned) weight ``W``. Retained in the
+    signature for call-site compatibility only — the correction is anchored to
+    the continuous-product norm the stage already holds and consumes no target,
+    so passing one does not change the returned scales.
     """
     # The device is resolved here, exactly as at the solve site: an explicit
     # QUANTIBBLER_DEVICE is honoured (the diagnostic/parity path a CPU-box driver
@@ -688,25 +702,27 @@ def magnitude_balance(
     s1 = xp.mean(xp.abs(u), axis=1)
     s2 = xp.mean(xp.abs(v), axis=1)
 
-    if target is not None:
-        w = xp.asarray(target, dtype=work)
-        if w.shape != (ub.shape[0], vb.shape[0]):
-            raise ValueError("target must have shape (dout, din)")
-        # Weighted global refit: the balanced product already carries the
-        # s1/s2 magnitudes, so the scalar degree of freedom is fitted
-        # against the CURRENT product M = (s1 ⊙ Ub)(s2 ⊙ Vb)ᵀ — fitting
-        # the raw sign matrix Ub Vbᵀ instead would charge the scales'
-        # magnitude twice and shrink the product orders of magnitude below
-        # W (observed as a ~0.99 relative reconstruction error on an exact
-        # rank-r target).
-        b = (s1[:, None] * xp.astype(ub, work)) @ (s2[:, None] * xp.astype(vb, work)).T
-        denom = float((b * b).sum())
-        if denom > 0.0:
-            alpha = float((w * b).sum()) / denom
-            if xp.isfinite(alpha) and alpha > 0.0:
-                s1 = s1 * alpha
+    # Serialization-faithfulness correction: renormalize the ±1-bitplane
+    # product to the continuous-product norm this stage already holds. It is
+    # symmetric (both scale vectors take the same γ) so the Eq. 7 norm ratio is
+    # unchanged, and it consumes no target, so it survives the removal of the
+    # W-based LS refit that previously masked this scale drift.
+    m_ser = (s1[:, None] * xp.astype(ub, work)) @ (s2[:, None] * xp.astype(vb, work)).T
+    norm_ser = float(xp.linalg.norm(m_ser, "fro"))
+    norm_cont = float(xp.linalg.norm(u @ v.T, "fro"))
+    if not (norm_ser > 0.0 and norm_cont > 0.0):
+        raise ValueError(
+            "serialization-faithfulness correction is undefined for a zero product norm"
+        )
+    gamma = math.sqrt(norm_cont / norm_ser)
+    if not math.isfinite(gamma):
+        raise ValueError(
+            "serialization-faithfulness correction is undefined for a non-finite ratio"
+        )
+    s1 = s1 * gamma
+    s2 = s2 * gamma
 
     # Dead-channel guard (A-11): clamp floors, never NaN or 0.
     s1 = xp.maximum(s1, scale_floor)
     s2 = xp.maximum(s2, scale_floor)
-    return BalanceResult(U=u, V=v, Ub=ub, Vb=vb, s1=s1, s2=s2, eta=eta)
+    return BalanceResult(U=u, V=v, Ub=ub, Vb=vb, s1=s1, s2=s2, eta=eta, gamma=gamma)

@@ -129,8 +129,8 @@ def test_scn_admm_consensus_convergence():
 
 def test_scn_scale_balancing():
     """magnitude_balancing_scales: Eq. 7 eta relation, Eq. 8 per-row mean
-    absolute scales, Eq. 9 final latents, and the dead-row scale floor
-    (A-11) in float64."""
+    absolute scales THEN the serialization-faithfulness correction, Eq. 9
+    final latents, and the dead-row scale floor (A-11) in float64."""
     gen = np.random.default_rng(5)
     u_hat = gen.standard_normal((7, 3))
     v_hat = gen.standard_normal((5, 3))
@@ -147,10 +147,13 @@ def test_scn_scale_balancing():
     # Eq. 7 relation on the final latents: ||η·Û||_F == ||η⁻¹·V̂||_F.
     assert np.linalg.norm(bal.U) == pytest.approx(np.linalg.norm(bal.V), rel=1e-12)
 
-    # Eq. 8: scales are per-row mean absolute values of the final latents.
+    # Eq. 8 extraction followed by the serialization-faithfulness correction:
+    # the returned scales are the extracted per-row mean absolute values scaled
+    # by gamma (the SAME gamma on both vectors, so the Eq. 7 ratio is preserved).
     assert bal.s1.shape == (7,) and bal.s2.shape == (5,)
-    assert np.allclose(bal.s1, np.mean(np.abs(bal.U), axis=1))
-    assert np.allclose(bal.s2, np.mean(np.abs(bal.V), axis=1))
+    assert bal.gamma > 0.0 and np.isfinite(bal.gamma)
+    assert np.allclose(bal.s1, bal.gamma * np.mean(np.abs(bal.U), axis=1))
+    assert np.allclose(bal.s2, bal.gamma * np.mean(np.abs(bal.V), axis=1))
     assert bal.U.dtype == np.float64 and bal.s1.dtype == np.float64
 
     # Eq. 9: final latents are the eta-scaled unscaled proxies.
