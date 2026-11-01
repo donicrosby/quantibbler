@@ -850,7 +850,7 @@ removed by the user's implementation commit — this docs commit does not carry
 it; trunk `magnitude_balance` (`lb_admm.py:691–707`) still folds the refit
 until that commit lands. Eq. 8 is the initialization contract. Downstream
 tuning stages (correctly calibrated per F1) compensate the gain. Artifact
-sanity gate gains a per-layer unit-gain leg with band edges calibrated on
+sanity gate gains a per-layer norm-band leg — the packed-product norm ratio is band-calibrated, not unity — with band edges calibrated on
 production layers.
 
 ### F3 — Refinement cycle (RULED 2026-10-28: AMEND)

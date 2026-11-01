@@ -104,7 +104,7 @@ The per-target STE pass SHALL weight the block-output loss by the terminal linea
 - **WHEN** a per-target pass runs on a block whose terminal statistic resolved to a weight
 - **THEN** the weight handed to the loss has unit mean, both pre- and post-normalization means are recorded, and the record carries the resolution-derived gradient floor
 
-### Requirement: The joint STE pass SHALL consume the App. C factorized-stage regime once per block
+### Requirement: The per-target STE pass SHALL consume the App. C factorized-stage regime afresh per target linear
 
 The per-target STE pass SHALL run `epochs × (rows // batch_size)` steps at the factorized stage's learning rate under the stage's cosine schedule ([NQ] App. C), consumed afresh for each target linear. The total budget across a block of N linears is N× that regime.
 
@@ -201,15 +201,15 @@ TuneLatentSTE and TuneScalesKD lrs SHALL be [NQ] App. C absolute values (1e-5 fa
 
 ### Requirement: Eq. 8 scale extraction SHALL be the initialization contract with no global LS refit against W
 
-Magnitude balance SHALL output s1, s2 per [NQ] Eq. 8: row mean-abs of η-balanced latents. No global LS refit SHALL be folded into s1; the shipped scaled-product refit SHALL be removed. The artifact sanity gate SHALL gain a per-layer unit-gain leg that recomputes the norm ratio from the qpk1 container and the fp weights. This requirement depends on the App.-C-absolute-lr requirement above; the two requirements SHALL land together.
+Magnitude balance SHALL output s1, s2 per [NQ] Eq. 8: row mean-abs of η-balanced latents, then apply a target-free serialization-faithfulness correction (not a fit against W). No global LS refit against W SHALL be folded into s1; the shipped α refit SHALL be removed. The artifact sanity gate SHALL gain a per-layer norm-band leg. This requirement depends on the App.-C-absolute-lr requirement; the two SHALL land together.
 
 #### Scenario: scales_are_eq8_row_mean_abs_no_refit
 
 - **WHEN** magnitude_balance processes balanced latents U, V with target=None
-- **THEN** the returned s1, s2 equal the per-row mean absolute values of ηU and η⁻¹V respectively
-- **AND** no scalar `α` multiplies s1 — the scale product `s1 ⊙ s2` carries exactly the magnitude information of the balanced latents
+- **THEN** the returned s1, s2 equal the per-row mean absolute values of ηU and η⁻¹V respectively, then carry the target-free serialization-faithfulness factor γ (anchored to the continuous-product norm)
+- **AND** no scalar `α` (an LS refit against W) multiplies s1 — the only scale correction is γ, which is not a fit against W
 
-#### Scenario: artifact_sanity_gate_per_layer_unit_gain
+#### Scenario: artifact_sanity_gate_per_layer_norm_band
 
 - **WHEN** the artifact sanity gate recomputes a quantized layer's packed product norm ratio against the original weight W, from the qpk1 container and the fp weights
 - **THEN** the ratio `‖(s1⊙Ub)(s2⊙Vb)ᵀ‖_F / ‖W‖_F` falls within the calibrated band
@@ -218,5 +218,10 @@ Magnitude balance SHALL output s1, s2 per [NQ] Eq. 8: row mean-abs of η-balance
 #### Scenario: global_refit_is_removed_from_magnitude_balance
 
 - **WHEN** the codebase is searched for the LS refit path inside magnitude_balance (the `alpha` computation `α = ⟨W, M⟩ / ‖M‖²_F` with `M = (s1⊙Ub)(s2⊙Vb)ᵀ`)
-- **THEN** the refit code does not exist — magnitude_balance scale output is Eq. 8 only
-- **AND** any consumer that previously depended on the refit's gain normalization receives the raw Eq. 8 scales and SHALL compensate through the downstream tuning stages (TuneLatentSTE, TuneScalesKD) operating at the correct App. C absolute lrs per the App.-C-absolute-lr requirement above, landed together with this requirement
+- **THEN** the refit code does not exist — magnitude_balance scale output is Eq. 8 initialization plus the target-free serialization-faithfulness correction γ (anchored to the continuous-product norm, not a fit against W)
+- **AND** any consumer that previously depended on the refit's gain normalization receives the Eq. 8 scales with the γ correction and SHALL compensate through the downstream tuning stages (TuneLatentSTE, TuneScalesKD) operating at the correct App. C absolute lrs per the App.-C-absolute-lr requirement above, landed together with this requirement
+
+## RENAMED Requirements
+
+- FROM: `### Requirement: The joint STE pass SHALL consume the App. C factorized-stage regime once per block`
+- TO: `### Requirement: The per-target STE pass SHALL consume the App. C factorized-stage regime afresh per target linear`
