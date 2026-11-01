@@ -340,9 +340,9 @@ def reconstruct_block(
             reason="absent_canonical_layer",
         )
     # --- Solver arm for THIS block's balance stage. ``magnitude_balance`` is
-    # part of the algorithm on EITHER backend, and it refits the solve that
-    # just ran, so
-    # it must resolve the arm exactly as ``lb_admm`` resolves its own solve:
+    # part of the algorithm on EITHER backend, and it renormalizes the
+    # serialized product the solve just produced, so it must resolve the arm
+    # exactly as ``lb_admm`` resolves its own solve:
     # SOLVER_BACKEND over cfg.solver_backend, an explicit QUANTIBBLER_DEVICE
     # honoured, implicit torch on a box with no accelerator refused. Resolving
     # it HERE is the point -- ``magnitude_balance``'s own default is
@@ -440,7 +440,6 @@ def reconstruct_block(
             p_v,
             d_out_t,
             d_in_t,
-            target=w,
             backend=balance_backend,
             dtype=accumulation_spec(cfg.compute_dtype),
         )

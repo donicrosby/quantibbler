@@ -634,7 +634,6 @@ def magnitude_balance(
     d_in_tilde: np.ndarray,
     *,
     scale_floor: float = DEFAULT_SCALE_FLOOR,
-    target: np.ndarray | None = None,
     backend: str | None = None,
     dtype: str = "float64",
 ) -> BalanceResult:
@@ -656,17 +655,13 @@ def magnitude_balance(
     norm ratio is preserved — making ``||M||_F == ||UVᵀ||_F`` and recording γ in
     ``BalanceResult.gamma``. A zero or non-finite product norm raises
     ``ValueError`` rather than silently skipping.
-
-    ``target``: the ORIGINAL (un-preconditioned) weight ``W``. Retained in the
-    signature for call-site compatibility only — the correction is anchored to
-    the continuous-product norm the stage already holds and consumes no target,
-    so passing one does not change the returned scales.
     """
     # The device is resolved here, exactly as at the solve site: an explicit
     # QUANTIBBLER_DEVICE is honoured (the diagnostic/parity path a CPU-box driver
     # exports), while implicit torch on a box with no accelerator still fails
     # closed in resolve_device. A balance that silently ran somewhere other than
-    # the solve it refits would be a device mismatch nothing records.
+    # the solve whose product it renormalizes would be a device mismatch nothing
+    # records.
     xp = get_backend(backend, device=os.environ.get("QUANTIBBLER_DEVICE"))
     # accumulation-site: the Frobenius norms (Eq. 7) and the per-row mean-absolute
     # scale extraction (Eq. 8) both SUM over many entries, so the stage runs at
@@ -705,8 +700,8 @@ def magnitude_balance(
     # Serialization-faithfulness correction: renormalize the ±1-bitplane
     # product to the continuous-product norm this stage already holds. It is
     # symmetric (both scale vectors take the same γ) so the Eq. 7 norm ratio is
-    # unchanged, and it consumes no target, so it survives the removal of the
-    # W-based LS refit that previously masked this scale drift.
+    # unchanged, and it is anchored to the continuous product rather than to W,
+    # so the serialized product stays norm-faithful with no target or refit input.
     m_ser = (s1[:, None] * xp.astype(ub, work)) @ (s2[:, None] * xp.astype(vb, work)).T
     norm_ser = float(xp.linalg.norm(m_ser, "fro"))
     norm_cont = float(xp.linalg.norm(u @ v.T, "fro"))

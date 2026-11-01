@@ -124,9 +124,7 @@ def test_scn_polish_gamma_rebalance_is_product_invariant():
     # only arm runnable on a box with no accelerator), while the production
     # default is torch and fails closed there by design. Every sibling call
     # site in the tier pins it the same way.
-    bal = magnitude_balance(
-        uu.copy(), vv.copy(), np.ones(24), np.ones(16), target=w, backend="numpy"
-    )
+    bal = magnitude_balance(uu.copy(), vv.copy(), np.ones(24), np.ones(16), backend="numpy")
     bal.s1 = bal.s1 * 1e-6  # force the split polish will inherit
 
     # bal.Ub/Vb are solver artifacts and may be device int8 tensors; int8 `@`

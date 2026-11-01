@@ -30,6 +30,8 @@ never a missing-attribute error.
 
 from __future__ import annotations
 
+import inspect
+
 import numpy as np
 import pytest
 import torch
@@ -129,19 +131,19 @@ def test_scn_correction_preserves_continuous_product_norm(seven_solved):
 
 
 def test_scn_correction_survives_target_removal(seven_solved):
-    """correction_survives_target_removal: the correction consumes NO target, so
-    the result is identical with and without one, and the serialized product
-    stays in the healthy band ``||M||_F / ||W||_F ∈ [0.5, 2.0]`` — LS-refit
-    removal is a semantic no-op.
+    """correction_survives_target_removal: with the LS α refit and its ``target``
+    parameter fully removed, the stage forms the serialized product from its own
+    latents with no target input, and ``||M||_F / ||W||_F`` stays in the healthy
+    band ``[0.5, 2.0]`` on the rank-3 fixture class — LS-refit removal is a
+    semantic no-op (the F2 end-state pin).
     """
+    # The removed parameter must be gone entirely, not merely ignored: the
+    # signature carries no `target` kwarg at all.
+    params = inspect.signature(magnitude_balance).parameters
+    assert "target" not in params, f"target survived the F2 removal: {list(params)}"
     for name, W, pu, pv, dout, din in seven_solved:
-        without = magnitude_balance(pu, pv, np.ones(dout), np.ones(din), backend="numpy")
-        with_t = magnitude_balance(pu, pv, np.ones(dout), np.ones(din), target=W, backend="numpy")
-        # Passing a target must not change a single returned scale: the
-        # correction is anchored to the continuous product, not to W.
-        assert np.array_equal(np.asarray(without.s1), np.asarray(with_t.s1)), name
-        assert np.array_equal(np.asarray(without.s2), np.asarray(with_t.s2)), name
-        m_ser = _serialized(without.s1, without.Ub, without.Vb, without.s2)
+        bal = magnitude_balance(pu, pv, np.ones(dout), np.ones(din), backend="numpy")
+        m_ser = _serialized(bal.s1, bal.Ub, bal.Vb, bal.s2)
         ratio_w = _fro(m_ser) / _fro(W)
         assert 0.5 <= ratio_w <= 2.0, f"{name}: ||M||_F / ||W||_F = {ratio_w!r} outside band"
 
