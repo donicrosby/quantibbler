@@ -137,3 +137,39 @@ def test_scn_artifact_sanity_gate_per_layer_norm_band():
     assert measured_min >= lo, f"honest min {measured_min!r} below the calibrated floor {lo!r}"
     assert measured_max <= hi, f"honest max {measured_max!r} above the calibrated ceiling {hi!r}"
     assert unit_gain_findings(ratios) == []
+
+
+# --------------------------------------------------------------------------
+# The tier split the artifact-reading arm depends on (the zero-skip CI contract)
+# --------------------------------------------------------------------------
+
+#: The arm whose claim needs a resolvable production artifact, and the
+#: deterministic reference legs that carry this file in the default tier.
+#: Naming them here is what lets the pin below assert the split instead of
+#: trusting that it was written correctly.
+_ARTIFACT_LEGS = (test_scn_artifact_sanity_gate_per_layer_norm_band,)
+_REFERENCE_LEGS = (
+    test_unit_gain_ratio_is_unity_for_an_exact_factorization,
+    test_unit_gain_gate_flags_gain_collapse_and_blowup,
+    test_unit_gain_band_is_declared_tight_around_the_measured_production_range,
+)
+
+
+def test_unit_gain_artifact_leg_is_deselected_and_the_reference_legs_are_not() -> None:
+    """The artifact-reading arm needs a production artifact; the default tier must not skip.
+
+    The full tier's referee fails on ANY skip, so a leg that can only skip where
+    no production artifact is resolvable is held out of the default tier by the
+    ``integration`` marker (deselected, never counted as a skip) while its
+    resolution skip keeps the requirement reportable in ``pytest -m integration``.
+    Both halves are asserted, because either mistake re-reds CI: the arm left
+    unmarked SKIPS on a runner with no artifact, and a reference leg marked with
+    the marker silently drops this file's default-tier coverage.
+    """
+    for leg in _ARTIFACT_LEGS:
+        marks = {mark.name for mark in getattr(leg, "pytestmark", ())}
+        assert "integration" in marks, f"{leg.__name__} still runs in the default tier"
+    for leg in _REFERENCE_LEGS:
+        assert not any(mark.name == "integration" for mark in getattr(leg, "pytestmark", ())), (
+            f"{leg.__name__} runs everywhere and carries the default tier"
+        )
